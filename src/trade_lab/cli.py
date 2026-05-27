@@ -14,7 +14,12 @@ from .backtest.plotting import plot_equity_curve
 from .backtest.reports import trades_to_dataframe, write_trades_csv
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
-from .data.storage import candles_path, load_candles, save_candles
+from .data.storage import (
+    candles_path,
+    filter_candles_by_date,
+    load_candles,
+    save_candles,
+)
 from .strategies.base import Strategy
 from .strategies.rsi import RSIMeanReversionStrategy
 from .strategies.sma_cross import SMACrossStrategy
@@ -95,6 +100,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             timeframe=args.timeframe,
         )
 
+    candles = filter_candles_by_date(
+        candles, start_date=args.start_date, end_date=args.end_date
+    )
+    if candles.empty:
+        raise SystemExit(
+            f"No candles in range [{args.start_date or '...'}, "
+            f"{args.end_date or '...'}]"
+        )
+
     strategy_cls = STRATEGIES[args.strategy]
     params = _parse_params(args.param)
     strategy = strategy_cls(**params)
@@ -111,9 +125,14 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     )
     metrics = compute_metrics(result)
 
+    fmt = "%Y-%m-%d %H:%M"
+    period_start = candles.index[0].strftime(fmt)
+    period_end = candles.index[-1].strftime(fmt)
+
     print()
     print(f"Strategy:             {strategy.name}")
     print(f"Symbol/timeframe:     {args.symbol} {args.timeframe}")
+    print(f"Period:               {period_start} to {period_end}")
     print(f"Bars:                 {len(candles)}")
     print(f"Initial cash:         ${metrics.initial_capital:,.2f}")
     print()
@@ -194,6 +213,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--symbol", default="BTC/USDT")
     p_bt.add_argument("--timeframe", default="1h")
     p_bt.add_argument("--exchange", default=None)
+    p_bt.add_argument(
+        "--start-date",
+        default=None,
+        help="Filter candles from this date inclusive (YYYY-MM-DD)",
+    )
+    p_bt.add_argument(
+        "--end-date",
+        default=None,
+        help="Filter candles through this date inclusive (YYYY-MM-DD)",
+    )
     p_bt.add_argument("--initial-cash", type=float, default=None, help="Starting capital")
     p_bt.add_argument("--fee-rate", type=float, default=None, help="Per-side fee rate")
     p_bt.add_argument("--slippage", type=float, default=None, help="Per-side slippage rate")

@@ -78,11 +78,32 @@ You can also point at a Parquet file directly:
 trade-lab backtest --strategy sma_cross --input data/binance_BTC_USDT_1h.parquet
 ```
 
+Restrict the backtest to a sub-window with `--start-date` and `--end-date`
+(both inclusive at the day level — `--end-date 2024-06-30` keeps every bar
+through `2024-06-30 23:59`). This is how you carve train vs test splits
+without refetching:
+
+```bash
+# Train window
+trade-lab backtest --strategy sma_cross \
+    --start-date 2023-01-01 --end-date 2023-12-31 \
+    --param fast_period=20 --param slow_period=100
+
+# Test window
+trade-lab backtest --strategy sma_cross \
+    --start-date 2024-01-01 --end-date 2024-06-30 \
+    --param fast_period=20 --param slow_period=100
+```
+
+The actual tested window is echoed in the report's `Period:` line along with
+the bar count, so you can confirm the slice landed where you expected.
+
 Sample output:
 
 ```
 Strategy:             sma_cross
 Symbol/timeframe:     BTC/USDT 1h
+Period:               2024-01-01 00:00 to 2024-01-15 23:00
 Bars:                 400
 Initial cash:         $10,000.00
 
