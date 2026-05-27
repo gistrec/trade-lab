@@ -108,6 +108,27 @@ under `outputs/` by default; pass `--save-plot PATH` to override,
 `--show-plot` to also display it interactively, or `--no-plot` to skip
 plotting entirely.
 
+### Visually verifying entries / exits
+
+Pass `--show-trades` to add a price panel above the equity panel with buy and
+sell markers:
+
+```bash
+trade-lab backtest --strategy sma_cross --show-trades
+```
+
+Markers are placed on the **execution candle** (the bar where the engine
+actually holds the position), not the signal candle. This matters for
+look-ahead checks: signal at bar `N` is shifted into a position at bar `N+1`,
+so the green ▲ should sit on the bar after the cross — never on the bar that
+produced the cross itself. If you ever see a marker on a candle whose close
+*caused* the signal, that's the smell of look-ahead bias.
+
+Note: `Trade.entry_time` in the engine's result records the signal bar (the
+close where the decision was made); the marker derived from
+`execution_bars(positions)` records the bar after — they're intentionally
+one bar apart.
+
 ## Reading the output metrics
 
 | Metric                | What it means                                                                                       |

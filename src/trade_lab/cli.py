@@ -145,9 +145,11 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
     plot_equity_curve(
         result,
+        candles=candles,
         title=f"{strategy.name} on {args.symbol} {args.timeframe}",
         save_path=save_path,
         show=args.show_plot,
+        show_trades=args.show_trades,
     )
     print(f"Plot saved to {save_path}")
 
@@ -198,6 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bt.add_argument("--show-plot", action="store_true", help="Also display the plot interactively")
     p_bt.add_argument("--no-plot", action="store_true", help="Skip plotting entirely")
+    p_bt.add_argument(
+        "--show-trades",
+        action="store_true",
+        help="Add a price panel with buy/sell markers on execution candles",
+    )
     p_bt.set_defaults(func=cmd_backtest)
 
     return parser

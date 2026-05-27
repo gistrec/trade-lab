@@ -124,6 +124,33 @@ def run_backtest(
     )
 
 
+def execution_bars(positions: pd.Series) -> tuple[List[int], List[int]]:
+    """Return integer indices where ``positions`` transitions to/from long.
+
+    These are the *execution candles* — the bars during which the engine
+    actually holds (or first stops holding) a position after the look-ahead
+    shift. A signal generated at bar ``N`` (close of bar N) becomes the
+    position at bar ``N+1``; that bar ``N+1`` is what this helper returns
+    for the entry, not the signal bar.
+
+    Exits are the first bar where ``positions`` drops back to zero. If a
+    position is still open at the end of the series there is no
+    corresponding exit index — visualizing that gap is the point.
+    """
+    entries: List[int] = []
+    exits: List[int] = []
+    in_position = False
+    for i, pos in enumerate(positions):
+        is_long = pos > 0
+        if is_long and not in_position:
+            entries.append(i)
+            in_position = True
+        elif not is_long and in_position:
+            exits.append(i)
+            in_position = False
+    return entries, exits
+
+
 def _extract_trades(
     positions: pd.Series,
     close: pd.Series,

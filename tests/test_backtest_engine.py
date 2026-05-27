@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from trade_lab.backtest.engine import run_backtest
+from trade_lab.backtest.engine import execution_bars, run_backtest
 from trade_lab.strategies.base import Strategy
 
 
@@ -158,6 +158,79 @@ def test_buy_and_hold_scales_with_initial_capital():
     big_ratio = big.buy_and_hold_equity.iloc[-1] / big.buy_and_hold_equity.iloc[0]
     assert small_ratio == pytest.approx(big_ratio)
     assert small_ratio == pytest.approx(2.0)
+
+
+def test_execution_bars_finds_position_transitions():
+    idx = pd.date_range("2024-01-01", periods=9, freq="1h")
+    positions = pd.Series(
+        [0, 0, 1, 1, 0, 0, 1, 1, 0], index=idx, dtype=float
+    )
+    entries, exits = execution_bars(positions)
+    assert entries == [2, 6]
+    assert exits == [4, 8]
+
+
+def test_execution_bars_with_open_position_at_end():
+    idx = pd.date_range("2024-01-01", periods=4, freq="1h")
+    positions = pd.Series([0, 1, 1, 1], index=idx, dtype=float)
+    entries, exits = execution_bars(positions)
+    assert entries == [1]
+    # Still open at the end -> no exit transition; markers correctly miss this.
+    assert exits == []
+
+
+def test_execution_bar_is_one_after_signal_bar():
+    # Only one signal at index 3. After shift(1), the position becomes 1 at
+    # index 4 — that's the execution bar, the one the marker should land on.
+    candles = _candles([100] * 8)
+    result = run_backtest(
+        candles,
+        _SignalStrategy([0, 0, 0, 1, 0, 0, 0, 0]),
+        initial_capital=10_000,
+        fee_rate=0,
+        slippage_rate=0,
+    )
+    # Confirm look-ahead invariant in positions space.
+    assert result.positions.iloc[3] == 0
+    assert result.positions.iloc[4] == 1
+    assert result.positions.iloc[5] == 0
+
+    entries, exits = execution_bars(result.positions)
+    assert entries == [4]
+    assert exits == [5]
+
+
+def test_execution_bar_does_not_match_trade_entry_time():
+    # The engine records Trade.entry_time at the SIGNAL bar; the marker
+    # should land on the EXECUTION bar, which is one bar later.
+    candles = _candles([100, 100, 100, 100])
+    result = run_backtest(
+        candles,
+        _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000,
+        fee_rate=0,
+        slippage_rate=0,
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    entries, exits = execution_bars(result.positions)
+
+    # Engine's stored entry_time is the bar BEFORE the position was held.
+    assert trade.entry_time == candles.index[1]
+    # The actual execution candle is one bar later.
+    assert candles.index[entries[0]] == candles.index[2]
+    assert candles.index[entries[0]] != trade.entry_time
+
+
+def test_execution_bars_count_matches_trade_count_for_closed_trades():
+    candles = _candles([100, 101, 102, 103, 104, 105, 106, 107, 108])
+    strat = _SignalStrategy([0, 1, 1, 0, 0, 1, 0, 0, 0])
+    result = run_backtest(
+        candles, strat, initial_capital=10_000, fee_rate=0, slippage_rate=0
+    )
+    entries, exits = execution_bars(result.positions)
+    # positions = [0, 0, 1, 1, 0, 0, 1, 0, 0] — two cleanly closed trades.
+    assert len(entries) == len(exits) == len(result.trades) == 2
 
 
 def test_strategy_is_independent_of_buy_and_hold_curve():
