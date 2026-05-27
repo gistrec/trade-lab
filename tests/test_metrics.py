@@ -11,11 +11,16 @@ def _result(
     initial=10_000,
     buy_and_hold_return=0.0,
     total_fees=0.0,
+    buy_and_hold_equity=None,
 ):
     idx = pd.date_range("2024-01-01", periods=len(equity_values), freq="1D")
     equity = pd.Series(equity_values, index=idx, dtype=float)
     returns = equity.pct_change().fillna(0)
     positions = pd.Series([0.0] * len(equity_values), index=idx, dtype=float)
+    if buy_and_hold_equity is None:
+        bh = pd.Series(dtype=float)
+    else:
+        bh = pd.Series(buy_and_hold_equity, index=idx, dtype=float)
     return BacktestResult(
         equity=equity,
         returns=returns,
@@ -26,6 +31,7 @@ def _result(
         slippage_rate=0.0,
         total_fees=total_fees,
         buy_and_hold_return=buy_and_hold_return,
+        buy_and_hold_equity=bh,
     )
 
 
@@ -72,6 +78,28 @@ def test_buy_and_hold_and_total_fees_pass_through():
     assert m.total_fees == pytest.approx(42.5)
     assert m.final_equity == pytest.approx(10_500)
     assert m.initial_capital == pytest.approx(10_000)
+
+
+def test_buy_and_hold_final_equity_and_drawdown_are_reported():
+    # Strategy equity is flat, buy & hold dips deeply.
+    # bh peak = 12_000, trough = 8_000 -> DD = (12-8)/12 = 1/3
+    result = _result(
+        [10_000, 10_000, 10_000, 10_000, 10_000, 10_000],
+        buy_and_hold_return=0.0,
+        buy_and_hold_equity=[10_000, 12_000, 9_000, 8_000, 11_000, 10_000],
+    )
+    m = compute_metrics(result)
+    assert m.buy_and_hold_final_equity == pytest.approx(10_000)
+    assert m.buy_and_hold_max_drawdown == pytest.approx(1 / 3, rel=1e-3)
+    # Strategy max drawdown is 0 since strategy equity never moves.
+    assert m.max_drawdown == pytest.approx(0.0)
+
+
+def test_buy_and_hold_metrics_default_to_zero_when_curve_missing():
+    result = _result([10_000, 10_500])
+    m = compute_metrics(result)
+    assert m.buy_and_hold_final_equity == pytest.approx(0.0)
+    assert m.buy_and_hold_max_drawdown == pytest.approx(0.0)
 
 
 def test_win_rate_and_averages():

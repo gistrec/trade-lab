@@ -85,20 +85,28 @@ Strategy:             sma_cross
 Symbol/timeframe:     BTC/USDT 1h
 Bars:                 400
 Initial cash:         $10,000.00
-Final equity:         $13,533.00
-Total return:         35.33%
-Buy & hold return:    50.26%
-Max drawdown:         3.70%
-Number of trades:     1
-Win rate:             100.00%
-Average trade:        35.33%
-Fees paid:            $10.00
+
+Strategy
+  Final equity:       $13,533.00
+  Total return:       35.33%
+  Max drawdown:       3.70%
+  Number of trades:   1
+  Win rate:           100.00%
+  Average trade:      35.33%
+  Fees paid:          $10.00
+
+Buy & hold
+  Final equity:       $15,026.00
+  Total return:       50.26%
+  Max drawdown:       4.81%
 Plot saved to outputs/sma_cross_BTC_USDT_1h.png
 ```
 
-The equity curve (with a drawdown panel underneath) is saved under `outputs/`
-by default; pass `--save-plot PATH` to override, `--show-plot` to also display
-it interactively, or `--no-plot` to skip plotting entirely.
+The plot shows the strategy equity curve and the buy-and-hold equity curve on
+the same axes, with a strategy-only drawdown panel underneath. It is saved
+under `outputs/` by default; pass `--save-plot PATH` to override,
+`--show-plot` to also display it interactively, or `--no-plot` to skip
+plotting entirely.
 
 ## Reading the output metrics
 
@@ -107,15 +115,22 @@ it interactively, or `--no-plot` to skip plotting entirely.
 | **Initial cash**      | Starting equity. Fed by `--initial-cash` (env: `TRADE_LAB_INITIAL_CAPITAL`).                        |
 | **Final equity**      | Equity at the last bar after fees and slippage.                                                     |
 | **Total return**      | `(final_equity / initial_cash) - 1`, expressed as a percentage. Net of fees and slippage.           |
-| **Buy & hold return** | Gross asset return over the period (`close[-1] / close[0] - 1`). Useful baseline.                   |
 | **Max drawdown**      | Worst peak-to-trough decline of the equity curve, reported as a positive percentage.                |
 | **Number of trades**  | Round-trip long trades. An open trade at the end of the window is closed at the last bar.           |
 | **Win rate**          | Share of trades with a positive net P/L.                                                            |
 | **Average trade**     | Mean net return per trade (compounded fees/slippage included).                                      |
 | **Fees paid**         | Cumulative dollar fees paid across all rebalances. Slippage is *not* included here.                 |
 
-The CLI sometimes saves an equity curve plot you can inspect alongside the
-numbers — the underwater panel makes drawdown intuitive at a glance.
+The **Buy & hold** block reports the same starting cash parked in the asset at
+the first bar and held to the last bar (no fees). It produces three figures —
+*final equity*, *total return*, and *max drawdown* — so you can see whether
+the strategy actually beat just holding the asset, and how much of the peak
+equity it gave back relative to a passive position.
+
+The CLI also saves an equity curve plot under `outputs/` showing strategy and
+buy-and-hold equity on the same axes, with a strategy-only underwater panel
+underneath — useful for eyeballing whether outperformance is real or whether
+the strategy is just along for the ride.
 
 ## Backtest assumptions
 

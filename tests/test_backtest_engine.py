@@ -120,6 +120,61 @@ def test_buy_and_hold_return_is_close_to_close():
     assert result.buy_and_hold_return == pytest.approx(0.5)
 
 
+def test_buy_and_hold_equity_tracks_price():
+    closes = [100, 110, 121, 120]
+    candles = _candles(closes)
+    result = run_backtest(
+        candles,
+        _SignalStrategy([0] * 4),
+        initial_capital=10_000,
+        fee_rate=0,
+        slippage_rate=0,
+    )
+    bh = result.buy_and_hold_equity
+    assert bh.index.equals(candles.index)
+    assert bh.iloc[0] == pytest.approx(10_000)
+    assert bh.iloc[1] == pytest.approx(11_000)
+    assert bh.iloc[2] == pytest.approx(12_100)
+    assert bh.iloc[3] == pytest.approx(12_000)
+    # scalar buy_and_hold_return should agree with the curve
+    assert bh.iloc[-1] / bh.iloc[0] - 1 == pytest.approx(result.buy_and_hold_return)
+
+
+def test_buy_and_hold_scales_with_initial_capital():
+    candles = _candles([100, 200])
+    small = run_backtest(
+        candles, _SignalStrategy([0, 0]),
+        initial_capital=10_000, fee_rate=0, slippage_rate=0,
+    )
+    big = run_backtest(
+        candles, _SignalStrategy([0, 0]),
+        initial_capital=50_000, fee_rate=0, slippage_rate=0,
+    )
+    # First bar parks the initial cash 1:1 into the asset.
+    assert small.buy_and_hold_equity.iloc[0] == pytest.approx(10_000)
+    assert big.buy_and_hold_equity.iloc[0] == pytest.approx(50_000)
+    # Both should end up with the same asset-return ratio.
+    small_ratio = small.buy_and_hold_equity.iloc[-1] / small.buy_and_hold_equity.iloc[0]
+    big_ratio = big.buy_and_hold_equity.iloc[-1] / big.buy_and_hold_equity.iloc[0]
+    assert small_ratio == pytest.approx(big_ratio)
+    assert small_ratio == pytest.approx(2.0)
+
+
+def test_strategy_is_independent_of_buy_and_hold_curve():
+    # A strategy that's flat the whole time should produce a constant equity
+    # curve while the buy & hold curve tracks the price.
+    candles = _candles([100, 105, 110, 95])
+    result = run_backtest(
+        candles,
+        _SignalStrategy([0, 0, 0, 0]),
+        initial_capital=10_000,
+        fee_rate=0,
+        slippage_rate=0,
+    )
+    assert (result.equity == 10_000).all()
+    assert not (result.buy_and_hold_equity == 10_000).all()
+
+
 def test_fees_and_slippage_reduce_returns():
     closes = [100, 100, 110, 110, 110]
     signals = [0, 1, 1, 0, 0]

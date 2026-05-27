@@ -14,7 +14,8 @@ def plot_equity_curve(
     save_path: Path | str | None = None,
     show: bool = False,
 ) -> None:
-    """Render the equity curve and a drawdown panel for ``result``."""
+    """Render the equity curve (with buy-and-hold overlay) and a strategy
+    drawdown panel for ``result``."""
     equity = result.equity
     if equity.empty:
         raise ValueError("Nothing to plot: equity curve is empty")
@@ -27,11 +28,20 @@ def plot_equity_curve(
         gridspec_kw={"height_ratios": [3, 1]},
     )
 
-    ax_eq.plot(equity.index, equity.values, color="tab:blue", label="Equity")
+    ax_eq.plot(
+        equity.index, equity.values,
+        color="tab:blue", linewidth=1.5, label="Strategy",
+    )
+    bh_equity = result.buy_and_hold_equity
+    if not bh_equity.empty:
+        ax_eq.plot(
+            bh_equity.index, bh_equity.values,
+            color="tab:orange", linestyle="--", linewidth=1.2, label="Buy & hold",
+        )
     ax_eq.axhline(
         result.initial_capital,
         color="gray",
-        linestyle="--",
+        linestyle=":",
         linewidth=0.8,
         label="Initial",
     )
@@ -41,7 +51,7 @@ def plot_equity_curve(
     ax_eq.legend(loc="best")
 
     ax_dd.fill_between(drawdown.index, drawdown.values, 0, color="tab:red", alpha=0.4)
-    ax_dd.set_ylabel("Drawdown")
+    ax_dd.set_ylabel("Strategy DD")
     ax_dd.set_xlabel("Time")
     ax_dd.grid(True, alpha=0.3)
 

@@ -34,6 +34,9 @@ class BacktestResult:
     slippage_rate: float = 0.0
     total_fees: float = 0.0
     buy_and_hold_return: float = 0.0
+    buy_and_hold_equity: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype=float)
+    )
 
 
 def run_backtest(
@@ -98,6 +101,9 @@ def run_backtest(
     prior_equity = equity.shift(1).fillna(initial_capital)
     total_fees = float((turnover * fee_rate * prior_equity).sum())
 
+    # Buy-and-hold benchmark: park the same starting cash in the asset at the
+    # first bar and mark-to-market every subsequent bar. No fees.
+    buy_and_hold_equity = initial_capital * (close / close.iloc[0])
     buy_and_hold_return = (
         float(close.iloc[-1] / close.iloc[0] - 1) if len(close) >= 2 else 0.0
     )
@@ -114,6 +120,7 @@ def run_backtest(
         slippage_rate=slippage_rate,
         total_fees=total_fees,
         buy_and_hold_return=buy_and_hold_return,
+        buy_and_hold_equity=buy_and_hold_equity,
     )
 
 
