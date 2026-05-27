@@ -22,12 +22,14 @@ from .data.storage import (
     save_candles,
 )
 from .strategies.base import Strategy
+from .strategies.regime_sma_cross import RegimeSMACrossStrategy
 from .strategies.rsi import RSIMeanReversionStrategy
 from .strategies.sma_cross import SMACrossStrategy
 
 
 STRATEGIES: dict[str, type[Strategy]] = {
     "sma_cross": SMACrossStrategy,
+    "regime_sma_cross": RegimeSMACrossStrategy,
     "rsi": RSIMeanReversionStrategy,
 }
 

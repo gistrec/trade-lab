@@ -445,7 +445,25 @@ Daily SMA crossovers are a classic comparison point. Expect very few
 trades (single digits per year) and a `Verdict:` that's heavily driven
 by whether you caught the big moves.
 
-### 3. Slower SMA pairs (50 / 200, the "Golden cross")
+### 3a. Regime-filtered SMA crossover
+
+`regime_sma_cross` is the same fast-vs-slow crossover but gated by a
+long-term regime SMA — it only takes longs while price is above the
+regime line. The aim is to skip the false signals during bear regimes
+that drag the plain crossover below buy & hold:
+
+```bash
+trade-lab backtest \
+    --strategy regime_sma_cross --symbol BTC/USDT --timeframe 1d \
+    --param fast_period=20 --param slow_period=100 --param regime_period=200
+```
+
+Expect fewer trades, much smaller drawdown during downtrends, and often
+a `LOWER_RETURN_LOWER_DD` verdict on bull-only windows (you give up some
+upside for the regime guard). Compare against the plain `sma_cross`
+with the same fast/slow on the same window.
+
+### 3b. Slower SMA pairs (50 / 200, the "Golden cross")
 
 The 50/200 crossover is the textbook trend filter. On crypto it triggers
 rarely; on daily bars it might trigger once a year.
