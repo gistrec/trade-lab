@@ -407,6 +407,74 @@ fee/slippage handling, trade extraction, position sizing, total-fee
 calculation, buy & hold), and metrics (returns, max drawdown across multiple
 peaks).
 
+## Suggested next experiments
+
+A few small studies that are easy to run with what's already shipped — each
+generates an equity curve and a buy-and-hold overlay you can compare in
+the report or the Streamlit dashboard.
+
+### 1. BTC/USDT on the 4-hour timeframe
+
+The hourly default is noisy; 4h smooths out a lot of intrabar wiggle and
+usually trades a lot less.
+
+```bash
+trade-lab fetch  --symbol BTC/USDT --timeframe 4h --since 2023-01-01
+trade-lab backtest \
+    --strategy sma_cross --symbol BTC/USDT --timeframe 4h \
+    --param fast_period=20 --param slow_period=100
+```
+
+Compare the `Verdict:` line and the `Buy & hold` block against the 1h
+defaults — does smoothing actually help, or just push the trade count
+down without improving net return?
+
+### 2. BTC/USDT on the 1-day timeframe
+
+Slower data lets you backtest longer windows cheaply and is what most
+"trend-following" research uses.
+
+```bash
+trade-lab fetch  --symbol BTC/USDT --timeframe 1d --since 2018-01-01
+trade-lab backtest \
+    --strategy sma_cross --symbol BTC/USDT --timeframe 1d \
+    --param fast_period=20 --param slow_period=100
+```
+
+Daily SMA crossovers are a classic comparison point. Expect very few
+trades (single digits per year) and a `Verdict:` that's heavily driven
+by whether you caught the big moves.
+
+### 3. Slower SMA pairs (50 / 200, the "Golden cross")
+
+The 50/200 crossover is the textbook trend filter. On crypto it triggers
+rarely; on daily bars it might trigger once a year.
+
+```bash
+trade-lab backtest \
+    --strategy sma_cross --symbol BTC/USDT --timeframe 1d \
+    --param fast_period=50 --param slow_period=200
+```
+
+Run it on top of the 1d candles fetched above and look at:
+- `Avg holding period` (should be hundreds of bars),
+- `Number of trades` (should be tiny),
+- `Verdict` vs the faster 20/100 pair.
+
+### 4. Compare each run against buy & hold
+
+Every run already reports `Buy & hold` final equity, return, and max
+drawdown alongside the strategy block, plus a one-word `Verdict`
+(`OUTPERFORMS_BH` / `LOWER_RETURN_LOWER_DD` / `UNDERPERFORMS_BH`). When
+working through the experiments above, the question to keep in mind is:
+
+> Did this strategy beat *just holding the asset* on the period I picked?
+
+If the answer is "no" — or "only because I chose this window" — that's a
+signal to try different windows (`--start-date` / `--end-date`) before
+believing the result. Use `trade-lab sweep` to scan parameters on the
+training window and re-confirm on a held-out test window.
+
 ## Roadmap
 
 - Paper / live execution behind a `Broker` interface.
