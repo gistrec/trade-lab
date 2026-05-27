@@ -1,0 +1,189 @@
+"""Walk-forward validation for SMA strategies.
+
+Splits a candles DataFrame into rolling train / test windows, runs a
+parameter sweep on each train slice, picks the best parameters from
+*train only*, and evaluates that exact pair on the immediately following
+test slice. This gives a much more honest picture of generalization than
+optimizing on the full window.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, List, Optional
+
+import pandas as pd
+from pandas.tseries.offsets import DateOffset
+
+from ..data.storage import filter_candles_by_date
+from ..strategies.sma_cross import SMACrossStrategy
+from .engine import run_backtest
+from .metrics import benchmark_verdict, compute_metrics
+from .sweep import run_sma_sweep
+
+
+WALK_FORWARD_COLUMNS = [
+    "train_start",
+    "train_end",
+    "test_start",
+    "test_end",
+    "fast_period",
+    "slow_period",
+    "train_return_pct",
+    "test_return_pct",
+    "test_buy_and_hold_return_pct",
+    "test_max_drawdown_pct",
+    "test_verdict",
+]
+
+
+@dataclass(frozen=True)
+class WalkForwardWindow:
+    """One (train, test) split of the candles index."""
+
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    test_start: pd.Timestamp
+    test_end: pd.Timestamp
+
+
+def generate_windows(
+    candles: pd.DataFrame,
+    train_years: int = 2,
+    test_years: int = 1,
+    step_years: int = 1,
+) -> List[WalkForwardWindow]:
+    """Build rolling train / test windows that fit inside ``candles``.
+
+    Bounds are calendar-based (``DateOffset(years=N)``) and inclusive at
+    the day level: a 2-year train starting 2018-01-01 ends 2019-12-31
+    and the matching test starts 2020-01-01. The last window's test
+    range is truncated if it would extend past the last candle.
+    """
+    if candles.empty:
+        return []
+    first = pd.Timestamp(candles.index[0])
+    last = pd.Timestamp(candles.index[-1])
+
+    windows: List[WalkForwardWindow] = []
+    cursor = first
+    while True:
+        train_start = cursor
+        train_end = train_start + DateOffset(years=train_years) - DateOffset(days=1)
+        test_start = train_end + DateOffset(days=1)
+        test_end = test_start + DateOffset(years=test_years) - DateOffset(days=1)
+
+        # The train window has to fit. We allow the test to be truncated
+        # at the end (so the last partial year is still examined).
+        if train_end > last:
+            break
+        if test_start > last:
+            break
+        if test_end > last:
+            test_end = last
+
+        windows.append(
+            WalkForwardWindow(
+                train_start=train_start,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+        cursor = cursor + DateOffset(years=step_years)
+
+    return windows
+
+
+def run_sma_walk_forward(
+    candles: pd.DataFrame,
+    fast_periods: Iterable[int],
+    slow_periods: Iterable[int],
+    train_years: int = 2,
+    test_years: int = 1,
+    step_years: int = 1,
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+    position_size: float = 1.0,
+) -> pd.DataFrame:
+    """Run walk-forward validation of the SMA crossover.
+
+    For each rolling window: sweep ``(fast, slow)`` on the train slice
+    only, pick the pair with the highest total return on train, then
+    evaluate that pair on the *following* test slice. Returns one row
+    per window.
+
+    The function never sees train and test mixed: parameter selection
+    only touches train candles, and the test backtest only touches test
+    candles. The full-history sweep is therefore *not* run.
+    """
+    fast_periods = list(fast_periods)
+    slow_periods = list(slow_periods)
+    windows = generate_windows(
+        candles, train_years=train_years, test_years=test_years, step_years=step_years
+    )
+
+    rows: list[dict] = []
+    for window in windows:
+        train_candles = filter_candles_by_date(
+            candles,
+            start_date=_fmt_date(window.train_start),
+            end_date=_fmt_date(window.train_end),
+        )
+        test_candles = filter_candles_by_date(
+            candles,
+            start_date=_fmt_date(window.test_start),
+            end_date=_fmt_date(window.test_end),
+        )
+        if train_candles.empty or test_candles.empty:
+            continue
+
+        # 1) Sweep on TRAIN only and pick the best total-return pair.
+        train_sweep = run_sma_sweep(
+            train_candles,
+            fast_periods=fast_periods,
+            slow_periods=slow_periods,
+            initial_capital=initial_capital,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            position_size=position_size,
+        )
+        if train_sweep.empty:
+            continue
+        best = train_sweep.iloc[0]
+        fast = int(best["fast_period"])
+        slow = int(best["slow_period"])
+
+        # 2) Evaluate the chosen pair on TEST only.
+        test_result = run_backtest(
+            test_candles,
+            SMACrossStrategy(fast_period=fast, slow_period=slow),
+            initial_capital=initial_capital,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            position_size=position_size,
+        )
+        test_metrics = compute_metrics(test_result)
+
+        rows.append(
+            {
+                "train_start": window.train_start,
+                "train_end": window.train_end,
+                "test_start": window.test_start,
+                "test_end": window.test_end,
+                "fast_period": fast,
+                "slow_period": slow,
+                "train_return_pct": float(best["total_return_pct"]),
+                "test_return_pct": test_metrics.total_return,
+                "test_buy_and_hold_return_pct": test_metrics.buy_and_hold_return,
+                "test_max_drawdown_pct": test_metrics.max_drawdown,
+                "test_verdict": benchmark_verdict(test_metrics),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=WALK_FORWARD_COLUMNS)
+
+
+def _fmt_date(ts: pd.Timestamp) -> str:
+    """Format a timestamp as YYYY-MM-DD for :func:`filter_candles_by_date`."""
+    return ts.strftime("%Y-%m-%d")

@@ -17,6 +17,7 @@ from .backtest.reports import (
     write_trades_csv,
 )
 from .backtest.sweep import run_sma_sweep
+from .backtest.walk_forward import run_sma_walk_forward
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import (
@@ -300,6 +301,76 @@ def cmd_sweep(args: argparse.Namespace) -> None:
     print(f"\nResults saved to {out_path}")
 
 
+def cmd_walk_forward(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+
+    candles = load_candles(
+        data_dir=cfg.data_dir,
+        exchange=exchange,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+    )
+    if candles.empty:
+        raise SystemExit("No candles to validate on.")
+
+    fast_periods = _parse_int_list(args.fast_periods)
+    slow_periods = _parse_int_list(args.slow_periods)
+
+    fmt = "%Y-%m-%d"
+    print(f"Walk-forward:         {args.strategy}")
+    print(f"Symbol/timeframe:     {args.symbol} {args.timeframe}")
+    print(
+        f"Period:               {candles.index[0].strftime(fmt)} "
+        f"to {candles.index[-1].strftime(fmt)}"
+    )
+    print(
+        f"Windows:              train={args.train_years}y "
+        f"test={args.test_years}y step={args.step_years}y"
+    )
+    print(
+        f"Grid:                 fast={fast_periods} slow={slow_periods}"
+    )
+
+    df = run_sma_walk_forward(
+        candles,
+        fast_periods=fast_periods,
+        slow_periods=slow_periods,
+        train_years=args.train_years,
+        test_years=args.test_years,
+        step_years=args.step_years,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+
+    if df.empty:
+        raise SystemExit(
+            "No walk-forward windows fit the dataset (need at least "
+            f"{args.train_years + args.test_years} years of data)."
+        )
+
+    out_path = Path(args.output_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+
+    # Pretty-print the columns the human cares about most.
+    display = df.copy()
+    display["train_start"] = display["train_start"].dt.strftime(fmt)
+    display["train_end"] = display["train_end"].dt.strftime(fmt)
+    display["test_start"] = display["test_start"].dt.strftime(fmt)
+    display["test_end"] = display["test_end"].dt.strftime(fmt)
+    formatters = {
+        "train_return_pct": "{:+.2%}".format,
+        "test_return_pct": "{:+.2%}".format,
+        "test_buy_and_hold_return_pct": "{:+.2%}".format,
+        "test_max_drawdown_pct": "{:.2%}".format,
+    }
+    print()
+    print(display.to_string(index=False, formatters=formatters))
+    print(f"\nResults saved to {out_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -410,6 +481,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to write the full results table",
     )
     p_sw.set_defaults(func=cmd_sweep)
+
+    p_wf = sub.add_parser(
+        "walk-forward",
+        help="Rolling-window walk-forward validation of an SMA strategy.",
+    )
+    p_wf.add_argument("--strategy", default="sma_cross", choices=["sma_cross"])
+    p_wf.add_argument("--symbol", default="BTC/USDT")
+    p_wf.add_argument("--timeframe", default="1d")
+    p_wf.add_argument("--exchange", default=None)
+    p_wf.add_argument(
+        "--fast-periods",
+        default="5,10,20,30",
+        help="Comma-separated list of fast SMA periods",
+    )
+    p_wf.add_argument(
+        "--slow-periods",
+        default="50,100,150,200",
+        help="Comma-separated list of slow SMA periods",
+    )
+    p_wf.add_argument(
+        "--train-years", type=int, default=2,
+        help="Length of each training window in years",
+    )
+    p_wf.add_argument(
+        "--test-years", type=int, default=1,
+        help="Length of each test window in years",
+    )
+    p_wf.add_argument(
+        "--step-years", type=int, default=1,
+        help="How many years to roll forward between windows",
+    )
+    p_wf.add_argument(
+        "--output-csv",
+        default="outputs/walk_forward.csv",
+        help="Path to write the per-window results",
+    )
+    p_wf.set_defaults(func=cmd_walk_forward)
 
     return parser
 

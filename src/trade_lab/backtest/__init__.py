@@ -18,6 +18,12 @@ from .reports import (
     write_trades_csv,
 )
 from .sweep import SWEEP_COLUMNS, run_sma_sweep
+from .walk_forward import (
+    WALK_FORWARD_COLUMNS,
+    WalkForwardWindow,
+    generate_windows,
+    run_sma_walk_forward,
+)
 
 __all__ = [
     "BacktestResult",
@@ -29,13 +35,17 @@ __all__ = [
     "VERDICT_LOWER_RETURN_LOWER_DD",
     "VERDICT_OUTPERFORMS_BH",
     "VERDICT_UNDERPERFORMS_BH",
+    "WALK_FORWARD_COLUMNS",
+    "WalkForwardWindow",
     "benchmark_verdict",
     "compute_metrics",
     "debug_trades_dataframe",
     "execution_bars",
+    "generate_windows",
     "plot_equity_curve",
     "run_backtest",
     "run_sma_sweep",
+    "run_sma_walk_forward",
     "trades_to_dataframe",
     "write_debug_trades_csv",
     "write_trades_csv",
