@@ -98,6 +98,30 @@ trade-lab backtest --strategy sma_cross \
 The actual tested window is echoed in the report's `Period:` line along with
 the bar count, so you can confirm the slice landed where you expected.
 
+### Parameter sweeps
+
+`trade-lab sweep` grid-searches SMA crossover parameters across a date range
+and writes one row per combination to CSV. Invalid combos
+(`fast_period >= slow_period`) are skipped automatically.
+
+```bash
+trade-lab sweep \
+    --strategy sma_cross \
+    --symbol BTC/USDT \
+    --timeframe 1h \
+    --fast-periods 5,10,20,30 \
+    --slow-periods 50,100,150,200 \
+    --start-date 2024-01-01 \
+    --end-date 2024-06-30 \
+    --output-csv outputs/sweep.csv
+```
+
+The console prints a sorted table (highest total return on top) and saves
+the full result with raw numeric values to the CSV. This is **research
+only** — picking "the best" parameters from a sweep is a notorious way to
+overfit. Use it to compare neighborhoods and to look for stable regions,
+not to choose live settings.
+
 Sample output:
 
 ```

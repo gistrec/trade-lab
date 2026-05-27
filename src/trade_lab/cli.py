@@ -12,6 +12,7 @@ from .backtest.engine import run_backtest
 from .backtest.metrics import compute_metrics
 from .backtest.plotting import plot_equity_curve
 from .backtest.reports import trades_to_dataframe, write_trades_csv
+from .backtest.sweep import run_sma_sweep
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import (
@@ -51,6 +52,14 @@ def _parse_params(items: list[str] | None) -> dict[str, Any]:
             raise SystemExit(f"--param expects key=value, got: {kv!r}")
         out[key] = _coerce(value)
     return out
+
+
+def _parse_int_list(value: str) -> list[int]:
+    """Parse a comma-separated list of ints, ignoring blanks/whitespace."""
+    try:
+        return [int(x.strip()) for x in value.split(",") if x.strip()]
+    except ValueError as exc:
+        raise SystemExit(f"Expected comma-separated integers, got {value!r}: {exc}")
 
 
 def _safe_symbol(symbol: str) -> str:
@@ -183,6 +192,73 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print(f"Plot saved to {save_path}")
 
 
+def cmd_sweep(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+
+    candles = load_candles(
+        data_dir=cfg.data_dir,
+        exchange=exchange,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+    )
+    candles = filter_candles_by_date(
+        candles, start_date=args.start_date, end_date=args.end_date
+    )
+    if candles.empty:
+        raise SystemExit(
+            f"No candles in range [{args.start_date or '...'}, "
+            f"{args.end_date or '...'}]"
+        )
+
+    fast_periods = _parse_int_list(args.fast_periods)
+    slow_periods = _parse_int_list(args.slow_periods)
+    n_total = len(fast_periods) * len(slow_periods)
+    n_valid = sum(1 for f in fast_periods for s in slow_periods if f < s)
+    n_skipped = n_total - n_valid
+
+    fmt = "%Y-%m-%d %H:%M"
+    print(f"Sweep:                {args.strategy}")
+    print(f"Symbol/timeframe:     {args.symbol} {args.timeframe}")
+    print(
+        f"Period:               {candles.index[0].strftime(fmt)} "
+        f"to {candles.index[-1].strftime(fmt)}"
+    )
+    print(f"Bars:                 {len(candles)}")
+    print(
+        f"Combinations:         {n_valid} valid "
+        f"({n_skipped} skipped where fast >= slow)"
+    )
+
+    if n_valid == 0:
+        raise SystemExit("No valid combinations to test.")
+
+    df = run_sma_sweep(
+        candles,
+        fast_periods=fast_periods,
+        slow_periods=slow_periods,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+
+    out_path = Path(args.output_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+
+    formatters = {
+        "final_equity": "${:,.2f}".format,
+        "total_return_pct": "{:+.2%}".format,
+        "buy_and_hold_return_pct": "{:+.2%}".format,
+        "max_drawdown_pct": "{:.2%}".format,
+        "win_rate": "{:.2%}".format,
+        "fees_paid": "${:,.2f}".format,
+    }
+    print()
+    print(df.to_string(index=False, formatters=formatters))
+    print(f"\nResults saved to {out_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -250,6 +326,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export completed trades to this CSV path (e.g. outputs/trades.csv)",
     )
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_sw = sub.add_parser("sweep", help="Grid-search a strategy's parameters.")
+    p_sw.add_argument("--strategy", default="sma_cross", choices=["sma_cross"])
+    p_sw.add_argument("--symbol", default="BTC/USDT")
+    p_sw.add_argument("--timeframe", default="1h")
+    p_sw.add_argument("--exchange", default=None)
+    p_sw.add_argument(
+        "--fast-periods",
+        default="5,10,20,30",
+        help="Comma-separated list of fast SMA periods",
+    )
+    p_sw.add_argument(
+        "--slow-periods",
+        default="50,100,150,200",
+        help="Comma-separated list of slow SMA periods",
+    )
+    p_sw.add_argument(
+        "--start-date",
+        default=None,
+        help="Filter candles from this date inclusive (YYYY-MM-DD)",
+    )
+    p_sw.add_argument(
+        "--end-date",
+        default=None,
+        help="Filter candles through this date inclusive (YYYY-MM-DD)",
+    )
+    p_sw.add_argument(
+        "--output-csv",
+        default="outputs/sweep.csv",
+        help="Path to write the full results table",
+    )
+    p_sw.set_defaults(func=cmd_sweep)
 
     return parser
 
