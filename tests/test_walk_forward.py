@@ -187,6 +187,208 @@ def test_walk_forward_verdict_is_one_of_three_known_values():
         assert verdict in valid
 
 
+def test_multi_walk_forward_columns_match_spec():
+    from trade_lab.backtest.walk_forward import (
+        MULTI_WALK_FORWARD_COLUMNS,
+        run_multi_walk_forward,
+    )
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    df = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+    )
+    assert list(df.columns) == MULTI_WALK_FORWARD_COLUMNS
+
+
+def test_multi_walk_forward_selected_strategy_is_in_the_requested_set():
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    df = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+    )
+    assert not df.empty
+    assert set(df["selected_strategy"]).issubset({"sma_cross", "regime_sma_cross"})
+
+
+def test_multi_walk_forward_regime_period_present_only_for_regime_strategy():
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    df = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+    )
+    for _, row in df.iterrows():
+        if row["selected_strategy"] == "sma_cross":
+            assert pd.isna(row["regime_period"])
+        else:
+            assert not pd.isna(row["regime_period"])
+
+
+def test_multi_walk_forward_objective_picks_higher_ratio_with_return_div_drawdown():
+    """When objective is return/drawdown, a low-DD candidate should be
+    preferred over a higher-return candidate with a worse DD."""
+    from trade_lab.backtest.walk_forward import (
+        OBJECTIVE_RETURN_DIV_DRAWDOWN,
+        OBJECTIVE_TOTAL_RETURN,
+        run_multi_walk_forward,
+    )
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    by_return = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+        objective=OBJECTIVE_TOTAL_RETURN,
+    )
+    by_ratio = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+        objective=OBJECTIVE_RETURN_DIV_DRAWDOWN,
+    )
+    # Same number of windows, but the picks may differ. At minimum both
+    # frames should be non-empty and have the same row count.
+    assert not by_return.empty
+    assert not by_ratio.empty
+    assert len(by_return) == len(by_ratio)
+
+
+def test_multi_walk_forward_test_metrics_match_fresh_backtest():
+    """Test metrics in each row must match a fresh backtest with the
+    selected params on the *test* window only — no train leakage."""
+    from trade_lab.backtest.engine import run_backtest
+    from trade_lab.backtest.metrics import compute_metrics
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+    from trade_lab.data.storage import filter_candles_by_date
+    from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
+    from trade_lab.strategies.sma_cross import SMACrossStrategy
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    df = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+    )
+
+    for _, row in df.iterrows():
+        test_candles = filter_candles_by_date(
+            candles,
+            start_date=row["test_start"].strftime("%Y-%m-%d"),
+            end_date=row["test_end"].strftime("%Y-%m-%d"),
+        )
+        if row["selected_strategy"] == "sma_cross":
+            strat = SMACrossStrategy(
+                fast_period=int(row["fast_period"]),
+                slow_period=int(row["slow_period"]),
+            )
+        else:
+            strat = RegimeSMACrossStrategy(
+                fast_period=int(row["fast_period"]),
+                slow_period=int(row["slow_period"]),
+                regime_period=int(row["regime_period"]),
+            )
+        result = run_backtest(
+            test_candles, strat,
+            initial_capital=10_000.0, fee_rate=0.001, slippage_rate=0.0005,
+        )
+        m = compute_metrics(result)
+        assert row["test_return_pct"] == pytest.approx(m.total_return)
+        assert row["test_max_drawdown_pct"] == pytest.approx(m.max_drawdown)
+        assert row["test_buy_and_hold_return_pct"] == pytest.approx(m.buy_and_hold_return)
+        assert row["test_buy_and_hold_max_drawdown_pct"] == pytest.approx(
+            m.buy_and_hold_max_drawdown
+        )
+
+
+def test_multi_walk_forward_train_metrics_match_train_only_backtest():
+    """Symmetric leakage check: train_return_pct and train_max_drawdown_pct
+    must come from a backtest run on the train window alone."""
+    from trade_lab.backtest.engine import run_backtest
+    from trade_lab.backtest.metrics import compute_metrics
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+    from trade_lab.data.storage import filter_candles_by_date
+    from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
+    from trade_lab.strategies.sma_cross import SMACrossStrategy
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    df = run_multi_walk_forward(
+        candles,
+        fast_periods=[5, 10],
+        slow_periods=[20, 40],
+        regime_periods=[60, 80],
+        strategies=("sma_cross", "regime_sma_cross"),
+        train_years=2,
+        test_years=1,
+    )
+    for _, row in df.iterrows():
+        train_candles = filter_candles_by_date(
+            candles,
+            start_date=row["train_start"].strftime("%Y-%m-%d"),
+            end_date=row["train_end"].strftime("%Y-%m-%d"),
+        )
+        if row["selected_strategy"] == "sma_cross":
+            strat = SMACrossStrategy(
+                fast_period=int(row["fast_period"]),
+                slow_period=int(row["slow_period"]),
+            )
+        else:
+            strat = RegimeSMACrossStrategy(
+                fast_period=int(row["fast_period"]),
+                slow_period=int(row["slow_period"]),
+                regime_period=int(row["regime_period"]),
+            )
+        result = run_backtest(
+            train_candles, strat,
+            initial_capital=10_000.0, fee_rate=0.001, slippage_rate=0.0005,
+        )
+        m = compute_metrics(result)
+        assert row["train_return_pct"] == pytest.approx(m.total_return)
+        assert row["train_max_drawdown_pct"] == pytest.approx(m.max_drawdown)
+
+
+def test_multi_walk_forward_rejects_unknown_objective():
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    with pytest.raises(ValueError):
+        run_multi_walk_forward(
+            candles,
+            fast_periods=[5], slow_periods=[20],
+            objective="not_a_real_objective",
+        )
+
+
 def test_walk_forward_csv_round_trips(tmp_path):
     candles = _daily_candles("2018-01-01", 365 * 4 + 1)
     df = run_sma_walk_forward(

@@ -10,6 +10,7 @@ from typing import Iterable
 
 import pandas as pd
 
+from ..strategies.regime_sma_cross import RegimeSMACrossStrategy
 from ..strategies.sma_cross import SMACrossStrategy
 from .engine import run_backtest
 from .metrics import compute_metrics
@@ -18,6 +19,20 @@ from .metrics import compute_metrics
 SWEEP_COLUMNS = [
     "fast_period",
     "slow_period",
+    "final_equity",
+    "total_return_pct",
+    "buy_and_hold_return_pct",
+    "max_drawdown_pct",
+    "num_trades",
+    "win_rate",
+    "fees_paid",
+]
+
+
+REGIME_SWEEP_COLUMNS = [
+    "fast_period",
+    "slow_period",
+    "regime_period",
     "final_equity",
     "total_return_pct",
     "buy_and_hold_return_pct",
@@ -74,6 +89,66 @@ def run_sma_sweep(
             )
 
     df = pd.DataFrame(rows, columns=SWEEP_COLUMNS)
+    if not df.empty:
+        df = (
+            df.sort_values("total_return_pct", ascending=False, kind="mergesort")
+            .reset_index(drop=True)
+        )
+    return df
+
+
+def run_regime_sma_sweep(
+    candles: pd.DataFrame,
+    fast_periods: Iterable[int],
+    slow_periods: Iterable[int],
+    regime_periods: Iterable[int],
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+    position_size: float = 1.0,
+) -> pd.DataFrame:
+    """Grid-search the regime-filtered SMA crossover strategy.
+
+    Skips combinations where ``fast >= slow`` or ``slow >= regime`` —
+    the strategy constructor rejects those as nonsensical (the regime
+    SMA must be the slowest).
+    """
+    rows: list[dict] = []
+    for fast in fast_periods:
+        for slow in slow_periods:
+            for regime in regime_periods:
+                if fast >= slow or slow >= regime:
+                    continue
+                strategy = RegimeSMACrossStrategy(
+                    fast_period=int(fast),
+                    slow_period=int(slow),
+                    regime_period=int(regime),
+                )
+                result = run_backtest(
+                    candles,
+                    strategy,
+                    initial_capital=initial_capital,
+                    fee_rate=fee_rate,
+                    slippage_rate=slippage_rate,
+                    position_size=position_size,
+                )
+                m = compute_metrics(result)
+                rows.append(
+                    {
+                        "fast_period": int(fast),
+                        "slow_period": int(slow),
+                        "regime_period": int(regime),
+                        "final_equity": m.final_equity,
+                        "total_return_pct": m.total_return,
+                        "buy_and_hold_return_pct": m.buy_and_hold_return,
+                        "max_drawdown_pct": m.max_drawdown,
+                        "num_trades": m.num_trades,
+                        "win_rate": m.win_rate,
+                        "fees_paid": m.total_fees,
+                    }
+                )
+
+    df = pd.DataFrame(rows, columns=REGIME_SWEEP_COLUMNS)
     if not df.empty:
         df = (
             df.sort_values("total_return_pct", ascending=False, kind="mergesort")

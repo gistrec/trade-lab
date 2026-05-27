@@ -115,24 +115,43 @@ following test slice. One row per window in the CSV.
 ```bash
 trade-lab walk-forward \
     --symbol BTC/USDT --timeframe 1d \
-    --fast-periods 5,10,20,30,50 \
+    --strategies sma_cross,regime_sma_cross \
+    --fast-periods 5,10,20,30 \
     --slow-periods 50,100,150,200 \
+    --regime-periods 100,200,300 \
+    --objective total_return \
     --train-years 2 --test-years 1 --step-years 1 \
     --output-csv outputs/walk_forward.csv
 ```
 
-Sample run on real BTC/USDT 1d (2018 → 2026):
+`--strategies` (default `sma_cross,regime_sma_cross`) chooses which
+SMA-family strategies enter the train sweep on each window. The
+selector picks the single best `(strategy, params)` candidate across
+all of them; the chosen strategy is recorded per row so you can see
+which family generalized in which regime.
+
+`--objective` picks the selection criterion. `total_return` (default)
+chases raw growth; `return_div_drawdown` chases risk-adjusted picks —
+useful when you'd rather avoid the parameter sets that nuked train
+just to win on return.
+
+Sample run on real BTC/USDT 1d (2018 → 2026) with `total_return`:
 
 ```
-train_start  train_end  test_start  test_end  fast  slow  train_return  test_return  test_BH  verdict
- 2018-01-01 2019-12-31  2020-01-01 2020-12-31    30   100      +125.17%     +237.34% +301.67%  LOWER_RETURN_LOWER_DD
- 2019-01-01 2020-12-31  2021-01-01 2021-12-31    30    50      +644.85%      +10.87%  +57.57%  LOWER_RETURN_LOWER_DD
- 2020-01-01 2021-12-31  2022-01-01 2022-12-31     5   100      +562.11%      -16.18%  -65.34%        OUTPERFORMS_BH
- 2021-01-01 2022-12-31  2023-01-01 2023-12-31     5   150       +10.96%      +31.18% +154.46%  LOWER_RETURN_LOWER_DD
- 2022-01-01 2023-12-31  2024-01-01 2024-12-31     5   200       +83.97%       +8.79% +111.81%      UNDERPERFORMS_BH
- 2023-01-01 2024-12-31  2025-01-01 2025-12-31     5    50      +173.70%      +18.34%   -7.34%        OUTPERFORMS_BH
- 2024-01-01 2025-12-31  2026-01-01 2026-05-27    30    50       +54.77%       +5.36%  -16.20%        OUTPERFORMS_BH
+train_period         test_period         selected_strategy    params           train_ret  test_ret  test_BH   verdict
+2018-01-01-2019-12-31 2020-01-01-2020-12-31 sma_cross         f=30/s=100        +125.17%  +237.34%  +301.67%  LOWER_RETURN_LOWER_DD
+2019-01-01-2020-12-31 2021-01-01-2021-12-31 sma_cross         f=30/s=50         +644.85%   +10.87%   +57.57%  LOWER_RETURN_LOWER_DD
+2020-01-01-2021-12-31 2022-01-01-2022-12-31 sma_cross         f=5/s=100         +562.11%   -16.18%   -65.34%        OUTPERFORMS_BH
+2021-01-01-2022-12-31 2023-01-01-2023-12-31 sma_cross         f=5/s=150          +10.96%   +31.18%  +154.46%  LOWER_RETURN_LOWER_DD
+2022-01-01-2023-12-31 2024-01-01-2024-12-31 regime_sma_cross  f=5/s=50/r=100     +85.42%   +15.44%  +111.81%      UNDERPERFORMS_BH
+2023-01-01-2024-12-31 2025-01-01-2025-12-31 regime_sma_cross  f=30/s=100/r=300  +175.57%    +0.00%    -7.34%        OUTPERFORMS_BH
+2024-01-01-2025-12-31 2026-01-01-2026-05-27 sma_cross         f=30/s=50          +54.77%    +5.36%   -16.20%        OUTPERFORMS_BH
 ```
+
+Switching to `--objective return_div_drawdown` swaps two of the
+selections to the regime variant (lower DD on train wins the ratio
+even when raw return is similar), and confirms the same shape: the
+strategy's edge is real in bear / sideways regimes, not in bulls.
 
 Two things to read off this table:
 

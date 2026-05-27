@@ -17,7 +17,11 @@ from .backtest.reports import (
     write_trades_csv,
 )
 from .backtest.sweep import run_sma_sweep
-from .backtest.walk_forward import run_sma_walk_forward
+from .backtest.walk_forward import (
+    OBJECTIVE_RETURN_DIV_DRAWDOWN,
+    OBJECTIVE_TOTAL_RETURN,
+    run_multi_walk_forward,
+)
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import (
@@ -316,9 +320,11 @@ def cmd_walk_forward(args: argparse.Namespace) -> None:
 
     fast_periods = _parse_int_list(args.fast_periods)
     slow_periods = _parse_int_list(args.slow_periods)
+    regime_periods = _parse_int_list(args.regime_periods) if args.regime_periods else []
+    strategies = tuple(s.strip() for s in args.strategies.split(",") if s.strip())
 
     fmt = "%Y-%m-%d"
-    print(f"Walk-forward:         {args.strategy}")
+    print(f"Walk-forward:         {', '.join(strategies)}")
     print(f"Symbol/timeframe:     {args.symbol} {args.timeframe}")
     print(
         f"Period:               {candles.index[0].strftime(fmt)} "
@@ -328,14 +334,18 @@ def cmd_walk_forward(args: argparse.Namespace) -> None:
         f"Windows:              train={args.train_years}y "
         f"test={args.test_years}y step={args.step_years}y"
     )
-    print(
-        f"Grid:                 fast={fast_periods} slow={slow_periods}"
-    )
+    print(f"Objective:            {args.objective}")
+    print(f"Grid:                 fast={fast_periods} slow={slow_periods}")
+    if "regime_sma_cross" in strategies and regime_periods:
+        print(f"                      regime={regime_periods}")
 
-    df = run_sma_walk_forward(
+    df = run_multi_walk_forward(
         candles,
         fast_periods=fast_periods,
         slow_periods=slow_periods,
+        regime_periods=regime_periods,
+        strategies=strategies,
+        objective=args.objective,
         train_years=args.train_years,
         test_years=args.test_years,
         step_years=args.step_years,
@@ -360,15 +370,36 @@ def cmd_walk_forward(args: argparse.Namespace) -> None:
     display["train_end"] = display["train_end"].dt.strftime(fmt)
     display["test_start"] = display["test_start"].dt.strftime(fmt)
     display["test_end"] = display["test_end"].dt.strftime(fmt)
+    # Combine fast/slow/regime into a compact parameters column for display.
+    display["params"] = display.apply(_format_params, axis=1)
+    cols_to_show = [
+        "train_start", "train_end", "test_start", "test_end",
+        "selected_strategy", "params",
+        "train_return_pct", "train_max_drawdown_pct",
+        "test_return_pct", "test_max_drawdown_pct",
+        "test_buy_and_hold_return_pct", "test_buy_and_hold_max_drawdown_pct",
+        "test_verdict",
+    ]
     formatters = {
         "train_return_pct": "{:+.2%}".format,
+        "train_max_drawdown_pct": "{:.2%}".format,
         "test_return_pct": "{:+.2%}".format,
-        "test_buy_and_hold_return_pct": "{:+.2%}".format,
         "test_max_drawdown_pct": "{:.2%}".format,
+        "test_buy_and_hold_return_pct": "{:+.2%}".format,
+        "test_buy_and_hold_max_drawdown_pct": "{:.2%}".format,
     }
     print()
-    print(display.to_string(index=False, formatters=formatters))
+    print(display[cols_to_show].to_string(index=False, formatters=formatters))
     print(f"\nResults saved to {out_path}")
+
+
+def _format_params(row: pd.Series) -> str:
+    if row["selected_strategy"] == "regime_sma_cross":
+        return (
+            f"f={int(row['fast_period'])}/s={int(row['slow_period'])}"
+            f"/r={int(row['regime_period'])}"
+        )
+    return f"f={int(row['fast_period'])}/s={int(row['slow_period'])}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -484,21 +515,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_wf = sub.add_parser(
         "walk-forward",
-        help="Rolling-window walk-forward validation of an SMA strategy.",
+        help="Rolling-window walk-forward validation across SMA-family strategies.",
     )
-    p_wf.add_argument("--strategy", default="sma_cross", choices=["sma_cross"])
+    p_wf.add_argument(
+        "--strategies",
+        default="sma_cross,regime_sma_cross",
+        help="Comma-separated subset of {sma_cross, regime_sma_cross}",
+    )
     p_wf.add_argument("--symbol", default="BTC/USDT")
     p_wf.add_argument("--timeframe", default="1d")
     p_wf.add_argument("--exchange", default=None)
     p_wf.add_argument(
         "--fast-periods",
         default="5,10,20,30",
-        help="Comma-separated list of fast SMA periods",
+        help="Comma-separated list of fast SMA periods (shared by both strategies)",
     )
     p_wf.add_argument(
         "--slow-periods",
         default="50,100,150,200",
-        help="Comma-separated list of slow SMA periods",
+        help="Comma-separated list of slow SMA periods (shared by both strategies)",
+    )
+    p_wf.add_argument(
+        "--regime-periods",
+        default="100,150,200,300",
+        help="Comma-separated list of regime SMA periods (regime_sma_cross only)",
+    )
+    p_wf.add_argument(
+        "--objective",
+        default=OBJECTIVE_TOTAL_RETURN,
+        choices=[OBJECTIVE_TOTAL_RETURN, OBJECTIVE_RETURN_DIV_DRAWDOWN],
+        help="Criterion used to pick the best params on each train window",
     )
     p_wf.add_argument(
         "--train-years", type=int, default=2,
