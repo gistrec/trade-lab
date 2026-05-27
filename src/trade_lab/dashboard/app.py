@@ -1,6 +1,7 @@
 """Streamlit dashboard for inspecting trade-lab backtests."""
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from trade_lab.backtest.engine import execution_bars, run_backtest
-from trade_lab.backtest.metrics import compute_metrics
+from trade_lab.backtest.metrics import Metrics, compute_metrics
 from trade_lab.backtest.reports import trades_to_dataframe
 from trade_lab.data.fetch_ohlcv import validate_ohlcv
 from trade_lab.data.storage import filter_candles_by_date
@@ -25,7 +26,6 @@ def _load_candles(path: str) -> pd.DataFrame:
 
 
 def _build_strategy(name: str, params: dict):
-    """Instantiate the chosen strategy or surface a friendly error."""
     if name == "sma_cross":
         return SMACrossStrategy(
             fast_period=int(params["fast_period"]),
@@ -41,7 +41,6 @@ def _build_strategy(name: str, params: dict):
 
 
 def _sidebar_controls() -> dict:
-    """Render all sidebar controls and return their values."""
     with st.sidebar:
         st.header("Data")
         path = st.text_input(
@@ -103,10 +102,14 @@ def _sidebar_controls() -> dict:
     }
 
 
-def _render_metrics(metrics) -> None:
+def _render_metric_cards(metrics: Metrics) -> None:
     cols = st.columns(7)
     cols[0].metric("Final equity", f"${metrics.final_equity:,.2f}")
-    cols[1].metric("Total return", f"{metrics.total_return:.2%}")
+    cols[1].metric(
+        "Total return",
+        f"{metrics.total_return:.2%}",
+        delta=f"{(metrics.total_return - metrics.buy_and_hold_return) * 100:.2f}pp vs B&H",
+    )
     cols[2].metric("Buy & hold", f"{metrics.buy_and_hold_return:.2%}")
     cols[3].metric("Max drawdown", f"{metrics.max_drawdown:.2%}")
     cols[4].metric("# Trades", f"{metrics.num_trades}")
@@ -114,7 +117,36 @@ def _render_metrics(metrics) -> None:
     cols[6].metric("Fees paid", f"${metrics.total_fees:,.2f}")
 
 
-def _render_price_panel(candles: pd.DataFrame, positions: pd.Series) -> None:
+def _render_warnings(metrics: Metrics, n_bars: int) -> None:
+    if metrics.total_return < metrics.buy_and_hold_return:
+        diff_pp = (metrics.buy_and_hold_return - metrics.total_return) * 100
+        st.warning(
+            f"Strategy underperformed buy & hold by {diff_pp:.2f}pp "
+            f"(strategy {metrics.total_return:+.2%} vs B&H "
+            f"{metrics.buy_and_hold_return:+.2%}). The strategy may not be "
+            f"adding alpha on this window."
+        )
+    if (
+        metrics.buy_and_hold_max_drawdown > 0
+        and metrics.max_drawdown > metrics.buy_and_hold_max_drawdown
+    ):
+        st.warning(
+            f"Strategy max drawdown ({metrics.max_drawdown:.2%}) is worse than "
+            f"buy & hold ({metrics.buy_and_hold_max_drawdown:.2%}). Holding "
+            f"the asset passively was less painful here."
+        )
+    # Scale "high" with the window size: > one trade per 100 bars, with a
+    # floor of 20 to avoid spurious warnings on very short backtests.
+    high_threshold = max(20, n_bars // 100)
+    if metrics.num_trades > high_threshold:
+        st.warning(
+            f"Trade count is high ({metrics.num_trades} trades over {n_bars} "
+            f"bars; fees paid ${metrics.total_fees:,.2f}). Frequent rebalancing "
+            f"erodes net return — check whether the signal is too jumpy."
+        )
+
+
+def _price_figure(candles: pd.DataFrame, positions: pd.Series) -> go.Figure:
     entries, exits = execution_bars(positions)
     fig = go.Figure()
     fig.add_trace(
@@ -142,14 +174,14 @@ def _render_price_panel(candles: pd.DataFrame, positions: pd.Series) -> None:
             )
         )
     fig.update_layout(
-        height=380, margin=dict(t=10, b=10, l=10, r=10),
+        height=480, margin=dict(t=10, b=10, l=10, r=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
-def _render_equity_panel(result, initial_cash: float) -> None:
+def _equity_figure(result, initial_cash: float) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -171,14 +203,14 @@ def _render_equity_panel(result, initial_cash: float) -> None:
         annotation_text="Initial",
     )
     fig.update_layout(
-        height=380, margin=dict(t=10, b=10, l=10, r=10),
+        height=480, margin=dict(t=10, b=10, l=10, r=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
 
 
-def _render_drawdown_panel(equity: pd.Series) -> None:
+def _drawdown_figure(equity: pd.Series) -> go.Figure:
     running_max = equity.cummax()
     drawdown = (equity - running_max) / running_max
     fig = go.Figure()
@@ -190,10 +222,98 @@ def _render_drawdown_panel(equity: pd.Series) -> None:
         )
     )
     fig.update_layout(
-        height=260, margin=dict(t=10, b=10, l=10, r=10),
+        height=420, margin=dict(t=10, b=10, l=10, r=10),
         yaxis_tickformat=".0%", hovermode="x unified", showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    return fig
+
+
+def _metrics_to_csv(metrics: Metrics) -> bytes:
+    return pd.DataFrame([asdict(metrics)]).to_csv(index=False).encode("utf-8")
+
+
+def _equity_to_csv(result) -> bytes:
+    running_max = result.equity.cummax()
+    drawdown = (result.equity - running_max) / running_max
+    df = pd.DataFrame(
+        {
+            "strategy_equity": result.equity,
+            "strategy_drawdown": drawdown,
+        }
+    )
+    if not result.buy_and_hold_equity.empty:
+        df["buy_and_hold_equity"] = result.buy_and_hold_equity
+    df.index.name = "timestamp"
+    return df.to_csv().encode("utf-8")
+
+
+def _trades_to_csv(result, candles: pd.DataFrame) -> bytes:
+    df = trades_to_dataframe(result, candles, include_open=True)
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def _render_overview_tab(
+    metrics: Metrics, candles: pd.DataFrame, controls: dict
+) -> None:
+    st.subheader("Run summary")
+    st.write(
+        f"**Strategy:** `{controls['strategy_name']}` with params "
+        f"`{controls['params']}`."
+    )
+    st.write(
+        f"**Window:** {candles.index[0]:%Y-%m-%d %H:%M} → "
+        f"{candles.index[-1]:%Y-%m-%d %H:%M}  ({len(candles)} bars)."
+    )
+    st.write(
+        f"**Initial cash:** ${controls['initial_cash']:,.2f}  ·  "
+        f"**Fee:** {controls['fee_rate']:.4%}  ·  "
+        f"**Slippage:** {controls['slippage_rate']:.4%}  ·  "
+        f"**Position size:** {controls['position_size']:.0%}"
+    )
+    st.divider()
+    st.subheader("Downloads")
+    st.download_button(
+        "Download metrics (CSV)",
+        data=_metrics_to_csv(metrics),
+        file_name="metrics.csv",
+        mime="text/csv",
+    )
+
+
+def _render_price_tab(candles: pd.DataFrame, positions: pd.Series) -> None:
+    st.plotly_chart(_price_figure(candles, positions), use_container_width=True)
+    st.caption(
+        "Markers are placed on execution candles — one bar after the signal "
+        "candle, by construction of the look-ahead-protecting shift."
+    )
+
+
+def _render_equity_tab(result, initial_cash: float) -> None:
+    st.plotly_chart(_equity_figure(result, initial_cash), use_container_width=True)
+    st.download_button(
+        "Download equity curve (CSV)",
+        data=_equity_to_csv(result),
+        file_name="equity.csv",
+        mime="text/csv",
+    )
+
+
+def _render_drawdown_tab(equity: pd.Series) -> None:
+    st.plotly_chart(_drawdown_figure(equity), use_container_width=True)
+
+
+def _render_trades_tab(result, candles: pd.DataFrame) -> None:
+    trades_df = trades_to_dataframe(result, candles, include_open=True)
+    if trades_df.empty:
+        st.info("No trades on this window.")
+    else:
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download trades (CSV)",
+        data=_trades_to_csv(result, candles),
+        file_name="trades.csv",
+        mime="text/csv",
+    )
 
 
 def main() -> None:
@@ -239,9 +359,7 @@ def main() -> None:
         st.error(f"Strategy error: {exc}")
         st.stop()
 
-    # Run the backtest fresh on every interaction — params change too often
-    # to memoize safely, and a single run on 1-2 years of hourly bars is
-    # essentially free.
+    # Re-run on every interaction — params change too often to memoize.
     result = run_backtest(
         candles=candles,
         strategy=strategy,
@@ -252,26 +370,23 @@ def main() -> None:
     )
     metrics = compute_metrics(result)
 
-    st.caption(
-        f"Period **{candles.index[0]:%Y-%m-%d %H:%M}** → "
-        f"**{candles.index[-1]:%Y-%m-%d %H:%M}** "
-        f"({len(candles)} bars)"
+    _render_metric_cards(metrics)
+    _render_warnings(metrics, n_bars=len(candles))
+
+    tab_overview, tab_price, tab_equity, tab_dd, tab_trades = st.tabs(
+        ["Overview", "Price & Trades", "Equity", "Drawdown", "Trades"]
     )
 
-    _render_metrics(metrics)
-
-    st.subheader("Price & trades")
-    _render_price_panel(candles, result.positions)
-
-    st.subheader("Strategy equity vs buy & hold")
-    _render_equity_panel(result, controls["initial_cash"])
-
-    st.subheader("Drawdown")
-    _render_drawdown_panel(result.equity)
-
-    st.subheader("Trades")
-    trades_df = trades_to_dataframe(result, candles, include_open=True)
-    st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    with tab_overview:
+        _render_overview_tab(metrics, candles, controls)
+    with tab_price:
+        _render_price_tab(candles, result.positions)
+    with tab_equity:
+        _render_equity_tab(result, controls["initial_cash"])
+    with tab_dd:
+        _render_drawdown_tab(result.equity)
+    with tab_trades:
+        _render_trades_tab(result, candles)
 
 
 if __name__ == "__main__":

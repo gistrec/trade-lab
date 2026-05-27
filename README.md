@@ -139,10 +139,19 @@ streamlit run src/trade_lab/dashboard/app.py
 
 Sidebar controls: candle file path, strategy + parameters
 (`sma_cross` or `rsi`), initial cash / fee / slippage / position size,
-and an optional date range. The main panel shows summary metric cards,
-an interactive Plotly price chart with buy / sell markers placed on the
-execution candles, strategy-vs-buy-and-hold equity, drawdown, and the
-trade list.
+and an optional date range.
+
+The main panel has metric cards at the top (with a "vs B&H" delta on
+total return), context-aware warnings when the strategy underperforms
+buy & hold, has a worse drawdown than buy & hold, or trades too often,
+followed by five tabs:
+
+1. **Overview** — run summary + metrics CSV download.
+2. **Price & Trades** — Plotly price chart with buy / sell markers on
+   execution candles.
+3. **Equity** — strategy equity vs buy-and-hold + equity CSV download.
+4. **Drawdown** — underwater chart.
+5. **Trades** — trade list with a CSV download.
 
 The dashboard reuses the regular backtest engine, strategies, and metrics
 — there is no duplicate logic. Candles are cached by file path; the
