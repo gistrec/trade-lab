@@ -102,21 +102,63 @@ def test_buy_and_hold_metrics_default_to_zero_when_curve_missing():
     assert m.buy_and_hold_max_drawdown == pytest.approx(0.0)
 
 
-def test_win_rate_and_averages():
-    ts = pd.Timestamp("2024-01-01")
+def test_round_trip_cost_is_twice_per_side():
+    # Per-side cost = fee + slippage; round-trip = 2 * per-side.
+    result = _result([10_000, 10_500])
+    result.fee_rate = 0.001
+    result.slippage_rate = 0.0005
+    m = compute_metrics(result)
+    assert m.buy_cost_pct == pytest.approx(0.0015)
+    assert m.sell_cost_pct == pytest.approx(0.0015)
+    assert m.round_trip_cost_pct == pytest.approx(0.003)
+
+
+def test_avg_cost_per_trade_uses_trade_level_costs():
+    # Each fake trade pays $15 of cost on $1_000 of entry capital -> 1.5%.
     trades = [
-        Trade(entry_time=ts, exit_time=ts, entry_price=100, exit_price=110,
-              return_pct=0.10, bars_held=1),
-        Trade(entry_time=ts, exit_time=ts, entry_price=100, exit_price=90,
-              return_pct=-0.10, bars_held=1),
-        Trade(entry_time=ts, exit_time=ts, entry_price=100, exit_price=105,
-              return_pct=0.05, bars_held=1),
+        _trade(net_return=0.10),
+        _trade(net_return=-0.10),
+    ]
+    result = _result([10_000, 10_500], trades=trades)
+    m = compute_metrics(result)
+    assert m.avg_cost_per_trade == pytest.approx(0.015)
+
+
+def _trade(net_return: float, gross_return: float | None = None) -> Trade:
+    """Build a minimal Trade for metrics tests; defaults gross = net + 0.003
+    so the gross/net distinction is visible without setting it everywhere."""
+    ts = pd.Timestamp("2024-01-01")
+    if gross_return is None:
+        gross_return = net_return + 0.003
+    return Trade(
+        entry_time=ts,
+        exit_time=ts,
+        entry_signal_time=ts,
+        exit_signal_time=ts,
+        entry_execution_price=100.0,
+        exit_execution_price=100.0 * (1 + net_return),
+        gross_return_pct=gross_return,
+        net_return_pct=net_return,
+        fees_paid=10.0,
+        slippage_cost_estimate=5.0,
+        pnl=net_return * 1_000.0,
+        entry_capital=1_000.0,
+        bars_held=1,
+    )
+
+
+def test_win_rate_and_averages():
+    trades = [
+        _trade(net_return=0.10),
+        _trade(net_return=-0.10),
+        _trade(net_return=0.05),
     ]
     result = _result([10_000, 10_500], trades=trades)
     m = compute_metrics(result)
     assert m.num_trades == 3
     assert m.win_rate == pytest.approx(2 / 3)
     assert m.avg_trade_return == pytest.approx((0.10 - 0.10 + 0.05) / 3)
+    assert m.avg_net_trade_return == pytest.approx((0.10 - 0.10 + 0.05) / 3)
     assert m.avg_win == pytest.approx(0.075)
     assert m.avg_loss == pytest.approx(-0.10)
 

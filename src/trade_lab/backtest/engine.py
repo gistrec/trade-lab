@@ -1,8 +1,8 @@
-"""Vectorized long-only backtest engine."""
+"""Vectorized long-only backtest engine with explicit cost accounting."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -11,14 +11,39 @@ from ..strategies.base import Strategy
 
 @dataclass
 class Trade:
-    """A round-trip long trade."""
+    """A round-trip long trade with detailed cost breakdown.
 
+    Time fields are split between the *signal* candle (where the strategy
+    decided) and the *execution* candle (the next bar, where the engine
+    actually held the position). Prices are slippage-adjusted to reflect
+    what the strategy effectively paid / received.
+    """
+
+    # Execution timing (when the position was actually held).
     entry_time: pd.Timestamp
     exit_time: pd.Timestamp
-    entry_price: float
-    exit_price: float
-    return_pct: float
-    bars_held: int
+
+    # Signal timing (one bar before execution; ``exit_signal_time`` is
+    # ``None`` for trades still open at the end of the window).
+    entry_signal_time: pd.Timestamp
+    exit_signal_time: Optional[pd.Timestamp]
+
+    # Slippage-adjusted execution prices.
+    entry_execution_price: float
+    exit_execution_price: float
+
+    # Returns.
+    gross_return_pct: float          # raw close-to-close at execution bars
+    net_return_pct: float            # from equity, after fees + slippage
+
+    # Costs (dollars).
+    fees_paid: float                 # exchange fees only
+    slippage_cost_estimate: float    # slippage in dollars
+    pnl: float                       # final_equity - entry_capital
+
+    # Other.
+    entry_capital: float             # equity at the moment of entry
+    bars_held: int                   # bars the position was actually held
 
 
 @dataclass
@@ -33,8 +58,12 @@ class BacktestResult:
     fee_rate: float = 0.0
     slippage_rate: float = 0.0
     total_fees: float = 0.0
+    total_slippage: float = 0.0
     buy_and_hold_return: float = 0.0
     buy_and_hold_equity: pd.Series = field(
+        default_factory=lambda: pd.Series(dtype=float)
+    )
+    gross_equity: pd.Series = field(
         default_factory=lambda: pd.Series(dtype=float)
     )
 
@@ -49,25 +78,17 @@ def run_backtest(
 ) -> BacktestResult:
     """Run a long-only backtest of ``strategy`` against ``candles``.
 
-    Signals are shifted by one bar before application so a signal generated
-    on bar ``N`` executes against bar ``N+1`` (no look-ahead). Fees and
-    slippage are charged on every change in exposure, in proportion to the
-    size of that change.
+    Cost model is split explicitly:
 
-    Parameters
-    ----------
-    candles
-        OHLCV DataFrame indexed by timestamp.
-    strategy
-        Strategy producing 0/1 target-position signals.
-    initial_capital
-        Starting equity used as the base of the equity curve.
-    fee_rate
-        Per-side fee charged as a fraction of position notional.
-    slippage_rate
-        Per-side slippage charged as a fraction of position notional.
-    position_size
-        Fraction of equity to allocate when long, in ``(0, 1]``.
+    * Fees: ``fee_rate`` charged on every change in exposure (entry + exit).
+    * Slippage: ``slippage_rate`` charged on every change in exposure.
+      Conceptually a buy fills at ``close * (1 + slippage_rate)`` and a sell
+      at ``close * (1 - slippage_rate)`` — vectorized into the same
+      turnover-times-rate formulation as fees because it is equivalent at
+      the equity-curve level.
+
+    The engine returns separate gross and net return tracks so the
+    cost-free path can be inspected alongside the realistic one.
     """
     if not 0 < position_size <= 1:
         raise ValueError("position_size must be in (0, 1]")
@@ -87,28 +108,37 @@ def run_backtest(
 
     close = candles["close"].astype(float)
     bar_returns = close.pct_change().fillna(0.0)
-    strat_returns = positions * bar_returns
+    gross_returns = positions * bar_returns                    # before costs
 
     turnover = positions.diff().abs()
     turnover.iloc[0] = abs(positions.iloc[0])
-    costs = turnover * (fee_rate + slippage_rate)
-    net_returns = strat_returns - costs
+    fee_costs = turnover * fee_rate
+    slippage_costs = turnover * slippage_rate
+    net_returns = gross_returns - fee_costs - slippage_costs
 
     equity = initial_capital * (1 + net_returns).cumprod()
+    gross_equity = initial_capital * (1 + gross_returns).cumprod()
 
-    # Dollar fees are turnover * fee_rate applied to the equity held just
-    # before the rebalance (i.e. equity at the end of the prior bar).
+    # Dollar costs are turnover * rate applied to the equity at the end of
+    # the prior bar (i.e. the capital that was rebalanced).
     prior_equity = equity.shift(1).fillna(initial_capital)
     total_fees = float((turnover * fee_rate * prior_equity).sum())
+    total_slippage = float((turnover * slippage_rate * prior_equity).sum())
 
-    # Buy-and-hold benchmark: park the same starting cash in the asset at the
-    # first bar and mark-to-market every subsequent bar. No fees.
     buy_and_hold_equity = initial_capital * (close / close.iloc[0])
     buy_and_hold_return = (
         float(close.iloc[-1] / close.iloc[0] - 1) if len(close) >= 2 else 0.0
     )
 
-    trades = _extract_trades(positions, close, net_returns)
+    trades = _extract_trades(
+        positions=positions,
+        close=close,
+        equity=equity,
+        turnover=turnover,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        initial_capital=initial_capital,
+    )
 
     return BacktestResult(
         equity=equity,
@@ -119,23 +149,19 @@ def run_backtest(
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
         total_fees=total_fees,
+        total_slippage=total_slippage,
         buy_and_hold_return=buy_and_hold_return,
         buy_and_hold_equity=buy_and_hold_equity,
+        gross_equity=gross_equity,
     )
 
 
 def execution_bars(positions: pd.Series) -> tuple[List[int], List[int]]:
     """Return integer indices where ``positions`` transitions to/from long.
 
-    These are the *execution candles* — the bars during which the engine
-    actually holds (or first stops holding) a position after the look-ahead
-    shift. A signal generated at bar ``N`` (close of bar N) becomes the
-    position at bar ``N+1``; that bar ``N+1`` is what this helper returns
-    for the entry, not the signal bar.
-
-    Exits are the first bar where ``positions`` drops back to zero. If a
-    position is still open at the end of the series there is no
-    corresponding exit index — visualizing that gap is the point.
+    Entries / exits are the *execution candles* — the bars where the engine
+    actually holds (or first stops holding) a position. A signal at bar N
+    becomes a position at bar N+1; this helper returns N+1, not N.
     """
     entries: List[int] = []
     exits: List[int] = []
@@ -154,28 +180,31 @@ def execution_bars(positions: pd.Series) -> tuple[List[int], List[int]]:
 def _extract_trades(
     positions: pd.Series,
     close: pd.Series,
-    net_returns: pd.Series,
+    equity: pd.Series,
+    turnover: pd.Series,
+    fee_rate: float,
+    slippage_rate: float,
+    initial_capital: float,
 ) -> List[Trade]:
     trades: List[Trade] = []
-    in_position = False
-    entry_idx: int | None = None
+    entries, exits = execution_bars(positions)
+    n_bars = len(positions)
 
-    n = len(positions)
-    for i in range(n):
-        long_now = positions.iloc[i] > 0
-        if long_now and not in_position:
-            entry_idx = i
-            in_position = True
-        elif not long_now and in_position:
-            assert entry_idx is not None
-            trades.append(_build_trade(entry_idx, i, positions, close, net_returns))
-            in_position = False
-            entry_idx = None
-
-    if in_position and entry_idx is not None:
+    for i, entry_idx in enumerate(entries):
+        is_open = i >= len(exits)
+        exit_idx = exits[i] if not is_open else n_bars - 1
         trades.append(
             _build_trade(
-                entry_idx, n - 1, positions, close, net_returns, open_at_end=True
+                entry_idx=entry_idx,
+                exit_idx=exit_idx,
+                positions=positions,
+                close=close,
+                equity=equity,
+                turnover=turnover,
+                fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
+                initial_capital=initial_capital,
+                open_at_end=is_open,
             )
         )
 
@@ -187,23 +216,72 @@ def _build_trade(
     exit_idx: int,
     positions: pd.Series,
     close: pd.Series,
-    net_returns: pd.Series,
+    equity: pd.Series,
+    turnover: pd.Series,
+    fee_rate: float,
+    slippage_rate: float,
+    initial_capital: float,
     open_at_end: bool = False,
 ) -> Trade:
-    # Entry is executed at the prior bar's close (where the signal was made).
-    entry_ref = max(entry_idx - 1, 0)
-    # On a normal exit, that same convention applies; if the trade is still
-    # open at the end of the series we mark-to-market at the final bar.
-    exit_ref = exit_idx if open_at_end else max(exit_idx - 1, 0)
+    n_bars = len(positions)
 
-    trade_net = net_returns.iloc[entry_idx : exit_idx + 1]
-    trade_return = float((1 + trade_net).prod() - 1)
+    # entry_idx is guaranteed >= 1 because positions[0] is always 0
+    # (signal.shift(1).fillna(0) starts flat).
+    entry_signal_time = positions.index[entry_idx - 1]
+    exit_signal_time: Optional[pd.Timestamp] = (
+        None if open_at_end else positions.index[exit_idx - 1]
+    )
+
+    raw_entry_close = float(close.iloc[entry_idx])
+    raw_exit_close = float(close.iloc[exit_idx])
+
+    entry_execution_price = raw_entry_close * (1 + slippage_rate)
+    exit_execution_price = raw_exit_close * (1 - slippage_rate)
+
+    # gross_return uses the close at the *signal* bars — that's the price
+    # ratio between when the position became active and when it became
+    # inactive in the engine's accounting. At zero costs it equals
+    # net_return; the displayed entry / exit execution prices live on
+    # different bars on purpose (they're what we transacted at).
+    gross_entry_close = float(close.iloc[entry_idx - 1])
+    gross_exit_close = (
+        float(close.iloc[-1]) if open_at_end else float(close.iloc[exit_idx - 1])
+    )
+    gross_return_pct = gross_exit_close / gross_entry_close - 1
+
+    entry_capital = float(equity.iloc[entry_idx - 1])
+    final_equity = float(equity.iloc[exit_idx])
+    pnl = final_equity - entry_capital
+    net_return_pct = pnl / entry_capital if entry_capital > 0 else 0.0
+
+    entry_fee = float(turnover.iloc[entry_idx] * fee_rate * entry_capital)
+    entry_slippage = float(turnover.iloc[entry_idx] * slippage_rate * entry_capital)
+    if open_at_end:
+        exit_fee = 0.0
+        exit_slippage = 0.0
+    else:
+        exit_prior_equity = float(equity.iloc[exit_idx - 1])
+        exit_fee = float(turnover.iloc[exit_idx] * fee_rate * exit_prior_equity)
+        exit_slippage = float(
+            turnover.iloc[exit_idx] * slippage_rate * exit_prior_equity
+        )
+    fees_paid = entry_fee + exit_fee
+    slippage_cost = entry_slippage + exit_slippage
+
+    bars_held = (n_bars - entry_idx) if open_at_end else (exit_idx - entry_idx)
 
     return Trade(
-        entry_time=positions.index[entry_ref],
-        exit_time=positions.index[exit_ref],
-        entry_price=float(close.iloc[entry_ref]),
-        exit_price=float(close.iloc[exit_ref]),
-        return_pct=trade_return,
-        bars_held=exit_idx - entry_idx + 1,
+        entry_time=positions.index[entry_idx],
+        exit_time=positions.index[exit_idx],
+        entry_signal_time=entry_signal_time,
+        exit_signal_time=exit_signal_time,
+        entry_execution_price=entry_execution_price,
+        exit_execution_price=exit_execution_price,
+        gross_return_pct=gross_return_pct,
+        net_return_pct=net_return_pct,
+        fees_paid=fees_paid,
+        slippage_cost_estimate=slippage_cost,
+        pnl=pnl,
+        entry_capital=entry_capital,
+        bars_held=bars_held,
     )

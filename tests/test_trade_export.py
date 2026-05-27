@@ -89,17 +89,19 @@ def test_entry_price_applies_slippage_above_close():
     df = trades_to_dataframe(result, candles)
     row = df.iloc[0]
     # Execution close at entry = 100; with 1% slippage, buy pays 101.
-    assert row["entry_price"] == pytest.approx(101.0)
+    assert row["entry_execution_price"] == pytest.approx(101.0)
     # Execution close at exit = 100; with 1% slippage, sell receives 99.
-    assert row["exit_price"] == pytest.approx(99.0)
+    assert row["exit_execution_price"] == pytest.approx(99.0)
 
 
-def test_gross_return_uses_raw_close_to_close():
+def test_gross_return_matches_price_move_the_strategy_actually_earned():
     candles, result = _basic_result(
-        [0, 1, 0, 0], [100, 100, 100, 110],
+        [0, 1, 0, 0], [100, 100, 110, 110],
         fee_rate=0.0, slippage_rate=0.005,
     )
-    # positions = [0, 0, 1, 0]; raw close at entry idx 2 = 100, exit idx 3 = 110.
+    # positions = [0, 0, 1, 0]; the position is held only during bar 2.
+    # gross_return is the close ratio between the entry and exit signal
+    # bars (close[1] -> close[2]) — what the strategy actually earned.
     df = trades_to_dataframe(result, candles)
     assert df.iloc[0]["gross_return_pct"] == pytest.approx(0.10)
 

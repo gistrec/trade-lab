@@ -200,9 +200,11 @@ def test_execution_bar_is_one_after_signal_bar():
     assert exits == [5]
 
 
-def test_execution_bar_does_not_match_trade_entry_time():
-    # The engine records Trade.entry_time at the SIGNAL bar; the marker
-    # should land on the EXECUTION bar, which is one bar later.
+def test_trade_entry_time_is_execution_bar_signal_time_is_one_before():
+    # Trade.entry_time records the *execution* bar (where the position is
+    # actually held); entry_signal_time records the bar before, where the
+    # decision was made. The two are one bar apart by construction of the
+    # look-ahead-protecting shift.
     candles = _candles([100, 100, 100, 100])
     result = run_backtest(
         candles,
@@ -213,13 +215,14 @@ def test_execution_bar_does_not_match_trade_entry_time():
     )
     assert len(result.trades) == 1
     trade = result.trades[0]
-    entries, exits = execution_bars(result.positions)
+    entries, _ = execution_bars(result.positions)
 
-    # Engine's stored entry_time is the bar BEFORE the position was held.
-    assert trade.entry_time == candles.index[1]
-    # The actual execution candle is one bar later.
-    assert candles.index[entries[0]] == candles.index[2]
-    assert candles.index[entries[0]] != trade.entry_time
+    # entry_time matches the execution bar from execution_bars().
+    assert trade.entry_time == candles.index[entries[0]]
+    assert trade.entry_time == candles.index[2]
+    # entry_signal_time is the bar before — where the strategy decided.
+    assert trade.entry_signal_time == candles.index[1]
+    assert trade.entry_signal_time != trade.entry_time
 
 
 def test_execution_bars_count_matches_trade_count_for_closed_trades():
@@ -267,7 +270,7 @@ def test_fees_and_slippage_reduce_returns():
         slippage_rate=0.005,
     )
     assert with_cost.equity.iloc[-1] < no_cost.equity.iloc[-1]
-    assert with_cost.trades[0].return_pct < no_cost.trades[0].return_pct
+    assert with_cost.trades[0].net_return_pct < no_cost.trades[0].net_return_pct
 
 
 def test_trade_extraction_matches_position_changes():
@@ -279,8 +282,11 @@ def test_trade_extraction_matches_position_changes():
     result = run_backtest(
         candles, strat, initial_capital=10_000, fee_rate=0, slippage_rate=0
     )
+    # positions = [0,0,0,1,1,0,0,1,1]
+    # Trade 1: held at bars 3, 4 -> 2 bars
+    # Trade 2 (still open at end): held at bars 7, 8 -> 2 bars
     assert len(result.trades) == 2
-    assert result.trades[0].bars_held == 3
+    assert result.trades[0].bars_held == 2
     assert result.trades[1].bars_held == 2
 
 
@@ -314,6 +320,85 @@ def test_invalid_position_size_raises():
         run_backtest(candles, _SignalStrategy([0, 0, 0]), position_size=0)
     with pytest.raises(ValueError):
         run_backtest(candles, _SignalStrategy([0, 0, 0]), position_size=1.5)
+
+
+def test_fee_is_charged_on_buy():
+    candles = _candles([100, 100, 100, 100])
+    # signals[1]=1 -> positions[2]=1; never exits before end.
+    result = run_backtest(
+        candles, _SignalStrategy([0, 1, 1, 1]),
+        initial_capital=10_000, fee_rate=0.01, slippage_rate=0.0,
+    )
+    # Entry fee at bar 2 = 1.0 * 0.01 * 10_000 = 100
+    assert result.total_fees == pytest.approx(100.0)
+    # And the entry shows up on Trade.fees_paid.
+    assert result.trades[0].fees_paid == pytest.approx(100.0)
+
+
+def test_fee_is_charged_on_sell():
+    candles = _candles([100, 100, 100, 100])
+    result = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.01, slippage_rate=0.0,
+    )
+    # Buy at bar 2 (fee 100), sell at bar 3 (fee = 0.01 * equity after buy = 99).
+    # Both legs roll into the same trade.
+    trade = result.trades[0]
+    assert trade.fees_paid == pytest.approx(199.0)
+
+
+def test_buy_execution_price_includes_positive_slippage():
+    candles = _candles([100, 100, 100, 100])
+    result = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.01,
+    )
+    # close at execution bar 2 = 100; +1% slippage -> 101.
+    assert result.trades[0].entry_execution_price == pytest.approx(101.0)
+
+
+def test_sell_execution_price_includes_negative_slippage():
+    candles = _candles([100, 100, 100, 100])
+    result = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.01,
+    )
+    # close at execution bar 3 = 100; -1% slippage -> 99.
+    assert result.trades[0].exit_execution_price == pytest.approx(99.0)
+
+
+def test_net_return_is_lower_than_gross_when_costs_enabled():
+    candles = _candles([100, 100, 110, 110])
+    no_cost = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    with_cost = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.001, slippage_rate=0.0005,
+    )
+    # Without costs: gross == net.
+    assert no_cost.trades[0].gross_return_pct == pytest.approx(
+        no_cost.trades[0].net_return_pct
+    )
+    # With costs: gross is unchanged, net is strictly lower.
+    assert with_cost.trades[0].gross_return_pct == pytest.approx(
+        no_cost.trades[0].gross_return_pct
+    )
+    assert with_cost.trades[0].net_return_pct < with_cost.trades[0].gross_return_pct
+
+
+def test_total_slippage_separately_tracked():
+    candles = _candles([100, 100, 100, 100])
+    result = run_backtest(
+        candles, _SignalStrategy([0, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.001, slippage_rate=0.0005,
+    )
+    # total_fees and total_slippage should be in their respective ratio:
+    # slippage / fee == 0.5
+    assert result.total_fees > 0
+    assert result.total_slippage > 0
+    assert result.total_slippage / result.total_fees == pytest.approx(0.5)
 
 
 def test_empty_candles_returns_empty_result():

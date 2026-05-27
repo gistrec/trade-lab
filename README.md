@@ -287,6 +287,56 @@ the strategy is just along for the ride.
 - `position_size` (default `1.0`) scales exposure: `0.5` means we deploy half
   of equity per long trade.
 
+## Trading costs
+
+Every backtest carries two explicit per-side costs:
+
+- **Fee** (`--fee-rate`, default `0.001` = 0.1%) — what the exchange charges.
+  Charged on every buy and every sell.
+- **Slippage** (`--slippage`, default `0.0005` = 0.05%) — the gap between the
+  close price and the price you actually trade at. Buys fill at
+  `close * (1 + slippage_rate)` (you pay more), sells at
+  `close * (1 - slippage_rate)` (you receive less).
+
+The report makes the round trip explicit:
+
+```
+Cost model
+  Buy cost (fee + slip):  0.15%
+  Sell cost (fee + slip): 0.15%
+  Round-trip cost:        0.30%
+```
+
+A trade has to clear the round-trip cost just to break even, so 0.30% per
+trade is the floor for "real" profitability with the defaults.
+
+### Maker vs taker fees
+
+Exchanges typically charge two different fee tiers:
+
+- **Maker** fees apply when you *add* liquidity to the order book (limit
+  orders that rest before being filled). They're lower — sometimes zero or
+  even negative as a rebate.
+- **Taker** fees apply when you *remove* liquidity (market orders, or limit
+  orders that match immediately). They're higher.
+
+trade-lab models *market* orders at the close of the execution bar (the
+simplest realistic model for a vectorized backtest). Market orders pay the
+**taker** fee, so set `--fee-rate` to the taker tier of your venue. Binance
+spot's standard taker fee is 0.10% at the time of writing — hence the default.
+
+### Why costs hit both entry and exit
+
+Even a single round-trip trade is two transactions. The exchange charges on
+each side; slippage hurts you on each side too. If you only charged costs on
+the entry (or only on the exit), the equity curve would look about half a
+percent more optimistic than reality per round-trip — enough to make a
+marginal strategy look profitable when it isn't.
+
+```bash
+trade-lab backtest --strategy sma_cross --fee-rate 0.001 --slippage 0.0005
+```
+
 ## Programmatic usage
 
 ```python
