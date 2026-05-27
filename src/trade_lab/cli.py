@@ -11,7 +11,11 @@ import pandas as pd
 from .backtest.engine import run_backtest
 from .backtest.metrics import benchmark_verdict, compute_metrics
 from .backtest.plotting import plot_equity_curve
-from .backtest.reports import trades_to_dataframe, write_trades_csv
+from .backtest.reports import (
+    trades_to_dataframe,
+    write_debug_trades_csv,
+    write_trades_csv,
+)
 from .backtest.sweep import run_sma_sweep
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
@@ -192,6 +196,19 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         if n_open > 0:
             print(f"  excluded {n_open} open position(s)")
 
+    if args.debug_trades_csv:
+        debug_path = write_debug_trades_csv(
+            result,
+            candles,
+            args.debug_trades_csv,
+            strategy=strategy,
+            limit=args.debug_trades_limit,
+        )
+        print(
+            f"Debug trades CSV:     {debug_path} "
+            f"(first {args.debug_trades_limit} completed trades)"
+        )
+
     if args.no_plot:
         return
 
@@ -348,6 +365,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--trades-csv",
         default=None,
         help="Export completed trades to this CSV path (e.g. outputs/trades.csv)",
+    )
+    p_bt.add_argument(
+        "--debug-trades-csv",
+        default=None,
+        help="Audit CSV with signal vs execution timing for the first N trades",
+    )
+    p_bt.add_argument(
+        "--debug-trades-limit",
+        type=int,
+        default=10,
+        help="Max trades to include in --debug-trades-csv (default 10)",
     )
     p_bt.set_defaults(func=cmd_backtest)
 

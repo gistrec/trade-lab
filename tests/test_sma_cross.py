@@ -47,6 +47,22 @@ def test_signals_index_matches_candles():
     assert signals.index.equals(candles.index)
 
 
+def test_sma_signals_are_causal_appending_future_does_not_change_past():
+    """Look-ahead audit: extending the series with arbitrary future bars
+    must not change signals over the original prefix."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    base = (rng.normal(0, 1, 50).cumsum() + 100).tolist()
+    extension = [1e6, 1e-6, 1e6, 1e-6]
+
+    strat = SMACrossStrategy(fast_period=5, slow_period=10)
+    sig_base = strat.generate_signals(_candles(base))
+    sig_extended_prefix = strat.generate_signals(_candles(base + extension)).iloc[: len(base)]
+
+    np.testing.assert_array_equal(sig_base.values, sig_extended_prefix.values)
+
+
 def test_invalid_periods_raise():
     with pytest.raises(ValueError):
         SMACrossStrategy(fast_period=20, slow_period=20)

@@ -76,6 +76,39 @@ def test_invalid_periods_raise():
         RegimeSMACrossStrategy(fast_period=200, slow_period=100, regime_period=300)
 
 
+def test_regime_signals_are_causal_appending_future_does_not_change_past():
+    """Look-ahead audit: if the regime strategy peeked at future bars, then
+    appending arbitrary future data would change signals over the original
+    prefix. Asserting byte-identical signals on the overlap proves it
+    doesn't."""
+    rng = np.random.default_rng(42)
+    base = np.cumsum(rng.normal(0, 1, 60)) + 100.0
+    extension = np.array([10.0, 1000.0, 5.0, 5000.0, 1.0, 9999.0])
+    candles_base = _candles(base.tolist())
+    candles_extended = _candles(np.concatenate([base, extension]).tolist())
+
+    strat = RegimeSMACrossStrategy(fast_period=5, slow_period=10, regime_period=20)
+    sig_base = strat.generate_signals(candles_base)
+    sig_extended_prefix = strat.generate_signals(candles_extended).iloc[: len(base)]
+
+    np.testing.assert_array_equal(sig_base.values, sig_extended_prefix.values)
+
+
+def test_regime_signal_at_bar_n_doesnt_use_close_after_n():
+    """Per-bar causality: changing one future bar's close must not affect
+    any signal at or before that bar."""
+    closes_a = [100.0 + 0.5 * i for i in range(40)]
+    closes_b = closes_a.copy()
+    closes_b[30] = 1e6  # absurd spike, well into the future relative to bar 25
+
+    strat = RegimeSMACrossStrategy(fast_period=3, slow_period=6, regime_period=10)
+    sig_a = strat.generate_signals(_candles(closes_a))
+    sig_b = strat.generate_signals(_candles(closes_b))
+
+    # Bars 0..29 are at-or-before the future change at bar 30; they must match.
+    pd.testing.assert_series_equal(sig_a.iloc[:30], sig_b.iloc[:30])
+
+
 def test_regime_filter_strictly_subset_of_plain_sma_cross():
     # The regime variant can never be long where the plain SMA cross isn't —
     # it only ever filters signals out, never adds them.
