@@ -26,6 +26,12 @@ pip install -e ".[dev]"
 
 Copy `.env.example` to `.env` and tweak defaults if desired.
 
+The optional Streamlit dashboard has its own extras group:
+
+```bash
+pip install -e ".[dashboard]"
+```
+
 ## Quick start
 
 ```bash
@@ -121,6 +127,35 @@ the full result with raw numeric values to the CSV. This is **research
 only** — picking "the best" parameters from a sweep is a notorious way to
 overfit. Use it to compare neighborhoods and to look for stable regions,
 not to choose live settings.
+
+## Streamlit dashboard
+
+A local-only dashboard for poking at a single backtest visually:
+
+```bash
+pip install -e ".[dashboard]"
+streamlit run src/trade_lab/dashboard/app.py
+```
+
+Sidebar controls: candle file path, strategy + parameters
+(`sma_cross` or `rsi`), initial cash / fee / slippage / position size,
+and an optional date range. The main panel shows summary metric cards,
+an interactive Plotly price chart with buy / sell markers placed on the
+execution candles, strategy-vs-buy-and-hold equity, drawdown, and the
+trade list.
+
+The dashboard reuses the regular backtest engine, strategies, and metrics
+— there is no duplicate logic. Candles are cached by file path; the
+backtest itself runs fresh on every interaction since parameters change
+too often to memoize safely. The dashboard is local-only by design: no
+auth, no execution, no live trading.
+
+Typical workflow:
+
+```bash
+trade-lab fetch --since 2024-01-01            # pull candles once
+streamlit run src/trade_lab/dashboard/app.py  # explore parameters
+```
 
 Sample output:
 
