@@ -63,8 +63,9 @@ class Metrics:
     buy_and_hold_final_equity: float
     buy_and_hold_max_drawdown: float
 
-    # Trade stats
-    num_trades: int
+    # Trade stats (over completed trades only)
+    num_trades: int                     # completed trades
+    num_open_trades: int                # still open at end of window
     win_rate: float
     avg_trade_return: float             # alias for avg_net_trade_return
     avg_gross_trade_return: float
@@ -72,6 +73,14 @@ class Metrics:
     avg_cost_per_trade: float           # (fees + slippage) / entry capital
     avg_win: float
     avg_loss: float
+    best_trade_return: float            # max net_return_pct among completed
+    worst_trade_return: float           # min net_return_pct among completed
+
+    # Activity diagnostics
+    avg_holding_period: float           # mean bars in position (completed)
+    median_holding_period: float        # median bars in position (completed)
+    exposure_pct: float                 # share of bars with non-zero position
+    fees_pct_of_initial_cash: float     # total_fees / initial_capital
 
     # Costs (dollars)
     total_fees: float
@@ -95,9 +104,19 @@ def _max_drawdown(equity: pd.Series) -> float:
 
 
 def compute_metrics(result: BacktestResult) -> Metrics:
-    """Compute summary metrics from a :class:`BacktestResult`."""
+    """Compute summary metrics from a :class:`BacktestResult`.
+
+    Trade-level aggregates (win rate, averages, holding period, best /
+    worst) cover *completed* trades only. Open positions at the end of
+    the window are mark-to-market but not counted in those statistics —
+    their unrealized P&L still shows up in equity, total_return, and
+    drawdown.
+    """
     equity = result.equity
     trades = result.trades
+
+    completed_trades = [t for t in trades if t.exit_signal_time is not None]
+    num_open_trades = len(trades) - len(completed_trades)
 
     bh_equity = result.buy_and_hold_equity
     bh_final = float(bh_equity.iloc[-1]) if not bh_equity.empty else 0.0
@@ -106,6 +125,16 @@ def compute_metrics(result: BacktestResult) -> Metrics:
     buy_cost = result.fee_rate + result.slippage_rate
     sell_cost = result.fee_rate + result.slippage_rate
     round_trip = buy_cost + sell_cost
+
+    positions = result.positions
+    exposure_pct = (
+        float((positions > 0).mean()) if not positions.empty else 0.0
+    )
+    fees_pct = (
+        float(result.total_fees / result.initial_capital)
+        if result.initial_capital > 0
+        else 0.0
+    )
 
     def _empty_metrics(final_equity: float, total_return: float, max_dd: float):
         return Metrics(
@@ -118,6 +147,7 @@ def compute_metrics(result: BacktestResult) -> Metrics:
             buy_and_hold_final_equity=bh_final,
             buy_and_hold_max_drawdown=bh_dd,
             num_trades=0,
+            num_open_trades=num_open_trades,
             win_rate=0.0,
             avg_trade_return=0.0,
             avg_gross_trade_return=0.0,
@@ -125,6 +155,12 @@ def compute_metrics(result: BacktestResult) -> Metrics:
             avg_cost_per_trade=0.0,
             avg_win=0.0,
             avg_loss=0.0,
+            best_trade_return=0.0,
+            worst_trade_return=0.0,
+            avg_holding_period=0.0,
+            median_holding_period=0.0,
+            exposure_pct=exposure_pct,
+            fees_pct_of_initial_cash=fees_pct,
             total_fees=result.total_fees,
             total_slippage=result.total_slippage,
             buy_cost_pct=buy_cost,
@@ -146,17 +182,18 @@ def compute_metrics(result: BacktestResult) -> Metrics:
         else 0.0
     )
 
-    if not trades:
+    if not completed_trades:
         return _empty_metrics(final_equity, total_return, max_dd)
 
-    gross_returns = pd.Series([t.gross_return_pct for t in trades])
-    net_returns = pd.Series([t.net_return_pct for t in trades])
+    gross_returns = pd.Series([t.gross_return_pct for t in completed_trades])
+    net_returns = pd.Series([t.net_return_pct for t in completed_trades])
+    holding_periods = pd.Series([t.bars_held for t in completed_trades])
     cost_per_trade = pd.Series(
         [
             (t.fees_paid + t.slippage_cost_estimate) / t.entry_capital
             if t.entry_capital > 0
             else 0.0
-            for t in trades
+            for t in completed_trades
         ]
     )
     wins = net_returns[net_returns > 0]
@@ -171,14 +208,21 @@ def compute_metrics(result: BacktestResult) -> Metrics:
         max_drawdown=max_dd,
         buy_and_hold_final_equity=bh_final,
         buy_and_hold_max_drawdown=bh_dd,
-        num_trades=len(trades),
-        win_rate=float(len(wins) / len(trades)),
+        num_trades=len(completed_trades),
+        num_open_trades=num_open_trades,
+        win_rate=float(len(wins) / len(completed_trades)),
         avg_trade_return=float(net_returns.mean()),
         avg_gross_trade_return=float(gross_returns.mean()),
         avg_net_trade_return=float(net_returns.mean()),
         avg_cost_per_trade=float(cost_per_trade.mean()),
         avg_win=float(wins.mean()) if not wins.empty else 0.0,
         avg_loss=float(losses.mean()) if not losses.empty else 0.0,
+        best_trade_return=float(net_returns.max()),
+        worst_trade_return=float(net_returns.min()),
+        avg_holding_period=float(holding_periods.mean()),
+        median_holding_period=float(holding_periods.median()),
+        exposure_pct=exposure_pct,
+        fees_pct_of_initial_cash=fees_pct,
         total_fees=result.total_fees,
         total_slippage=result.total_slippage,
         buy_cost_pct=buy_cost,
