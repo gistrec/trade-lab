@@ -8,6 +8,43 @@ import pandas as pd
 from .engine import BacktestResult
 
 
+VERDICT_OUTPERFORMS_BH = "OUTPERFORMS_BH"
+VERDICT_LOWER_RETURN_LOWER_DD = "LOWER_RETURN_LOWER_DD"
+VERDICT_UNDERPERFORMS_BH = "UNDERPERFORMS_BH"
+
+# Threshold for "meaningfully lower" drawdown in the LOWER_RETURN_LOWER_DD
+# verdict. 2 percentage points absolute keeps things conservative: a 1pp
+# improvement on DD isn't worth giving up return for.
+_MEANINGFUL_DD_DIFFERENCE = 0.02
+
+
+def benchmark_verdict(metrics: "Metrics") -> str:
+    """Classify the strategy against buy & hold.
+
+    Returns one of:
+
+    * ``OUTPERFORMS_BH`` — strategy return is higher AND max drawdown is
+      not worse than buy & hold.
+    * ``LOWER_RETURN_LOWER_DD`` — strategy return is lower but max drawdown
+      is meaningfully lower (>= 2pp). Defensible if you prefer lower risk.
+    * ``UNDERPERFORMS_BH`` — everything else. Includes the mixed case
+      ("higher return but worse drawdown") because trading more risk for
+      more return without a clear edge isn't an unambiguous win.
+    """
+    if (
+        metrics.total_return > metrics.buy_and_hold_return
+        and metrics.max_drawdown <= metrics.buy_and_hold_max_drawdown
+    ):
+        return VERDICT_OUTPERFORMS_BH
+    if (
+        metrics.total_return < metrics.buy_and_hold_return
+        and metrics.max_drawdown
+        < metrics.buy_and_hold_max_drawdown - _MEANINGFUL_DD_DIFFERENCE
+    ):
+        return VERDICT_LOWER_RETURN_LOWER_DD
+    return VERDICT_UNDERPERFORMS_BH
+
+
 @dataclass
 class Metrics:
     """Summary of backtest performance with cost transparency."""

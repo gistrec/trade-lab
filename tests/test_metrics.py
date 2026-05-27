@@ -2,7 +2,14 @@ import pandas as pd
 import pytest
 
 from trade_lab.backtest.engine import BacktestResult, Trade
-from trade_lab.backtest.metrics import compute_metrics
+from trade_lab.backtest.metrics import (
+    Metrics,
+    VERDICT_LOWER_RETURN_LOWER_DD,
+    VERDICT_OUTPERFORMS_BH,
+    VERDICT_UNDERPERFORMS_BH,
+    benchmark_verdict,
+    compute_metrics,
+)
 
 
 def _result(
@@ -111,6 +118,81 @@ def test_round_trip_cost_is_twice_per_side():
     assert m.buy_cost_pct == pytest.approx(0.0015)
     assert m.sell_cost_pct == pytest.approx(0.0015)
     assert m.round_trip_cost_pct == pytest.approx(0.003)
+
+
+def _verdict_metrics(
+    total_return: float, max_drawdown: float,
+    buy_and_hold_return: float, buy_and_hold_max_drawdown: float,
+) -> Metrics:
+    """Minimal Metrics object — only fields the verdict reads matter."""
+    return Metrics(
+        initial_capital=10_000,
+        final_equity=10_000 * (1 + total_return),
+        gross_return=total_return,
+        total_return=total_return,
+        buy_and_hold_return=buy_and_hold_return,
+        max_drawdown=max_drawdown,
+        buy_and_hold_final_equity=10_000 * (1 + buy_and_hold_return),
+        buy_and_hold_max_drawdown=buy_and_hold_max_drawdown,
+        num_trades=0, win_rate=0.0,
+        avg_trade_return=0.0, avg_gross_trade_return=0.0,
+        avg_net_trade_return=0.0, avg_cost_per_trade=0.0,
+        avg_win=0.0, avg_loss=0.0,
+        total_fees=0.0, total_slippage=0.0,
+        buy_cost_pct=0.0, sell_cost_pct=0.0, round_trip_cost_pct=0.0,
+    )
+
+
+def test_verdict_outperforms_when_return_higher_and_dd_not_worse():
+    m = _verdict_metrics(
+        total_return=0.30, max_drawdown=0.05,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.10,
+    )
+    assert benchmark_verdict(m) == VERDICT_OUTPERFORMS_BH
+
+
+def test_verdict_outperforms_when_return_higher_and_dd_equal():
+    m = _verdict_metrics(
+        total_return=0.30, max_drawdown=0.10,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.10,
+    )
+    assert benchmark_verdict(m) == VERDICT_OUTPERFORMS_BH
+
+
+def test_verdict_lower_return_lower_dd_when_dd_meaningfully_lower():
+    m = _verdict_metrics(
+        total_return=0.10, max_drawdown=0.05,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.15,
+    )
+    assert benchmark_verdict(m) == VERDICT_LOWER_RETURN_LOWER_DD
+
+
+def test_verdict_underperforms_when_dd_only_marginally_lower():
+    # Strategy DD is 1pp lower than B&H — under the 2pp threshold, so
+    # giving up return for that isn't a defensible tradeoff.
+    m = _verdict_metrics(
+        total_return=0.10, max_drawdown=0.09,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.10,
+    )
+    assert benchmark_verdict(m) == VERDICT_UNDERPERFORMS_BH
+
+
+def test_verdict_underperforms_when_return_lower_and_dd_not_better():
+    m = _verdict_metrics(
+        total_return=0.10, max_drawdown=0.15,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.10,
+    )
+    assert benchmark_verdict(m) == VERDICT_UNDERPERFORMS_BH
+
+
+def test_verdict_underperforms_when_higher_return_but_dd_worse():
+    # Mixed signal: higher return, but the strategy gave up risk control.
+    # Classified as UNDERPERFORMS to avoid praising risk-blind alpha.
+    m = _verdict_metrics(
+        total_return=0.30, max_drawdown=0.25,
+        buy_and_hold_return=0.20, buy_and_hold_max_drawdown=0.10,
+    )
+    assert benchmark_verdict(m) == VERDICT_UNDERPERFORMS_BH
 
 
 def test_avg_cost_per_trade_uses_trade_level_costs():

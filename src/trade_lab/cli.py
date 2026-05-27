@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from .backtest.engine import run_backtest
-from .backtest.metrics import compute_metrics
+from .backtest.metrics import benchmark_verdict, compute_metrics
 from .backtest.plotting import plot_equity_curve
 from .backtest.reports import trades_to_dataframe, write_trades_csv
 from .backtest.sweep import run_sma_sweep
@@ -167,6 +167,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print(f"  Final equity:       ${metrics.buy_and_hold_final_equity:,.2f}")
     print(f"  Total return:       {metrics.buy_and_hold_return:+.2%}")
     print(f"  Max drawdown:       {metrics.buy_and_hold_max_drawdown:.2%}")
+    print()
+    print(f"Verdict:              {benchmark_verdict(metrics)}")
 
     if args.trades_csv:
         csv_path = write_trades_csv(result, candles, args.trades_csv)
