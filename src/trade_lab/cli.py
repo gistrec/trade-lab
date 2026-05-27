@@ -11,6 +11,7 @@ import pandas as pd
 from .backtest.engine import run_backtest
 from .backtest.metrics import compute_metrics
 from .backtest.plotting import plot_equity_curve
+from .backtest.reports import trades_to_dataframe, write_trades_csv
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import candles_path, load_candles, save_candles
@@ -130,6 +131,15 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print(f"  Total return:       {metrics.buy_and_hold_return:.2%}")
     print(f"  Max drawdown:       {metrics.buy_and_hold_max_drawdown:.2%}")
 
+    if args.trades_csv:
+        csv_path = write_trades_csv(result, candles, args.trades_csv)
+        n_completed = len(trades_to_dataframe(result, candles))
+        n_total = len(trades_to_dataframe(result, candles, include_open=True))
+        n_open = n_total - n_completed
+        print(f"Trades CSV:           {csv_path} ({n_completed} completed)")
+        if n_open > 0:
+            print(f"  excluded {n_open} open position(s)")
+
     if args.no_plot:
         return
 
@@ -204,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-trades",
         action="store_true",
         help="Add a price panel with buy/sell markers on execution candles",
+    )
+    p_bt.add_argument(
+        "--trades-csv",
+        default=None,
+        help="Export completed trades to this CSV path (e.g. outputs/trades.csv)",
     )
     p_bt.set_defaults(func=cmd_backtest)
 

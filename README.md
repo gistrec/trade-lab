@@ -129,6 +129,40 @@ close where the decision was made); the marker derived from
 `execution_bars(positions)` records the bar after — they're intentionally
 one bar apart.
 
+### Exporting trades to CSV
+
+Pass `--trades-csv PATH` to dump the trade list:
+
+```bash
+trade-lab backtest --strategy sma_cross --trades-csv outputs/trades.csv
+```
+
+The CSV has one row per completed trade with these columns:
+
+| Column             | Meaning                                                                                              |
+|--------------------|------------------------------------------------------------------------------------------------------|
+| `entry_time`       | Timestamp of the execution candle (one bar after the signal candle).                                 |
+| `entry_price`      | `close[entry_bar] * (1 + slippage_rate)` — the slippage-adjusted price the strategy effectively paid.|
+| `exit_time`        | Timestamp of the execution candle for the exit.                                                      |
+| `exit_price`       | `close[exit_bar] * (1 - slippage_rate)` — what the strategy effectively received on the sell.        |
+| `gross_return_pct` | Raw close-to-close return between execution bars (no fees, no slippage).                             |
+| `net_return_pct`   | Net return from the strategy equity curve. Includes fees AND slippage.                               |
+| `fees_paid`        | Dollar exchange fees for the round trip. Excludes slippage (it's already in entry/exit prices).      |
+| `holding_period`   | Number of bars the position was actually held.                                                       |
+| `pnl`              | Dollar P&L (`equity_at_exit - equity_just_before_entry`).                                            |
+
+Sample row from a real run:
+
+```
+entry_time,entry_price,exit_time,exit_price,gross_return_pct,net_return_pct,fees_paid,holding_period,pnl
+2024-01-02 06:00:00+00:00,97.744,2024-01-03 04:00:00+00:00,100.864,0.03295,0.01211,20.14,22,121.12
+```
+
+Open positions at the end of the window are **excluded** from the CSV (the
+CLI prints "excluded N open position(s)" so you know). For programmatic use
+that needs them, call `trades_to_dataframe(result, candles, include_open=True)`
+— that adds an `is_open` column.
+
 ## Reading the output metrics
 
 | Metric                | What it means                                                                                       |
