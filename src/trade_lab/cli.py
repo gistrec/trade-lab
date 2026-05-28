@@ -40,6 +40,7 @@ from .data.storage import (
     save_candles,
 )
 from .strategies.base import Strategy
+from .strategies.donchian_trend import DonchianTrendEnsembleStrategy
 from .strategies.regime_only import RegimeOnlyStrategy
 from .strategies.regime_sma_cross import RegimeSMACrossStrategy
 from .strategies.rsi import RSIMeanReversionStrategy
@@ -50,6 +51,7 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "sma_cross": SMACrossStrategy,
     "regime_sma_cross": RegimeSMACrossStrategy,
     "regime_only": RegimeOnlyStrategy,
+    "donchian_trend": DonchianTrendEnsembleStrategy,
     "rsi": RSIMeanReversionStrategy,
 }
 

@@ -13,6 +13,7 @@ from trade_lab.backtest.metrics import Metrics, compute_metrics
 from trade_lab.backtest.reports import trades_to_dataframe
 from trade_lab.data.fetch_ohlcv import validate_ohlcv
 from trade_lab.data.storage import filter_candles_by_date
+from trade_lab.strategies.donchian_trend import DonchianTrendEnsembleStrategy
 from trade_lab.strategies.regime_only import RegimeOnlyStrategy
 from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
 from trade_lab.strategies.rsi import RSIMeanReversionStrategy
@@ -41,6 +42,14 @@ def _build_strategy(name: str, params: dict):
         )
     if name == "regime_only":
         return RegimeOnlyStrategy(regime_period=int(params["regime_period"]))
+    if name == "donchian_trend":
+        return DonchianTrendEnsembleStrategy(
+            donchian_lookbacks=params["donchian_lookbacks"],
+            sma_filter_periods=params["sma_filter_periods"],
+            vol_lookback=int(params["vol_lookback"]),
+            annual_vol_target=float(params["annual_vol_target"]),
+            max_position_size=float(params["max_position_size"]),
+        )
     if name == "rsi":
         return RSIMeanReversionStrategy(
             period=int(params["rsi_period"]),
@@ -62,7 +71,13 @@ def _sidebar_controls() -> dict:
         st.header("Strategy")
         strategy_name = st.selectbox(
             "Strategy",
-            ["sma_cross", "regime_sma_cross", "regime_only", "rsi"],
+            [
+                "sma_cross",
+                "regime_sma_cross",
+                "regime_only",
+                "donchian_trend",
+                "rsi",
+            ],
         )
         params: dict = {}
         if strategy_name == "sma_cross":
@@ -85,6 +100,24 @@ def _sidebar_controls() -> dict:
         elif strategy_name == "regime_only":
             params["regime_period"] = st.number_input(
                 "regime_period", min_value=1, max_value=2000, value=200, step=1
+            )
+        elif strategy_name == "donchian_trend":
+            params["donchian_lookbacks"] = st.text_input(
+                "donchian_lookbacks (CSV)", value="20,50,100"
+            )
+            params["sma_filter_periods"] = st.text_input(
+                "sma_filter_periods (CSV)", value="100,200"
+            )
+            params["vol_lookback"] = st.number_input(
+                "vol_lookback", min_value=2, max_value=200, value=30, step=1
+            )
+            params["annual_vol_target"] = st.number_input(
+                "annual_vol_target", min_value=0.01, max_value=2.0,
+                value=0.25, step=0.05, format="%.2f",
+            )
+            params["max_position_size"] = st.number_input(
+                "max_position_size", min_value=0.05, max_value=1.0,
+                value=1.0, step=0.05, format="%.2f",
             )
         else:
             params["rsi_period"] = st.number_input(
