@@ -14,10 +14,12 @@ from trade_lab.backtest.reports import trades_to_dataframe
 from trade_lab.data.fetch_ohlcv import validate_ohlcv
 from trade_lab.data.storage import filter_candles_by_date
 from trade_lab.strategies.donchian_trend import DonchianTrendEnsembleStrategy
+from trade_lab.strategies.pma_ratio import PriceMaRatioStrategy
 from trade_lab.strategies.regime_only import RegimeOnlyStrategy
 from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
 from trade_lab.strategies.rsi import RSIMeanReversionStrategy
 from trade_lab.strategies.sma_cross import SMACrossStrategy
+from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
 
 
 @st.cache_data(show_spinner="Loading candles...")
@@ -51,6 +53,26 @@ def _build_strategy(name: str, params: dict):
             max_position_size=float(params["max_position_size"]),
             rebalance_threshold=float(params["rebalance_threshold"]),
         )
+    if name == "tsmom":
+        return TimeSeriesMomentumStrategy(
+            lookbacks=params["lookbacks"],
+            sma_filter_periods=params["sma_filter_periods"],
+            vol_lookback=int(params["vol_lookback"]),
+            annual_vol_target=float(params["annual_vol_target"]),
+            max_position_size=float(params["max_position_size"]),
+            rebalance_threshold=float(params["rebalance_threshold"]),
+            use_vol_target=bool(params["use_vol_target"]),
+        )
+    if name == "pma_ratio":
+        return PriceMaRatioStrategy(
+            ma_periods=params["ma_periods"],
+            sma_filter_periods=params["sma_filter_periods"],
+            vol_lookback=int(params["vol_lookback"]),
+            annual_vol_target=float(params["annual_vol_target"]),
+            max_position_size=float(params["max_position_size"]),
+            rebalance_threshold=float(params["rebalance_threshold"]),
+            use_vol_target=bool(params["use_vol_target"]),
+        )
     if name == "rsi":
         return RSIMeanReversionStrategy(
             period=int(params["rsi_period"]),
@@ -77,6 +99,8 @@ def _sidebar_controls() -> dict:
                 "regime_sma_cross",
                 "regime_only",
                 "donchian_trend",
+                "tsmom",
+                "pma_ratio",
                 "rsi",
             ],
         )
@@ -123,6 +147,61 @@ def _sidebar_controls() -> dict:
             params["rebalance_threshold"] = st.number_input(
                 "rebalance_threshold", min_value=0.0, max_value=0.5,
                 value=0.05, step=0.01, format="%.3f",
+            )
+        elif strategy_name == "tsmom":
+            params["lookbacks"] = st.text_input(
+                "lookbacks (CSV)", value="28,60",
+                help="(28, 60) matches the deployable cluster-stable config.",
+            )
+            params["sma_filter_periods"] = st.text_input(
+                "sma_filter_periods (CSV)", value="200",
+                help="Empty to disable the regime gate.",
+            )
+            params["vol_lookback"] = st.number_input(
+                "vol_lookback", min_value=2, max_value=200, value=30, step=1
+            )
+            params["annual_vol_target"] = st.number_input(
+                "annual_vol_target", min_value=0.01, max_value=2.0,
+                value=0.25, step=0.05, format="%.2f",
+            )
+            params["max_position_size"] = st.number_input(
+                "max_position_size", min_value=0.05, max_value=1.0,
+                value=1.0, step=0.05, format="%.2f",
+            )
+            params["rebalance_threshold"] = st.number_input(
+                "rebalance_threshold", min_value=0.0, max_value=0.5,
+                value=0.05, step=0.01, format="%.3f",
+            )
+            params["use_vol_target"] = st.checkbox(
+                "use_vol_target", value=False,
+                help="Off for the deployable (28, 60) config.",
+            )
+        elif strategy_name == "pma_ratio":
+            params["ma_periods"] = st.text_input(
+                "ma_periods (CSV)", value="5,10,20,50,100",
+                help="Detzel et al. (2021) use {5, 10, 20, 50, 100}.",
+            )
+            params["sma_filter_periods"] = st.text_input(
+                "sma_filter_periods (CSV)", value="",
+                help="Empty follows the paper exactly.",
+            )
+            params["vol_lookback"] = st.number_input(
+                "vol_lookback", min_value=2, max_value=200, value=30, step=1
+            )
+            params["annual_vol_target"] = st.number_input(
+                "annual_vol_target", min_value=0.01, max_value=2.0,
+                value=0.25, step=0.05, format="%.2f",
+            )
+            params["max_position_size"] = st.number_input(
+                "max_position_size", min_value=0.05, max_value=1.0,
+                value=1.0, step=0.05, format="%.2f",
+            )
+            params["rebalance_threshold"] = st.number_input(
+                "rebalance_threshold", min_value=0.0, max_value=0.5,
+                value=0.05, step=0.01, format="%.3f",
+            )
+            params["use_vol_target"] = st.checkbox(
+                "use_vol_target", value=True,
             )
         else:
             params["rsi_period"] = st.number_input(
