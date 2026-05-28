@@ -18,9 +18,9 @@ credentials.** The bot writes; this UI reads.
                             Streamlit on 127.0.0.1:7000
 ```
 
-The monitoring process binds **only to localhost**. Public access via
-nginx + TLS + basic auth comes in a follow-up commit. Until then, the
-dashboard is reachable from the VPS itself but not from the Internet.
+The monitoring process binds **only to localhost**. Public access
+requires nginx + TLS + basic auth configured outside this project;
+the example server block is in the section below.
 
 ## Prerequisites
 
@@ -173,11 +173,124 @@ sudo systemctl daemon-reload
 sudo systemctl restart trade-lab-monitoring
 ```
 
-## What's not yet done
+## nginx + TLS + basic auth (your responsibility)
 
-Public access via nginx + TLS + basic auth is the next commit. Until
-that lands, the dashboard is reachable only from the VPS itself
-(`curl http://127.0.0.1:7000/` from the VPS shell) and not from the
-Internet. This is the intended state for this commit — it isolates
-the systemd unit, permissions, and binding-verification work into a
-reviewable change with no public exposure surface.
+The Streamlit binding above is private to the VPS. Public access — TLS,
+authentication, and the exposed hostname — is configured outside this
+project, in nginx and certbot. This is a deliberate split: the project
+ships the localhost-only baseline; you own the public-facing surface.
+
+**TLS certificate via certbot:**
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d monitoring.example.com
+```
+
+**Basic-auth password file:**
+
+```bash
+sudo apt install apache2-utils
+sudo htpasswd -c /etc/nginx/.htpasswd_monitoring <username>
+# Prompts for password. Use -c only on the first user; omit it to add more.
+sudo chmod 640 /etc/nginx/.htpasswd_monitoring
+sudo chown root:www-data /etc/nginx/.htpasswd_monitoring
+```
+
+**nginx server block** — `/etc/nginx/sites-available/monitoring.example.com`:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name monitoring.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/monitoring.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/monitoring.example.com/privkey.pem;
+
+    auth_basic           "trade-lab monitoring";
+    auth_basic_user_file /etc/nginx/.htpasswd_monitoring;
+
+    location / {
+        proxy_pass http://127.0.0.1:7000;
+
+        # WebSocket upgrade — Streamlit uses a WebSocket for its
+        # interactive session. WITHOUT these three headers the page
+        # loads once and then never updates: tabs, sliders, and
+        # the auto-refresh tick all silently break.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Streamlit long-polls the WebSocket; default 60s timeout
+        # would tear sessions down every minute.
+        proxy_read_timeout 86400;
+    }
+}
+
+# Redirect plaintext HTTP -> HTTPS.
+server {
+    listen 80;
+    server_name monitoring.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/monitoring.example.com \
+           /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+## Pre-deployment security checklist
+
+Before pointing humans at the dashboard, walk through this list and
+tick every box. A miss here is the difference between a private
+monitoring tool and an exposed read endpoint into your bot's behaviour.
+
+- [ ] System user `monitoring` exists with no shell and no home
+      (`getent passwd monitoring` ends in `/usr/sbin/nologin`).
+- [ ] Streamlit listens only on `127.0.0.1:7000`
+      (`sudo ss -tlnp | grep 7000` shows `127.0.0.1:7000`, never
+      `0.0.0.0:7000` or `*:7000`).
+- [ ] Curl from a non-VPS machine to `http://<public-ip>:7000/`
+      returns connection refused (not 200, not 301).
+- [ ] `sudo -u monitoring cat /opt/trade-lab/.env` returns
+      `Permission denied`. If it shows the file contents, the
+      monitoring user can read your API keys — **stop**.
+- [ ] Journal file is mode 0640 with group `monitoring`
+      (`stat -c '%a %U %G' /opt/trade-lab/data/journal/cycles.jsonl`
+      shows `640 botuser monitoring`).
+- [ ] systemd hardening directives are applied
+      (`systemctl show trade-lab-monitoring --property=NoNewPrivileges,ProtectSystem,ReadOnlyPaths`
+      shows `yes`, `strict`, `/opt/trade-lab`).
+- [ ] nginx server block has `auth_basic` and a populated
+      `.htpasswd_monitoring` (curl without `-u user:pass` returns 401).
+- [ ] TLS works — `curl -I -u user:pass https://monitoring.example.com/`
+      returns HTTP 200 with no cert warnings.
+- [ ] nginx has all three WebSocket upgrade headers
+      (`proxy_http_version 1.1`, `proxy_set_header Upgrade`,
+      `proxy_set_header Connection "upgrade"`). Without these the
+      dashboard loads once and never refreshes — visually confirmed
+      by clicking a tab and watching nothing change.
+- [ ] Mainnet indicator is visibly RED and large in the dashboard.
+      Verify by temporarily setting the bot's `sandbox=false` and
+      `allow_mainnet=true` in a test config (NEVER on the production
+      .env), restarting against that config, and confirming the
+      banner. Restore the original config before any real trading.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Status tab shows "no journal entries" | Bot has not written a cycle yet, or the path is wrong. | Verify `TRADE_LAB_MONITORING_JOURNAL_PATH` matches the bot's `--journal` path. Run `ls -la $JOURNAL_PATH` as the monitoring user. |
+| Status shows STALE/DOWN despite bot running | Bot writes but not within `MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS`. | Either raise the threshold to match the bot's cadence, or investigate why cycles are slow. |
+| Permission denied when reading the journal | `monitoring` user is not in the journal file's group, or the group bit is not set. | Re-run the permissions step (`chown botuser:monitoring`, `chmod 640`). |
+| Dashboard loads once and then stops updating | WebSocket headers missing in nginx. | Add `proxy_http_version 1.1`, `proxy_set_header Upgrade`, `proxy_set_header Connection "upgrade"`. |
+| 502 Bad Gateway from nginx | Streamlit not running, or wrong upstream port. | `sudo systemctl status trade-lab-monitoring`. Confirm `127.0.0.1:7000` matches `proxy_pass`. |
+| Dashboard publicly reachable on :7000 (CRITICAL) | `--server.address 127.0.0.1` missing or unit not reloaded. | Restore the flag, `daemon-reload`, restart. Run the cross-machine curl check before declaring fixed. |
+| Mainnet banner where testnet expected (CRITICAL) | Bot is connecting to mainnet. | **Stop the bot immediately.** Check `.env` for `TRADE_LAB_PAPER_SANDBOX` and `TRADE_LAB_PAPER_ALLOW_MAINNET`. If both flags are set wrong, the bot is executing real orders. |
