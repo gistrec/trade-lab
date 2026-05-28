@@ -18,10 +18,11 @@ Configuration via environment variables:
   default; the underlying data only updates once per bot cycle, so
   smaller values just waste CPU.
 
-Autorefresh uses an HTML ``<meta>`` tag rather than a third-party
-package — keeps the dependency surface minimal and survives Streamlit
-version changes without breakage. Full page reload, no preserved
-scroll position; acceptable for a single-screen monitoring view.
+Autorefresh uses ``streamlit-autorefresh`` (a thin JS component that
+triggers a Streamlit rerun without reloading the page). An HTML
+``<meta>`` tag would also tick but at the cost of a full page reload,
+which throws away the active tab and any other session state — for a
+multi-tab dashboard that is operationally annoying every refresh.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from typing import Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
     JournalReader, ReadStats, Staleness,
@@ -369,11 +371,11 @@ def main() -> None:
         page_title="trade-lab monitoring",
         layout="wide",
     )
-    # Native auto-refresh: full page reload every REFRESH_SECONDS.
-    # No third-party dependency; survives Streamlit version changes.
-    st.markdown(
-        f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">',
-        unsafe_allow_html=True,
+    # Streamlit rerun every REFRESH_SECONDS. No browser reload, so the
+    # active tab and other session state survive the tick.
+    st_autorefresh(
+        interval=REFRESH_SECONDS * 1000,
+        key="monitoring_autorefresh",
     )
 
     st.title("trade-lab monitoring")
