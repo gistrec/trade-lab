@@ -106,52 +106,18 @@ the bar count, so you can confirm the slice landed where you expected.
 
 ### Yearly validation (fixed parameters)
 
-`trade-lab yearly` evaluates a *fixed* set of strategies on each calendar
-year and lays out a comparison alongside buy-and-hold. There is no
-parameter sweep — every strategy uses preset parameters — so the report
-is a clean test of whether those specific configurations earn their
-keep year over year.
+`trade-lab yearly` evaluates a *fixed* set of strategies on each
+calendar year and lays out a comparison alongside buy-and-hold. No
+parameter sweep, no tuning per year. Bundled strategies:
+`buy_and_hold`, `regime_only_200`, `regime_only_300`,
+`sma_cross_20_100`, `regime_sma_cross_20_100_200`, `golden_cross_50_200`.
 
 ```bash
-trade-lab yearly --symbol BTC/USDT --timeframe 1d \
-    --output-csv outputs/yearly.csv
+trade-lab yearly --symbol BTC/USDT --timeframe 1d --output-csv outputs/yearly.csv
 ```
 
-Bundled strategies (you can pass your own via the Python API):
-
-- `buy_and_hold` (baseline)
-- `regime_only_200` / `regime_only_300` — long when `close > SMA(N)`,
-  flat otherwise. No crossover.
-- `sma_cross_20_100`
-- `regime_sma_cross_20_100_200`
-- `golden_cross_50_200`
-
-Per-year columns: `return`, `buy_and_hold_return`, `max_drawdown`,
-`buy_and_hold_max_drawdown`, `exposure`, `num_trades`, `fees_paid`,
-`verdict`. The aggregate table adds avg / median / best / worst annual
-return per strategy, the count of years that beat B&H on return and on
-drawdown, and average exposure.
-
-Aggregate across years for BTC/USDT 1d (2018-2026, 9 calendar years):
-
-```
-strategy                    total_years  avg_annual  median  best     worst   bh_wins  lower_dd_yrs  avg_exposure
-buy_and_hold                          9    +61.53%   +57.57%  +301.67%  -72.33%      0           0         100%
-regime_only_200                       9    +40.58%    +0.00%  +173.23%  -21.71%      3           8         48%
-regime_only_300                       9    +41.60%    +0.00%  +191.17%   -5.61%      5           7         55%
-sma_cross_20_100                      9    +40.92%   +52.72%  +169.55%  -33.28%      5           6         50%
-regime_sma_cross_20_100_200           9    +44.16%   +10.95%  +140.19%   +0.00%      5           7         43%
-golden_cross_50_200                   9    +32.00%   +17.47%  +108.56%  -28.93%      3           7         48%
-```
-
-The honest reading: all strategies trail buy-and-hold on average return
-(40-44% vs 61%), but every single one wraps that gap inside a much
-better worst-year (regime_sma_cross's worst year was 0% vs B&H's -72%)
-and lower drawdowns in 6-8 out of 9 years. The defensive ones earn
-their keep by sitting in cash during 2018, 2022, and parts of 2025 —
-years where holding BTC was painful. That tradeoff — slightly lower
-upside, dramatically better downside — is the actual reason to run any
-of these strategies over passive holding.
+Real 9-year aggregate on BTC/USDT 1d — full table and commentary in
+[docs/results/yearly_btc.md](docs/results/yearly_btc.md).
 
 ### Multi-asset validation
 
@@ -160,109 +126,38 @@ across several symbols. The point is to test whether behaviour you saw
 on BTC generalizes — or whether you got lucky on one ticker.
 
 ```bash
-trade-lab multi-asset \
-    --symbols BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT \
-    --timeframe 1d \
-    --output-csv outputs/multi_asset.csv
+trade-lab multi-asset --symbols BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT \
+    --timeframe 1d --output-csv outputs/multi_asset.csv
 ```
 
-Three CSVs are produced: per-(asset, year, strategy) detail, per-(asset,
-strategy) aggregate, and an across-asset summary.
-
-The cross-asset summary on BTC/ETH/BNB/SOL daily 2018-2026 (SOL from
-2020), 34 asset-years in total:
-
-```
-strategy                    avg_return  avg_worst_year  bh_wins/34  lower_dd/34  avg_expo
-buy_and_hold                  +436.14%         -75.66%          0            0     100%
-regime_only_200                +98.71%         -23.79%         17           26      46%
-regime_only_300                +88.18%         -31.54%         16           26      48%
-sma_cross_20_100              +202.05%         -42.78%         20           25      48%
-regime_sma_cross_20_100_200    +95.36%         -13.93%         18           27      38%
-golden_cross_50_200            +89.37%         -37.83%         13           26      46%
-```
-
-Three things to take away:
-
-1. **The regime filters generalize.** Every active strategy reduces
-   drawdown vs buy-and-hold in 25-27 out of 34 asset-years — the
-   effect is not a BTC artefact.
-2. **regime_sma_cross has the best worst-year on average (-14%)** —
-   on BTC alone the worst was 0%, but ETH/BNB/SOL pull the average down
-   only to -14%. Compare to buy-and-hold averaging a -76% worst year
-   across the four assets.
-3. **SOL skews the average return numbers.** B&H on SOL returned +1414%
-   on average (one year was +9128%), which the active strategies can't
-   match because they take time to enter. That extreme rebound year
-   is the main reason any strategy "loses" on raw return across this
-   panel.
+Three CSVs are produced: per-(asset, year, strategy) detail,
+per-(asset, strategy) aggregate, and an across-asset summary. Real
+4-asset / 34-year results in
+[docs/results/multi_asset.md](docs/results/multi_asset.md).
 
 ### Walk-forward validation
 
 `trade-lab walk-forward` cuts the dataset into rolling train / test
-windows (default: 2-year train, 1-year test, stepping forward by 1
-year), runs a sweep on each train slice, picks the best `(fast, slow)`
-pair on train only, and evaluates that pair on the immediately
-following test slice. One row per window in the CSV.
+windows (default: 2-year train, 1-year test, step 1 year), runs a
+sweep on each train slice, picks the best `(strategy, params)`
+candidate from train only, and evaluates that pair on the immediately
+following test slice.
 
 ```bash
-trade-lab walk-forward \
-    --symbol BTC/USDT --timeframe 1d \
+trade-lab walk-forward --symbol BTC/USDT --timeframe 1d \
     --strategies sma_cross,regime_sma_cross \
-    --fast-periods 5,10,20,30 \
-    --slow-periods 50,100,150,200 \
+    --fast-periods 5,10,20,30 --slow-periods 50,100,150,200 \
     --regime-periods 100,200,300 \
     --objective total_return \
     --train-years 2 --test-years 1 --step-years 1 \
     --output-csv outputs/walk_forward.csv
 ```
 
-`--strategies` (default `sma_cross,regime_sma_cross`) chooses which
-SMA-family strategies enter the train sweep on each window. The
-selector picks the single best `(strategy, params)` candidate across
-all of them; the chosen strategy is recorded per row so you can see
-which family generalized in which regime.
-
-`--objective` picks the selection criterion. `total_return` (default)
-chases raw growth; `return_div_drawdown` chases risk-adjusted picks —
-useful when you'd rather avoid the parameter sets that nuked train
-just to win on return.
-
-Sample run on real BTC/USDT 1d (2018 → 2026) with `total_return`:
-
-```
-train_period         test_period         selected_strategy    params           train_ret  test_ret  test_BH   verdict
-2018-01-01-2019-12-31 2020-01-01-2020-12-31 sma_cross         f=30/s=100        +125.17%  +237.34%  +301.67%  LOWER_RETURN_LOWER_DD
-2019-01-01-2020-12-31 2021-01-01-2021-12-31 sma_cross         f=30/s=50         +644.85%   +10.87%   +57.57%  LOWER_RETURN_LOWER_DD
-2020-01-01-2021-12-31 2022-01-01-2022-12-31 sma_cross         f=5/s=100         +562.11%   -16.18%   -65.34%        OUTPERFORMS_BH
-2021-01-01-2022-12-31 2023-01-01-2023-12-31 sma_cross         f=5/s=150          +10.96%   +31.18%  +154.46%  LOWER_RETURN_LOWER_DD
-2022-01-01-2023-12-31 2024-01-01-2024-12-31 regime_sma_cross  f=5/s=50/r=100     +85.42%   +15.44%  +111.81%      UNDERPERFORMS_BH
-2023-01-01-2024-12-31 2025-01-01-2025-12-31 regime_sma_cross  f=30/s=100/r=300  +175.57%    +0.00%    -7.34%        OUTPERFORMS_BH
-2024-01-01-2025-12-31 2026-01-01-2026-05-27 sma_cross         f=30/s=50          +54.77%    +5.36%   -16.20%        OUTPERFORMS_BH
-```
-
-Switching to `--objective return_div_drawdown` swaps two of the
-selections to the regime variant (lower DD on train wins the ratio
-even when raw return is similar), and confirms the same shape: the
-strategy's edge is real in bear / sideways regimes, not in bulls.
-
-Two things to read off this table:
-
-1. **Parameter instability.** The "best" pair changes every window:
-   30/100 → 30/50 → 5/100 → 5/150 → 5/200 → 5/50 → 30/50. If the SMA
-   crossover had a stable edge on this market, the optimum on train
-   would generalize. It doesn't — train selections shift with the
-   regime, which is the classic signature of overfitting on a sweep.
-2. **The full-history sweep is misleading.** The single-pass
-   `trade-lab sweep` shows `30/100` with +1419% over the whole 2018-26
-   window. Walk-forward shows the strategy actually delivers far less
-   than that out-of-sample: median window test return is in the
-   single-to-low-double digits.
-
-The strategy still has a real edge in bear regimes (the 2022 column
-shows the only `OUTPERFORMS_BH` with a positive *relative* return when
-B&H lost 65%). That's the signal worth keeping; the "huge total return"
-number from the full-history sweep is mostly a sweep artefact.
+`--strategies` picks which SMA-family candidates enter the train sweep.
+`--objective` is `total_return` (default) or `return_div_drawdown` for
+risk-adjusted picks. Real 7-window BTC/USDT 1d run, plus what the
+parameter instability tells us, in
+[docs/results/walk_forward_btc.md](docs/results/walk_forward_btc.md).
 
 ### Parameter sweeps
 
@@ -567,197 +462,26 @@ fee/slippage handling, trade extraction, position sizing, total-fee
 calculation, buy & hold), and metrics (returns, max drawdown across multiple
 peaks).
 
-## Donchian trend ensemble with volatility targeting
+## Strategies
 
-`donchian_trend` is a research candidate that combines three building
-blocks with relatively strong out-of-sample evidence individually, with
-no ML, no short-term mean reversion, and no parameter optimization
-baked into the strategy itself:
+Each bundled strategy has a dedicated doc with exact rules, defaults,
+example CLI invocations, and any per-strategy results worth pinning:
 
-1. **Donchian breakout ensemble.** For each lookback ``L`` in
-   ``donchian_lookbacks`` (default ``20, 50, 100``):
-   - prev_high = ``close.rolling(L).max().shift(1)`` — strictly the
-     prior L bars, never including today's close.
-   - prev_low  = ``close.rolling(L).min().shift(1)``.
-   - State machine: long if ``close > prev_high``, flat if
-     ``close < prev_low``, otherwise hold previous state.
-   - The raw signal is the *mean* of the per-lookback long states, so
-     partial agreement produces partial exposure (e.g. ``1/3``,
-     ``2/3``, ``1``).
+- [`sma_cross`](docs/strategies/sma_cross.md) — simple fast-vs-slow
+  SMA crossover; the trend-following baseline.
+- [`regime_sma_cross`](docs/strategies/regime_sma_cross.md) — crossover
+  gated by a long-term regime SMA.
+- [`regime_only`](docs/strategies/regime_only.md) — pure long-or-flat
+  regime filter, no crossover.
+- [`donchian_trend`](docs/strategies/donchian_trend.md) — Donchian
+  breakout ensemble + SMA filter + volatility targeting.
+- [`rsi`](docs/strategies/rsi.md) — RSI mean reversion (contrast
+  baseline, not a recommendation).
 
-2. **SMA trend filter.** Only allow long exposure while
-   ``close > SMA(P)`` for every ``P`` in ``sma_filter_periods``
-   (default ``100, 200``). Warm-up bars (where any SMA is still NaN)
-   are treated as filter-fails-shut.
-
-3. **Volatility targeting.**
-   - ``realized_vol_annual = std(daily_returns over vol_lookback) * sqrt(annualization_factor)``
-     (default 30-bar lookback, ``sqrt(365)``).
-   - ``vol_weight = annual_vol_target / realized_vol_annual``
-     (default target 25%).
-   - ``position = clip(raw_signal * vol_weight, 0, max_position_size)``
-     (default cap 1.0 — spot-only, no leverage).
-   - Missing or zero realized vol maps to zero exposure (never
-     silently levers up).
-
-4. (Optional) **BTC market gate.** If you construct the strategy with
-   ``btc_candles=...``, exposure is additionally gated on
-   ``BTC > BTC SMA(btc_gate_sma_period)`` (default 200). Useful when
-   running the same rules on altcoins; redundant on BTC itself.
-
-### Execution and lookahead
-
-All signals at bar ``N`` use only data available at close of ``N``.
-The engine then applies its standard one-bar shift, so a signal at
-``N`` only affects positions from bar ``N+1`` onward. Returns are
-close-to-close. Fees and slippage are charged on every change in
-exposure (so vol-targeting micro-rebalances do incur cost — turnover
-is real). All assertions are pinned by the
-``tests/test_donchian_trend.py`` causality test.
-
-### How to run
-
-```bash
-# Default parameters
-trade-lab backtest --strategy donchian_trend --symbol BTC/USDT --timeframe 1d
-
-# All parameters explicit
-trade-lab backtest --strategy donchian_trend --symbol BTC/USDT --timeframe 1d \
-    --param 'donchian_lookbacks=20,50,100' \
-    --param 'sma_filter_periods=100,200' \
-    --param vol_lookback=30 \
-    --param annual_vol_target=0.25 \
-    --param max_position_size=1.0
-```
-
-The CLI accepts the lookback lists as comma-separated strings via
-``--param``; the strategy constructor normalizes them.
-
-### Subperiod result on BTC/USDT 1d (default parameters)
-
-The strategy was *not* tuned to these windows. Default lookbacks /
-vol target are the ones documented above; the backtest spans
-2018-01-01 through 2026-05-27 and the subperiods slice that data with
-``--start-date`` / ``--end-date``.
-
-```
-period       strategy   buy_&_hold   strat_dd   bh_dd     exposure   verdict
-2018           +0.00%     -72.33%      0.00%   81.18%       0.0%   OUTPERFORMS_BH
-2019           -3.55%     +89.49%      7.02%   49.41%      13.4%   LOWER_RETURN_LOWER_DD
-2020-2021     +91.40%    +541.83%     19.20%   53.60%      53.1%   LOWER_RETURN_LOWER_DD
-2022           +0.00%     -65.34%      0.00%   66.93%       0.0%   OUTPERFORMS_BH
-2023-2025     +62.43%    +427.47%     16.24%   32.02%      51.5%   LOWER_RETURN_LOWER_DD
-2018-2026    +314.02%    +456.42%     22.62%   81.18%      45.5%   LOWER_RETURN_LOWER_DD
-```
-
-Honest reading: the strategy stays in cash through both 2018 and 2022
-bears (0% exposure, 0% return, 0% drawdown), at the cost of leaving
-most of the 2020-2021 and 2023-2025 bull-run upside on the table. The
-full-window verdict is `LOWER_RETURN_LOWER_DD` — *not* a profitability
-claim. 44 round-trip trades across 8 years cost ~16% of initial
-capital in cumulative fees + slippage.
-
-### Known limitations
-
-- **Single-asset only.** The engine processes one symbol at a time;
-  the multi-asset portfolio cap from the strategy spec is enforced
-  per-asset by ``max_position_size`` rather than across a basket.
-- **Daily turnover from vol-targeting.** There is no rebalance band,
-  so a daily change in realized vol creates a (small) rebalance every
-  bar the strategy is long. Fees scale with that — the 16% lifetime
-  fee burn on the BTC backtest above is partly from those micro
-  rebalances. A rebalance band parameter is a natural follow-up.
-- **BTC gate is per-instance.** It works programmatically by passing
-  ``btc_candles`` to the constructor but isn't yet wired into the CLI
-  (which loads only one symbol's candles).
-- **No funding / borrowing.** Spot-only, long-or-cash. No carry costs
-  modelled for futures or perps.
-
-## Suggested next experiments
-
-A few small studies that are easy to run with what's already shipped — each
-generates an equity curve and a buy-and-hold overlay you can compare in
-the report or the Streamlit dashboard.
-
-### 1. BTC/USDT on the 4-hour timeframe
-
-The hourly default is noisy; 4h smooths out a lot of intrabar wiggle and
-usually trades a lot less.
-
-```bash
-trade-lab fetch  --symbol BTC/USDT --timeframe 4h --since 2023-01-01
-trade-lab backtest \
-    --strategy sma_cross --symbol BTC/USDT --timeframe 4h \
-    --param fast_period=20 --param slow_period=100
-```
-
-Compare the `Verdict:` line and the `Buy & hold` block against the 1h
-defaults — does smoothing actually help, or just push the trade count
-down without improving net return?
-
-### 2. BTC/USDT on the 1-day timeframe
-
-Slower data lets you backtest longer windows cheaply and is what most
-"trend-following" research uses.
-
-```bash
-trade-lab fetch  --symbol BTC/USDT --timeframe 1d --since 2018-01-01
-trade-lab backtest \
-    --strategy sma_cross --symbol BTC/USDT --timeframe 1d \
-    --param fast_period=20 --param slow_period=100
-```
-
-Daily SMA crossovers are a classic comparison point. Expect very few
-trades (single digits per year) and a `Verdict:` that's heavily driven
-by whether you caught the big moves.
-
-### 3a. Regime-filtered SMA crossover
-
-`regime_sma_cross` is the same fast-vs-slow crossover but gated by a
-long-term regime SMA — it only takes longs while price is above the
-regime line. The aim is to skip the false signals during bear regimes
-that drag the plain crossover below buy & hold:
-
-```bash
-trade-lab backtest \
-    --strategy regime_sma_cross --symbol BTC/USDT --timeframe 1d \
-    --param fast_period=20 --param slow_period=100 --param regime_period=200
-```
-
-Expect fewer trades, much smaller drawdown during downtrends, and often
-a `LOWER_RETURN_LOWER_DD` verdict on bull-only windows (you give up some
-upside for the regime guard). Compare against the plain `sma_cross`
-with the same fast/slow on the same window.
-
-### 3b. Slower SMA pairs (50 / 200, the "Golden cross")
-
-The 50/200 crossover is the textbook trend filter. On crypto it triggers
-rarely; on daily bars it might trigger once a year.
-
-```bash
-trade-lab backtest \
-    --strategy sma_cross --symbol BTC/USDT --timeframe 1d \
-    --param fast_period=50 --param slow_period=200
-```
-
-Run it on top of the 1d candles fetched above and look at:
-- `Avg holding period` (should be hundreds of bars),
-- `Number of trades` (should be tiny),
-- `Verdict` vs the faster 20/100 pair.
-
-### 4. Compare each run against buy & hold
-
-Every run already reports `Buy & hold` final equity, return, and max
-drawdown alongside the strategy block, plus a one-word `Verdict`
-(`OUTPERFORMS_BH` / `LOWER_RETURN_LOWER_DD` / `UNDERPERFORMS_BH`). When
-working through the experiments above, the question to keep in mind is:
-
-> Did this strategy beat *just holding the asset* on the period I picked?
-
-If the answer is "no" — or "only because I chose this window" — that's a
-signal to try different windows (`--start-date` / `--end-date`) before
-believing the result. Use `trade-lab sweep` to scan parameters on the
-training window and re-confirm on a held-out test window.
+Adding a new strategy is a five-minute job — subclass `Strategy`,
+implement `generate_signals(candles)`, register the class in
+`STRATEGIES` in `src/trade_lab/cli.py`. See
+[Adding a new strategy](#adding-a-new-strategy) below.
 
 ## Roadmap
 
