@@ -65,12 +65,20 @@ def run_cross_sectional_momentum(
     fee_rate: float = 0.001,
     slippage_rate: float = 0.0005,
     annualization_factor: int = 365,
+    eligibility: Optional[pd.DataFrame] = None,
 ) -> CrossSectionalResult:
     """Run the long-only top-N cross-sectional momentum portfolio.
 
     Parameters mirror the literature defaults: 30-day lookback, weekly
     rebalance, top-3 basket. ``weighting`` is either ``"equal"`` or
     ``"inverse_vol"``.
+
+    Pass ``eligibility`` (DataFrame[date x asset] of bool) to restrict
+    the selection pool at each rebalance — that's how the PIT universe
+    is wired in. When provided, an asset is considered only if its
+    eligibility cell is True at the rebalance date. Forced exit: any
+    held asset whose eligibility flips to False *between* rebalances
+    is zeroed out immediately (Binance delisting case).
     """
     if lookback_days < 2:
         raise ValueError("lookback_days must be >= 2")
@@ -102,6 +110,8 @@ def run_cross_sectional_momentum(
             initial_capital=initial_capital,
         )
 
+    aligned_eligibility = _align_eligibility(eligibility, closes)
+
     btc_gate = _build_btc_gate(btc_candles, closes.index, btc_gate_sma_period)
     target_weights = _build_target_weights(
         closes=closes,
@@ -111,6 +121,7 @@ def run_cross_sectional_momentum(
         weighting=weighting,
         vol_lookback=vol_lookback,
         btc_gate=btc_gate,
+        eligibility=aligned_eligibility,
     )
 
     # Shift target weights by one bar so we only ever hold weights from
@@ -199,6 +210,21 @@ def _build_btc_gate(
     return gate.reindex(target_index, method="ffill").fillna(False)
 
 
+def _align_eligibility(
+    eligibility: Optional[pd.DataFrame],
+    closes: pd.DataFrame,
+) -> Optional[pd.DataFrame]:
+    """Reindex ``eligibility`` to match ``closes`` shape; ``None`` → no mask.
+
+    Missing dates / columns default to ``False`` — an unspecified cell
+    is treated as "not in the universe" rather than "trade anyway".
+    """
+    if eligibility is None:
+        return None
+    aligned = eligibility.reindex(index=closes.index, columns=closes.columns)
+    return aligned.fillna(False).astype(bool)
+
+
 def _build_target_weights(
     closes: pd.DataFrame,
     lookback_days: int,
@@ -207,12 +233,18 @@ def _build_target_weights(
     weighting: str,
     vol_lookback: int,
     btc_gate: pd.Series,
+    eligibility: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Compute the target weights matrix held *from* each date forward.
 
     The weights matrix is rebuilt on rebalance dates and held flat in
     between. All values are valid as of the close of the row's date,
     i.e. they use no information from later bars.
+
+    With ``eligibility`` set, the rebalance picks only from True cells
+    of that row, and any *held* coin whose eligibility flips to False
+    between rebalances is zeroed out at that bar — the forced-exit
+    rule that mirrors a real Binance delisting event.
     """
     weights = pd.DataFrame(0.0, index=closes.index, columns=closes.columns)
 
@@ -223,6 +255,9 @@ def _build_target_weights(
 
     last_weights = pd.Series(0.0, index=closes.columns)
     for i, date in enumerate(closes.index):
+        eligible_row = (
+            eligibility.iloc[i] if eligibility is not None else None
+        )
         if i % rebalance_days == 0:
             last_weights = _rebalance(
                 trailing_return.iloc[i],
@@ -230,7 +265,13 @@ def _build_target_weights(
                 top_k=top_k,
                 weighting=weighting,
                 btc_in_market=bool(btc_gate.iloc[i]) if not btc_gate.empty else True,
+                eligibility=eligible_row,
             )
+        # Forced-exit step: if a held coin became ineligible since the
+        # last rebalance, drop it now. The freed weight sits in cash
+        # until the next scheduled rebalance.
+        if eligible_row is not None:
+            last_weights = last_weights.where(eligible_row, other=0.0)
         weights.iloc[i] = last_weights
     return weights
 
@@ -241,16 +282,21 @@ def _rebalance(
     top_k: int,
     weighting: str,
     btc_in_market: bool,
+    eligibility: Optional[pd.Series] = None,
 ) -> pd.Series:
     """Compute new target weights given the latest snapshot.
 
-    Empty selection (no positive-return assets, or BTC gate closed) yields
-    an all-zeros vector — the portfolio sits in cash that week.
+    Empty selection (no positive-return assets, BTC gate closed, or
+    empty PIT universe) yields an all-zeros vector — the portfolio sits
+    in cash that week.
     """
     out = pd.Series(0.0, index=returns_now.index)
     if not btc_in_market:
         return out
     eligible = returns_now.dropna()
+    if eligibility is not None:
+        mask = eligibility.reindex(eligible.index).fillna(False)
+        eligible = eligible[mask]
     eligible = eligible[eligible > 0]
     if eligible.empty:
         return out

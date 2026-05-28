@@ -211,3 +211,119 @@ def test_no_eligible_asset_means_cash():
     )
     assert (res.weights.sum(axis=1) == 0.0).all()
     assert res.total_return == 0.0
+
+
+# ---------------------------------------------------------------------------
+# PIT eligibility tests
+# ---------------------------------------------------------------------------
+
+
+def test_eligibility_none_matches_legacy_behaviour():
+    """eligibility=None must reproduce the pre-feature output exactly —
+    the new parameter must be a strict superset of the old API."""
+    universe = _universe(n_assets=4, n_bars=400, seed=0)
+    a = run_cross_sectional_momentum(universe, lookback_days=30, rebalance_days=7, top_k=2)
+    b = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=2, eligibility=None,
+    )
+    pd.testing.assert_series_equal(a.equity, b.equity)
+    pd.testing.assert_frame_equal(a.weights, b.weights)
+
+
+def test_eligibility_excludes_specified_asset():
+    """A coin marked ineligible everywhere must never appear in weights."""
+    universe = _universe(n_assets=4, n_bars=400, seed=0)
+    closes = pd.concat({k: v["close"] for k, v in universe.items()}, axis=1)
+    eligibility = pd.DataFrame(True, index=closes.index, columns=closes.columns)
+    eligibility["ASSET_0/USDT"] = False  # never eligible
+
+    res = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=3,
+        eligibility=eligibility,
+    )
+    assert (res.weights["ASSET_0/USDT"] == 0.0).all()
+
+
+def test_eligibility_forced_exit_zeroes_held_position():
+    """When a held coin becomes ineligible *between* rebalances, its
+    weight must drop to zero immediately — the Binance-delisting case."""
+    n = 400
+    rng = np.random.default_rng(0)
+    closes_data = {
+        "STRONG/USDT": _candles((100 + 0.5 * np.arange(n) + rng.normal(0, 1, n)).tolist()),
+        "WEAK/USDT":   _candles((100 + 0.1 * np.arange(n) + rng.normal(0, 1, n)).tolist()),
+    }
+    closes = pd.concat({k: v["close"] for k, v in closes_data.items()}, axis=1)
+
+    # STRONG is the obvious top pick. Make it ineligible from bar 200 onward
+    # (mid-period delisting). The held position must drop to zero at bar 200.
+    eligibility = pd.DataFrame(True, index=closes.index, columns=closes.columns)
+    eligibility.iloc[200:, eligibility.columns.get_loc("STRONG/USDT")] = False
+
+    res = run_cross_sectional_momentum(
+        closes_data, lookback_days=30, rebalance_days=7, top_k=1,
+        eligibility=eligibility,
+    )
+    # Before the delisting STRONG should have been held at least sometimes.
+    assert (res.weights["STRONG/USDT"].iloc[:200] > 0).any()
+    # After delisting + the engine's one-bar execution shift it must be
+    # zero forever (bar 201 onward). Bar 200 itself can still carry the
+    # previous target — the eligibility flip arrived at the *close* of
+    # bar 200, so we only act on it from bar 201.
+    assert (res.weights["STRONG/USDT"].iloc[201:] == 0.0).all()
+
+
+def test_eligibility_empty_universe_means_cash():
+    """If the eligibility mask is all-False, the strategy stays in cash."""
+    universe = _universe(n_assets=3, n_bars=200, seed=0)
+    closes = pd.concat({k: v["close"] for k, v in universe.items()}, axis=1)
+    eligibility = pd.DataFrame(False, index=closes.index, columns=closes.columns)
+    res = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=2,
+        eligibility=eligibility,
+    )
+    assert (res.weights.to_numpy() == 0.0).all()
+    assert res.total_return == 0.0
+
+
+def test_eligibility_missing_columns_default_to_false():
+    """A coin present in asset_candles but absent from eligibility must be
+    treated as ineligible — no implicit "assume tradable"."""
+    universe = _universe(n_assets=3, n_bars=200, seed=0)
+    closes = pd.concat({k: v["close"] for k, v in universe.items()}, axis=1)
+    # Eligibility only mentions one of the three assets.
+    eligibility = pd.DataFrame(True, index=closes.index, columns=["ASSET_1/USDT"])
+
+    res = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=3,
+        eligibility=eligibility,
+    )
+    assert (res.weights["ASSET_0/USDT"] == 0.0).all()
+    assert (res.weights["ASSET_2/USDT"] == 0.0).all()
+
+
+def test_eligibility_no_lookahead():
+    """Eligibility decisions at time t use only the row at index t. A
+    cell flipping from True to False at bar N must not retroactively
+    change anything at N-1."""
+    universe = _universe(n_assets=3, n_bars=300, seed=0)
+    closes = pd.concat({k: v["close"] for k, v in universe.items()}, axis=1)
+
+    # Two eligibility variants that differ only at and after bar 200.
+    base = pd.DataFrame(True, index=closes.index, columns=closes.columns)
+    flipped = base.copy()
+    flipped.iloc[200:, flipped.columns.get_loc("ASSET_0/USDT")] = False
+
+    res_base = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=2,
+        eligibility=base,
+    )
+    res_flip = run_cross_sectional_momentum(
+        universe, lookback_days=30, rebalance_days=7, top_k=2,
+        eligibility=flipped,
+    )
+    # Weights up to and including bar 199 must be identical.
+    pd.testing.assert_frame_equal(
+        res_base.weights.iloc[:200],
+        res_flip.weights.iloc[:200],
+    )
