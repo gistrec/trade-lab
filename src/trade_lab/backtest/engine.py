@@ -125,9 +125,11 @@ def run_backtest(
     total_fees = float((turnover * fee_rate * prior_equity).sum())
     total_slippage = float((turnover * slippage_rate * prior_equity).sum())
 
-    buy_and_hold_equity = initial_capital * (close / close.iloc[0])
-    buy_and_hold_return = (
-        float(close.iloc[-1] / close.iloc[0] - 1) if len(close) >= 2 else 0.0
+    buy_and_hold_equity, buy_and_hold_return = buy_and_hold_with_costs(
+        close,
+        initial_capital=initial_capital,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
     )
 
     trades = _extract_trades(
@@ -154,6 +156,39 @@ def run_backtest(
         buy_and_hold_equity=buy_and_hold_equity,
         gross_equity=gross_equity,
     )
+
+
+def buy_and_hold_with_costs(
+    close: pd.Series,
+    *,
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+) -> tuple[pd.Series, float]:
+    """Buy-and-hold equity series and return AFTER one round of entry costs.
+
+    A buy-and-hold trader incurs the same fee + slippage on entry as a
+    strategy that opens an equal-sized long on bar 1. They do NOT pay
+    an exit fee at the window's end — same convention the engine uses
+    for strategies that finish the window still long (mark-to-market,
+    no closing turnover charged).
+
+    Before this helper, every B&H computation in the repo silently used
+    a pre-cost ``close / close.iloc[0]`` curve, which gave B&H a free
+    ~0.15% head-start over every strategy entering on the first bar.
+    Symmetric costing is the honest comparison.
+
+    ``initial_capital``, ``fee_rate`` and ``slippage_rate`` should
+    match what was passed to the strategy run; otherwise the B&H
+    benchmark again becomes asymmetric.
+    """
+    if close.empty or len(close) < 2:
+        return close.copy() * 0.0, 0.0
+    entry_cost = float(fee_rate) + float(slippage_rate)
+    effective_capital = initial_capital * (1.0 - entry_cost)
+    equity = effective_capital * (close / close.iloc[0])
+    total_return = float(equity.iloc[-1] / initial_capital - 1.0)
+    return equity, total_return
 
 
 def execution_bars(positions: pd.Series) -> tuple[List[int], List[int]]:

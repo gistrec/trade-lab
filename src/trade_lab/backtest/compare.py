@@ -17,7 +17,7 @@ from ..strategies.donchian_trend import DonchianTrendEnsembleStrategy
 from ..strategies.pma_ratio import PriceMaRatioStrategy
 from ..strategies.sma_cross import SMACrossStrategy
 from ..strategies.tsmom import TimeSeriesMomentumStrategy
-from .engine import run_backtest
+from .engine import buy_and_hold_with_costs, run_backtest
 from .metrics import _max_drawdown, compute_metrics
 
 
@@ -197,7 +197,10 @@ def _evaluate(
     }
 
     if spec.factory is None:
-        return {**base, **_buy_and_hold_metrics(candles, initial_capital, annualization_factor)}
+        return {**base, **_buy_and_hold_metrics(
+            candles, initial_capital, annualization_factor,
+            fee_rate=fee_rate, slippage_rate=slippage_rate,
+        )}
 
     strategy = spec.factory()
     result = run_backtest(
@@ -225,20 +228,47 @@ def _evaluate(
 
 def _buy_and_hold_metrics(
     candles: pd.DataFrame, initial_capital: float, annualization_factor: int,
+    *, fee_rate: float = 0.0, slippage_rate: float = 0.0,
 ) -> dict:
+    """Buy-and-hold cell with **one entry round of costs** applied.
+
+    Same semantics as :func:`engine.buy_and_hold_with_costs`: B&H pays
+    the same fee+slippage on bar 1 as any strategy entering an
+    equal-sized long; it does NOT pay an exit fee at window end (open
+    position is mark-to-market). Setting both rates to 0 reproduces
+    the academic pre-cost curve.
+    """
     close = candles["close"].astype(float)
-    equity = initial_capital * (close / close.iloc[0])
-    total_return = float(close.iloc[-1] / close.iloc[0] - 1)
+    equity, total_return = buy_and_hold_with_costs(
+        close, initial_capital=initial_capital,
+        fee_rate=fee_rate, slippage_rate=slippage_rate,
+    )
+    # CAGR derived from the gross-of-entry-cost initial_capital — the
+    # equity series after entry costs would understate CAGR slightly
+    # because its starting value is already reduced. We want the
+    # "growth of my $10k" not "growth of my $9985".
+    years = (len(candles) / annualization_factor) if annualization_factor > 0 else 0.0
+    if years > 0 and (1.0 + total_return) > 0:
+        cagr = float((1.0 + total_return) ** (1.0 / years) - 1.0)
+    else:
+        cagr = 0.0
+    # Charge the entry cost as a dollar amount on initial_capital so
+    # the `total_fees` / `total_slippage` columns are non-zero and
+    # comparable to the strategies' columns. Turnover for B&H = 1
+    # round-trip side (the entry), exactly matching the engine's
+    # ``turnover.iloc[0] = abs(positions.iloc[0])`` convention.
+    entry_fee = float(initial_capital * fee_rate)
+    entry_slippage = float(initial_capital * slippage_rate)
     return {
         "total_return_pct": total_return,
-        "cagr_pct": _cagr(equity, len(candles), annualization_factor),
+        "cagr_pct": cagr,
         "max_drawdown_pct": _max_drawdown(equity),
         "sharpe": _sharpe(equity, annualization_factor),
         "exposure_pct": 1.0,
         "num_trades": 0,
-        "total_fees": 0.0,
-        "total_slippage": 0.0,
-        "turnover": 0.0,
+        "total_fees": entry_fee,
+        "total_slippage": entry_slippage,
+        "turnover": 1.0,
     }
 
 

@@ -46,15 +46,19 @@ def test_one_row_per_year_per_strategy():
     assert len(df) == n_years * n_strategies
 
 
-def test_buy_and_hold_row_matches_close_to_close_return():
+def test_buy_and_hold_row_reflects_entry_cost_against_close_ratio():
+    """B&H now pays one entry round of fee + slippage so the row is
+    symmetric with the strategies. Default rates here are 0.10% fee +
+    0.05% slippage from ``run_yearly_validation``."""
     candles = _daily_candles_multi_year()
     df = run_yearly_validation(candles)
+    cost_factor = 1.0 - 0.001 - 0.0005
     for year in df["year"].unique():
         year_close = candles["close"][candles.index.year == year]
-        expected = year_close.iloc[-1] / year_close.iloc[0] - 1
+        expected = cost_factor * (year_close.iloc[-1] / year_close.iloc[0]) - 1
         bh_row = df[(df["year"] == year) & (df["strategy"] == "buy_and_hold")]
         assert len(bh_row) == 1
-        assert bh_row.iloc[0]["return_pct"] == pytest.approx(expected)
+        assert bh_row.iloc[0]["return_pct"] == pytest.approx(expected, rel=1e-6)
 
 
 def test_buy_and_hold_verdict_is_baseline_label():

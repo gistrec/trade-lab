@@ -68,20 +68,30 @@ def test_row_count_matches_combinations():
     assert len(df) > 0
 
 
-def test_buy_and_hold_row_has_zero_fees_and_full_exposure():
+def test_buy_and_hold_row_has_symmetric_entry_cost_and_full_exposure():
+    """B&H is no longer cost-free — it's charged one entry round of
+    fee + slippage so the comparison to strategies is symmetric.
+    Exposure stays at 1.0 (long the whole window) and turnover is 1.0
+    (one entry side, mirroring the engine's
+    ``turnover.iloc[0] = abs(positions.iloc[0])`` convention)."""
     df = run_comparison_report(_multi_asset())
     bh = df[df["strategy"] == "buy_and_hold"]
     assert (bh["exposure_pct"] == 1.0).all()
-    assert (bh["total_fees"] == 0.0).all()
-    assert (bh["total_slippage"] == 0.0).all()
-    assert (bh["turnover"] == 0.0).all()
+    # Default compare costs are 0.10% fee + 0.05% slippage on
+    # initial_capital=10000 → $10.00 fee + $5.00 slippage per cell.
+    np.testing.assert_allclose(bh["total_fees"].to_numpy(), 10.0)
+    np.testing.assert_allclose(bh["total_slippage"].to_numpy(), 5.0)
+    assert (bh["turnover"] == 1.0).all()
 
 
-def test_buy_and_hold_total_return_matches_close_ratio():
+def test_buy_and_hold_total_return_matches_close_ratio_after_entry_cost():
+    """B&H total return now reflects one entry's fee + slippage:
+    return = (1 - fee_rate - slippage_rate) * close_ratio - 1."""
     from trade_lab.data.storage import filter_candles_by_date
 
     assets = _multi_asset()
     df = run_comparison_report(assets)
+    cost_factor = 1.0 - 0.001 - 0.0005   # default rates from compare.py
     for asset, candles in assets.items():
         for period in DEFAULT_SUBPERIODS:
             sliced = filter_candles_by_date(
@@ -96,8 +106,9 @@ def test_buy_and_hold_total_return_matches_close_ratio():
             ]
             if row.empty:
                 continue
-            expected = sliced["close"].iloc[-1] / sliced["close"].iloc[0] - 1
-            assert row.iloc[0]["total_return_pct"] == pytest.approx(expected, rel=1e-3)
+            close_ratio = sliced["close"].iloc[-1] / sliced["close"].iloc[0]
+            expected = cost_factor * close_ratio - 1
+            assert row.iloc[0]["total_return_pct"] == pytest.approx(expected, rel=1e-6)
 
 
 def test_cagr_is_consistent_with_total_return_and_bars():

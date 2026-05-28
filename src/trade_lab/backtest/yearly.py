@@ -103,7 +103,10 @@ def run_yearly_validation(
 
     for spec in strategies:
         if spec.factory is None:
-            rows.extend(_yearly_rows_for_buy_and_hold(candles, years, initial_capital))
+            rows.extend(_yearly_rows_for_buy_and_hold(
+                candles, years, initial_capital,
+                fee_rate=fee_rate, slippage_rate=slippage_rate,
+            ))
             continue
 
         result = run_backtest(
@@ -165,17 +168,31 @@ def _yearly_rows_for_buy_and_hold(
     candles: pd.DataFrame,
     years: List[int],
     initial_capital: float,
+    *,
+    fee_rate: float = 0.0,
+    slippage_rate: float = 0.0,
 ) -> list[dict]:
-    """Build the buy-and-hold rows directly from close prices."""
+    """Build the buy-and-hold rows directly from close prices.
+
+    Each year's row treats B&H as "enter on the first bar of the year,
+    hold through year-end". Entry cost (one round of fee + slippage)
+    is applied to ``initial_capital`` so the row is comparable to a
+    strategy that also entered on the same bar.
+    """
+    from .engine import buy_and_hold_with_costs
+
     close = candles["close"]
     rows = []
     for year in years:
         year_close = close[close.index.year == year]
         if year_close.empty:
             continue
-        year_return = float(year_close.iloc[-1] / year_close.iloc[0] - 1)
-        year_equity = initial_capital * (year_close / year_close.iloc[0])
+        year_equity, year_return = buy_and_hold_with_costs(
+            year_close, initial_capital=initial_capital,
+            fee_rate=fee_rate, slippage_rate=slippage_rate,
+        )
         year_dd = _max_drawdown(year_equity)
+        entry_cost_paid = float(initial_capital * (fee_rate + slippage_rate))
         rows.append(
             {
                 "year": year,
@@ -186,7 +203,7 @@ def _yearly_rows_for_buy_and_hold(
                 "buy_and_hold_max_drawdown_pct": year_dd,
                 "exposure_pct": 1.0,
                 "num_trades": 0,
-                "fees_paid": 0.0,
+                "fees_paid": entry_cost_paid,
                 "verdict": VERDICT_BUY_AND_HOLD,
             }
         )
@@ -227,9 +244,14 @@ def _yearly_row_for_strategy(
     # Drawdown computed within the year only — each year stands alone.
     year_max_dd = _max_drawdown(year_equity)
 
-    # Buy & hold reference for the year.
-    year_bh_return = float(year_close.iloc[-1] / year_close.iloc[0] - 1)
-    year_bh_equity = initial_capital * (year_close / year_close.iloc[0])
+    # Buy & hold reference for the year, with symmetric entry cost so
+    # the per-year comparison mirrors the per-year strategy run.
+    from .engine import buy_and_hold_with_costs
+
+    year_bh_equity, year_bh_return = buy_and_hold_with_costs(
+        year_close, initial_capital=initial_capital,
+        fee_rate=result.fee_rate, slippage_rate=result.slippage_rate,
+    )
     year_bh_max_dd = _max_drawdown(year_bh_equity)
 
     # Exposure: bars where positions are non-zero.

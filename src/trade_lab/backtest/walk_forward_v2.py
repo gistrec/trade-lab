@@ -294,8 +294,13 @@ def run_strategy_walk_forward(
         oos_returns_list.append(test_metrics["returns"])
 
         # Buy-and-hold benchmark on the test slice — same window only.
+        # Charge the same one-round entry cost the strategy paid so the
+        # comparison is apples-to-apples.
         bh_return, bh_dd = _buy_and_hold_on_window(
-            candles, window.test_start, window.test_end
+            candles, window.test_start, window.test_end,
+            initial_capital=initial_capital,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
         )
 
         rows.append(
@@ -578,13 +583,28 @@ def _buy_and_hold_on_window(
     candles: pd.DataFrame,
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
+    *,
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.0,
+    slippage_rate: float = 0.0,
 ) -> tuple[float, float]:
-    """Buy-and-hold return and max drawdown over [window_start, window_end]."""
+    """B&H return and max drawdown on a window, one entry round of costs.
+
+    Same fee+slippage convention as the engine: one entry cost charged
+    on the window's first bar, no exit cost. Default ``fee_rate=0``
+    and ``slippage_rate=0`` preserve the academic pre-cost curve when
+    the caller doesn't supply the strategy's cost params (e.g. tests
+    that construct B&H benchmarks in isolation).
+    """
+    from .engine import buy_and_hold_with_costs
+
     sliced = candles[(candles.index >= window_start) & (candles.index <= window_end)]
     close = sliced["close"]
     if close.empty or len(close) < 2:
         return 0.0, 0.0
-    total_return = float(close.iloc[-1] / close.iloc[0] - 1.0)
-    equity = close / close.iloc[0]
+    equity, total_return = buy_and_hold_with_costs(
+        close, initial_capital=initial_capital,
+        fee_rate=fee_rate, slippage_rate=slippage_rate,
+    )
     max_dd = float(abs(((equity / equity.cummax()) - 1.0).min()))
     return total_return, max_dd
