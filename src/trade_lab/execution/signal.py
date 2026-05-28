@@ -58,6 +58,14 @@ class SignalSnapshot:
     basket_close_tail: Optional[pd.Series] = None
     # Last N basket closes for the monitoring chart (basket vs SMA(200)).
     # None means "not computed" — older callers stay backward-compatible.
+    sma_value: Optional[float] = None
+    # Actual SMA(sma_filter_period) value at asof. None when warm-up
+    # data is insufficient. Used to show "basket is X% below the gate"
+    # in monitoring, not just "gate CLOSED".
+    per_lookback_returns: dict[int, float] = field(default_factory=dict)
+    # Actual pct_change(L) at asof per lookback. Magnitude distinguishes
+    # "barely positive" from "screaming uptrend" — the binary states
+    # alone hide that distance to a flip.
 
 
 def compute_live_signal(
@@ -130,17 +138,19 @@ def compute_live_signal(
     sma = basket["close"].rolling(sma_filter_period).mean().iloc[-1]
     sma_gate_open = bool(pd.notna(sma) and basket_close > sma)
 
-    # Pre-gate per-lookback states. Mirrors the strategy's internal
-    # _tsmom_ensemble logic exactly: sign of pct_change(L) at the last
-    # bar. The strategy then zeroes them out via the SMA(200) gate; we
-    # expose the pre-gate values for diagnostic visibility.
+    # Pre-gate per-lookback states + actual returns. Mirrors the
+    # strategy's internal _tsmom_ensemble logic exactly: sign of
+    # pct_change(L) at the last bar. The strategy then zeroes them
+    # out via the SMA(200) gate; we expose the pre-gate values for
+    # diagnostic visibility.
     per_lookback_states: dict[int, int] = {}
+    per_lookback_returns: dict[int, float] = {}
     close_series = basket["close"]
     for L in lookbacks:
         past = close_series.pct_change(int(L)).iloc[-1]
-        per_lookback_states[int(L)] = (
-            1 if (pd.notna(past) and past > 0) else 0
-        )
+        ok = pd.notna(past)
+        per_lookback_states[int(L)] = 1 if (ok and past > 0) else 0
+        per_lookback_returns[int(L)] = float(past) if ok else 0.0
 
     return SignalSnapshot(
         asof=asof,
@@ -153,6 +163,8 @@ def compute_live_signal(
         n_assets_in_basket=len(asset_candles),
         per_lookback_states=per_lookback_states,
         basket_close_tail=basket["close"].tail(100),
+        sma_value=float(sma) if pd.notna(sma) else None,
+        per_lookback_returns=per_lookback_returns,
     )
 
 

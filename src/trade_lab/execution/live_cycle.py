@@ -465,8 +465,12 @@ def _write_main_cycle(
             "asof": _ts_iso(snap.asof),
             "ladder_value": snap.signal,
             "sma_gate_open": snap.sma_gate_open,
+            "sma_value": snap.sma_value,
             "per_lookback_states": {
                 str(k): int(v) for k, v in snap.per_lookback_states.items()
+            },
+            "per_lookback_returns": {
+                str(k): float(v) for k, v in snap.per_lookback_returns.items()
             },
             "basket_close": snap.basket_close,
             "asset_closes": snap.asset_closes,

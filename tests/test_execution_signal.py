@@ -110,6 +110,36 @@ def test_signal_records_diagnostics():
     assert pd.Timestamp(snap.asof).tzinfo is not None  # tz-aware UTC
 
 
+def test_signal_records_sma_value_and_returns():
+    """sma_value is the SMA(200) at asof; per_lookback_returns gives the
+    actual pct_change magnitude per lookback (not just the binary state)."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    fetch = _candles_factory({s: closes for s in
+        ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+    assert snap.sma_value is not None
+    assert snap.sma_value > 0
+    assert set(snap.per_lookback_returns.keys()) == {28, 60}
+    # Clean uptrend → both lookback returns positive AND >> 0.
+    assert snap.per_lookback_returns[28] > 0
+    assert snap.per_lookback_returns[60] > 0
+
+
+def test_signal_returns_match_states():
+    """The sign of per_lookback_returns must match per_lookback_states
+    bit-for-bit; otherwise the journal would surface contradictory
+    diagnostics to the monitor."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    fetch = _candles_factory({s: closes for s in
+        ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+    for L, ret in snap.per_lookback_returns.items():
+        expected_state = 1 if ret > 0 else 0
+        assert snap.per_lookback_states[L] == expected_state
+
+
 def test_signal_missing_asset_raises():
     """If a single basket asset returns no candles, the signal computation
     refuses to proceed — we never want the basket to silently shrink."""

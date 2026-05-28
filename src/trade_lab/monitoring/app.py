@@ -182,24 +182,85 @@ def _render_read_stats(stats: ReadStats) -> None:
 def _render_signal(reader: JournalReader) -> None:
     latest = reader.latest_cycle()
     sig = (latest or {}).get("signal") or {}
+    if not sig:
+        st.info("No signal data in journal yet.")
+        return
 
-    cols = st.columns(3)
-    cols[0].metric(
-        "Ladder value",
-        f"{sig.get('ladder_value', 0.0):.2f}" if sig else "—",
-    )
-    gate_open = sig.get("sma_gate_open") if sig else None
+    basket_close = sig.get("basket_close")
+    sma_value = sig.get("sma_value")
+    gate_open = sig.get("sma_gate_open")
+
+    # --- Top row: 4 metrics ---
+    cols = st.columns(4)
+    cols[0].metric("Ladder value", f"{sig.get('ladder_value', 0.0):.2f}")
     cols[1].metric(
         "SMA(200) gate",
         "OPEN" if gate_open else ("CLOSED" if gate_open is False else "—"),
     )
     cols[2].metric(
         "Basket close",
-        f"{sig.get('basket_close', 0.0):,.2f}" if sig else "—",
+        f"{basket_close:,.2f}" if basket_close is not None else "—",
+    )
+    if basket_close is not None and sma_value:
+        dist_pct = (basket_close / sma_value - 1.0) * 100
+        cols[3].metric(
+            "Basket vs SMA(200)",
+            f"{dist_pct:+.2f}%",
+            delta=f"SMA = {sma_value:.2f}",
+            delta_color="off",
+        )
+    else:
+        cols[3].metric("Basket vs SMA(200)", "—")
+
+    # --- Second row: direction + persistence metrics ---
+    bcs_dict = latest.get("basket_close_series") or {}
+    values = bcs_dict.get("values") or []
+    cols2 = st.columns(3)
+    cols2[0].metric("vs 7d ago", _series_return(values, 7))
+    cols2[1].metric("vs 30d ago", _series_return(values, 30))
+    days_since = _days_since_gate_last_open(reader)
+    cols2[2].metric(
+        "Days since gate OPEN",
+        str(days_since) if days_since is not None else "—",
     )
 
+    # --- Basket close chart with current SMA reference ---
+    if len(values) >= 2:
+        st.plotly_chart(
+            _basket_close_figure(values, bcs_dict.get("start_ts"), sma_value),
+            width="stretch",
+        )
+        st.caption(
+            "Basket close, last ~100 days. SMA(200) is shown as the "
+            "horizontal reference at its CURRENT value — historical SMA "
+            "is not stored in the journal."
+        )
+
+    # --- Per-lookback breakdown with returns ---
+    st.subheader("Per-lookback breakdown (latest cycle)")
+    plb_states = sig.get("per_lookback_states") or {}
+    plb_returns = sig.get("per_lookback_returns") or {}
+    if plb_states:
+        rows = []
+        for k in sorted(plb_states.keys(), key=lambda x: int(x)):
+            ret = plb_returns.get(k)
+            rows.append({
+                "lookback": int(k),
+                "state": int(plb_states[k]),
+                "return %": f"{ret * 100:+.2f}" if ret is not None else "—",
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption(
+            "State is the pre-gate {0, 1} sign of pct_change(lookback). "
+            "Averaged → ladder; SMA(200) gate then zeroes it if closed. "
+            "Return shows the magnitude — the distance to a flip."
+        )
+    else:
+        st.info("Per-lookback states not available in the latest cycle.")
+
+    # --- Ladder history chart ---
     history_days = st.select_slider(
-        "History window",
+        "Ladder history window",
         options=[7, 30, 90, 180, 365],
         value=30,
     )
@@ -209,19 +270,91 @@ def _render_signal(reader: JournalReader) -> None:
     else:
         st.info("No signal history in the selected window.")
 
-    st.subheader("Per-lookback breakdown (latest cycle)")
-    plb = (sig or {}).get("per_lookback_states") or {}
-    if plb:
-        df = pd.DataFrame(
-            [{"lookback": int(k), "state": int(v)} for k, v in plb.items()]
-        ).sort_values("lookback")
-        st.dataframe(df, width="stretch", hide_index=True)
-        st.caption(
-            "State is the pre-gate {0, 1} sign of pct_change(lookback). "
-            "Averaged → ladder; SMA(200) gate then zeroes it if closed."
-        )
+    # --- Recent cycles table ---
+    st.subheader("Recent cycles")
+    recent_n = st.select_slider(
+        "Cycles to show", options=[7, 14, 30, 60], value=14,
+    )
+    recent_cycles = reader.cycles(n=recent_n)
+    if recent_cycles:
+        rows = []
+        for c in reversed(recent_cycles):
+            csig = c.get("signal") or {}
+            cstates = csig.get("per_lookback_states") or {}
+            rows.append({
+                "asof": _humanize_iso(csig.get("asof") or c.get("ended_at")),
+                "basket": csig.get("basket_close"),
+                "ladder": csig.get("ladder_value"),
+                "gate": "OPEN" if csig.get("sma_gate_open") else "CLOSED",
+                "28d": cstates.get("28"),
+                "60d": cstates.get("60"),
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+
+def _series_return(values: list, n_days_ago: int) -> str:
+    """Format ``values[-1] / values[-(n+1)] - 1`` as a +/- percent."""
+    if len(values) < n_days_ago + 1:
+        return "—"
+    today = float(values[-1])
+    past = float(values[-(n_days_ago + 1)])
+    if past == 0:
+        return "—"
+    return f"{(today / past - 1.0) * 100:+.2f}%"
+
+
+def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
+    """Count cycles back to the most recent OPEN gate. None if never seen.
+
+    Walks the journal newest-first across up to 500 cycles — enough for
+    a year of daily cron at hourly dry-run cadence without scanning the
+    whole file every refresh.
+    """
+    cycles = reader.cycles(n=500)
+    days = 0
+    for c in reversed(cycles):
+        sig = c.get("signal") or {}
+        if sig.get("sma_gate_open") is True:
+            return days
+        days += 1
+    return None
+
+
+def _basket_close_figure(
+    values: list,
+    start_iso: Optional[str],
+    sma_value: Optional[float],
+) -> go.Figure:
+    """Basket close line with horizontal SMA(200) reference."""
+    if start_iso:
+        try:
+            from datetime import timedelta
+            start = parse_iso(start_iso)
+            x = [start + timedelta(days=i) for i in range(len(values))]
+        except (ValueError, ImportError):
+            x = list(range(len(values)))
     else:
-        st.info("Per-lookback states not available in the latest cycle.")
+        x = list(range(len(values)))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=values, mode="lines",
+        name="Basket close",
+        line=dict(color="#1f77b4", width=2),
+    ))
+    if sma_value is not None:
+        fig.add_hline(
+            y=sma_value,
+            line_dash="dash", line_color="#d62728",
+            annotation_text=f"SMA(200) = {sma_value:.2f}",
+            annotation_position="bottom right",
+        )
+    fig.update_layout(
+        height=320, margin=dict(t=10, b=10, l=10, r=10),
+        hovermode="x unified",
+        yaxis_title="basket close",
+    )
+    return fig
 
 
 def _signal_history_figure(
