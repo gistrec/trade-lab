@@ -95,6 +95,9 @@ from .ensemble import (
 )
 from .ensemble_sleeves import DEFAULT_ASSETS, default_sleeves
 from .market_index import build_crypto_market_index
+from .cluster_stability import (
+    ClusterStabilityResult, run_cluster_stability_check,
+)
 
 __all__ = [
     "BacktestResult",
@@ -121,6 +124,8 @@ __all__ = [
     "DEFAULT_ASSETS",
     "EnsembleResult",
     "build_crypto_market_index",
+    "ClusterStabilityResult",
+    "run_cluster_stability_check",
     "SleeveSpec",
     "build_pma_grid",
     "build_sma_grid",
