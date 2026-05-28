@@ -53,6 +53,17 @@ class ReadStats:
     unknown_version_lines: int = 0
 
 
+def cycle_orders_executed(cycle: dict) -> list:
+    """Return ``orders_executed`` list, or empty for v1 entries.
+
+    Schema v1 cycles predate ``orders_executed``; this helper returns
+    ``[]`` so callers do not need to special-case ``schema_version``.
+    Also normalizes the explicit ``None`` written for dry-run cycles
+    and failed cycles with no partial fills.
+    """
+    return cycle.get("orders_executed") or []
+
+
 def parse_iso(s: str) -> datetime:
     """Parse an ISO-8601 timestamp written by the journal.
 

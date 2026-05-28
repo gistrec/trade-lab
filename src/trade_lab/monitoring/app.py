@@ -37,7 +37,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness,
+    JournalReader, ReadStats, Staleness, cycle_orders_executed,
 )
 
 
@@ -137,6 +137,20 @@ def _render_status(reader: JournalReader) -> None:
         st.error(
             f"Most recent cycle FAILED. {err.get('type', '?')}: "
             f"{err.get('message', 'no message')}"
+        )
+
+    if latest is not None and latest.get("outcome") == "unknown_orders":
+        st.error(
+            "Last cycle has orders in UNKNOWN state (timeout or "
+            "lost_track). Next cycle will attempt reconstruction. "
+            "Manual review recommended — see Cycles tab → cycle detail."
+        )
+
+    if latest is not None and latest.get("outcome") == "reconstructed":
+        st.info(
+            "Latest entry is a reconstruction cycle — orders from a prior "
+            "cycle were resolved. The actual rebalance for today is in the "
+            "next cycle entry (if it has run yet)."
         )
 
     drift = reader.cumulative_skipped_drift()
@@ -270,6 +284,20 @@ def _render_portfolio(reader: JournalReader) -> None:
         f"{(total_target - total_current):+,.2f}",
     )
 
+    # Planned vs executed divergence — surface unfilled / partial /
+    # rejected counts so the operator sees them without drilling into
+    # the Cycles tab.
+    planned_count = len(latest.get("orders_planned") or [])
+    executed = cycle_orders_executed(latest)
+    fully_closed = sum(1 for o in executed if o.get("terminal_status") == "closed")
+    unfilled = planned_count - fully_closed
+    if planned_count > 0 and unfilled > 0:
+        st.warning(
+            f"{unfilled} of {planned_count} planned orders did not fully "
+            f"close this cycle — see the Cycles tab → cycle detail for "
+            f"per-order status."
+        )
+
     cumulative = reader.cumulative_skipped_drift()
     st.caption(
         f"Cumulative skipped-order drift across all cycles: "
@@ -298,8 +326,9 @@ def _render_cycles(reader: JournalReader) -> None:
             "duration_ms": c.get("duration_ms"),
             "signal": sig.get("ladder_value"),
             "gate_open": sig.get("sma_gate_open"),
-            "orders_planned": len(c.get("orders_planned") or []),
-            "orders_skipped": len(c.get("orders_skipped") or []),
+            "planned": len(c.get("orders_planned") or []),
+            "executed": len(cycle_orders_executed(c)),
+            "skipped": len(c.get("orders_skipped") or []),
             "skipped_drift": c.get("total_skipped_quote_drift") or 0.0,
             "cycle_id": (c.get("cycle_id") or "")[:8],
         })
@@ -335,12 +364,34 @@ def _render_cycle_detail(cycle: dict) -> None:
 
     planned = cycle.get("orders_planned") or []
     skipped = cycle.get("orders_skipped") or []
+    executed = cycle_orders_executed(cycle)
     if planned:
         st.write("**Orders planned**")
         st.dataframe(pd.DataFrame(planned), width="stretch", hide_index=True)
     if skipped:
         st.write("**Orders skipped (sub-minimum)**")
         st.dataframe(pd.DataFrame(skipped), width="stretch", hide_index=True)
+    if executed:
+        st.write("**Orders executed**")
+        exec_rows = [{
+            "side": (o.get("side") or "").upper(),
+            "symbol": o.get("symbol"),
+            "status": o.get("terminal_status"),
+            "intended": o.get("intended_amount"),
+            "filled": o.get("filled_amount"),
+            "notional": o.get("filled_notional_quote"),
+            "avg_price": o.get("average_price"),
+            "fees": o.get("fees_paid_quote"),
+            "client_order_id": (o.get("client_order_id") or "")[:24],
+        } for o in executed]
+        st.dataframe(pd.DataFrame(exec_rows), width="stretch", hide_index=True)
+        for o in executed:
+            if o.get("error"):
+                st.error(
+                    f"{o.get('client_order_id', '?')}: "
+                    f"{o['error'].get('type', '?')}: "
+                    f"{o['error'].get('message', '?')}"
+                )
     err = cycle.get("error")
     if err:
         st.error(f"{err.get('type', '?')}: {err.get('message', '?')}")

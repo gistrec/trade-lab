@@ -11,7 +11,8 @@ cannot import broker/credential code. The journal format is the only
 contract between the two layers.
 """
 from .data_source import (
-    JournalReader, ReadStats, Staleness, parse_iso, KNOWN_SCHEMA_VERSIONS,
+    JournalReader, ReadStats, Staleness, parse_iso,
+    cycle_orders_executed, KNOWN_SCHEMA_VERSIONS,
 )
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "KNOWN_SCHEMA_VERSIONS",
     "ReadStats",
     "Staleness",
+    "cycle_orders_executed",
     "parse_iso",
 ]

@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, parse_iso,
+    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness,
+    cycle_orders_executed, parse_iso,
 )
 
 
@@ -389,3 +390,40 @@ def test_v1_entry_without_orders_executed_still_reads(tmp_path):
     reader = JournalReader(journal)
     latest = reader.latest_cycle()
     assert latest["cycle_id"] == "v1-cycle"
+
+
+# ---------------------------------------------------------------------------
+# cycle_orders_executed helper
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_orders_executed_v1_returns_empty():
+    """v1 cycles never had orders_executed — helper returns []."""
+    cycle = _cycle_entry("v1", schema_version=1)
+    assert "orders_executed" not in cycle
+    assert cycle_orders_executed(cycle) == []
+
+
+def test_cycle_orders_executed_v2_none_returns_empty():
+    """A dry-run v2 cycle writes orders_executed=None — same as []."""
+    cycle = _cycle_entry("v2-dry", schema_version=2)
+    cycle["orders_executed"] = None
+    assert cycle_orders_executed(cycle) == []
+
+
+def test_cycle_orders_executed_v2_empty_list_returns_empty():
+    """signal=0 cycle plans no orders → orders_executed=[]."""
+    cycle = _cycle_entry("v2-noop", schema_version=2)
+    cycle["orders_executed"] = []
+    assert cycle_orders_executed(cycle) == []
+
+
+def test_cycle_orders_executed_v2_populated_returns_list():
+    cycle = _cycle_entry("v2-with-orders", schema_version=2)
+    cycle["orders_executed"] = [
+        {"client_order_id": "tsmom_20260530_BTCUSDT_buy",
+         "terminal_status": "closed", "filled_amount": 0.001},
+    ]
+    out = cycle_orders_executed(cycle)
+    assert len(out) == 1
+    assert out[0]["terminal_status"] == "closed"
