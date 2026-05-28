@@ -489,6 +489,25 @@ For a side-by-side comparison of the trend strategies above on the
 BTC/ETH/BNB/SOL panel, see
 [Strategy comparison](docs/results/strategy_comparison.md).
 
+For the layered out-of-sample validation done after that comparison —
+PIT cross-sectional universe, walk-forward of priority-5 strategies,
+volatility-targeting cross-asset, Deflated Sharpe in walk-forward,
+and the buy-and-hold cost-symmetry audit — see the `docs/results/`
+and `findings/` directories:
+
+- [PIT XSMOM universe](docs/results/pit_universe.md) —
+  survivorship-bias delta on cross-sectional momentum.
+- [Walk-forward priority-5](docs/results/walk_forward_priority5.md) —
+  IS→OOS Sharpe shrinkage 0.55-0.82 across SMA / TSMOM / PMA.
+- [Vol-targeting wrapper](docs/results/vol_targeting.md) —
+  asset-conditional Sharpe / Calmar tradeoff.
+- [DSR in walk-forward](docs/results/dsr_in_walk_forward.md) —
+  0/21 strategy×asset cells survive DSR > 0.5 at project N=500.
+- [Vol-targeting × regime gate (findings)](findings/vol_targeting_regime_gate.md) —
+  7-asset confirmation of asset-specific behaviour.
+- [B&H cost symmetry (findings)](findings/buy_and_hold_cost_symmetry.md) —
+  bug audit and quantified impact.
+
 Adding a new strategy is a five-minute job — subclass `Strategy`,
 implement `generate_signals(candles)`, register the class in
 `STRATEGIES` in `src/trade_lab/cli.py`. See
