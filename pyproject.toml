@@ -28,6 +28,10 @@ dashboard = [
     "streamlit>=1.30",
     "plotly>=5.18",
 ]
+monitoring = [
+    "streamlit>=1.30",
+    "plotly>=5.18",
+]
 
 [project.scripts]
 trade-lab = "trade_lab.cli:main"
