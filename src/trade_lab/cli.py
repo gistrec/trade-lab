@@ -735,6 +735,52 @@ def cmd_xsmom(args: argparse.Namespace) -> None:
     print(f"  Equity CSV:        {equity_path}")
 
 
+def cmd_paper_status(args: argparse.Namespace) -> None:
+    """Connect to the configured exchange and print balance + equity.
+
+    Refuses to point at mainnet unless both TRADE_LAB_PAPER_SANDBOX=false
+    and TRADE_LAB_PAPER_ALLOW_MAINNET=true are set — same two-flag
+    requirement enforced inside the config loader.
+    """
+    from .execution import Broker, BrokerError, load_paper_config, PaperConfigError
+
+    try:
+        config = load_paper_config()
+    except PaperConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+
+    print(f"Exchange:    {config.exchange_id}")
+    print(f"Sandbox:     {config.sandbox} "
+          f"{'(testnet)' if config.sandbox else '(mainnet — allow_mainnet must be true)'}")
+    print(f"Quote:       {config.quote_currency}")
+    print(f"Basket:      {', '.join(config.basket)}")
+    print()
+
+    try:
+        broker = Broker.connect(config)
+    except BrokerError as exc:
+        raise SystemExit(f"Broker connection failed: {exc}")
+    print(f"Connected. Pulling balance...")
+    snap = broker.fetch_balance_snapshot()
+    print()
+    print(f"  {config.quote_currency:6s}: free {snap.quote_free:>12,.2f}  "
+          f"used {snap.quote_used:>12,.2f}  total {snap.quote_total:>12,.2f}")
+    for sym in config.basket:
+        total = snap.asset_totals.get(sym, 0.0)
+        if total > 0.0:
+            try:
+                price = broker.fetch_ticker_price(f"{sym}/{config.quote_currency}")
+                print(f"  {sym:6s}: total {total:>12.6f} × {price:>12,.2f} "
+                      f"= {total * price:>14,.2f} {config.quote_currency}")
+            except BrokerError as exc:
+                print(f"  {sym:6s}: total {total:>12.6f}  (ticker error: {exc})")
+        else:
+            print(f"  {sym:6s}: total {total:>12.6f}")
+    print()
+    equity = broker.estimate_total_equity_usd(snapshot=snap)
+    print(f"Estimated total equity: {equity:,.2f} {config.quote_currency}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -1001,6 +1047,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for the weights/equity CSV outputs.",
     )
     p_xs.set_defaults(func=cmd_xsmom)
+
+    p_ps = sub.add_parser(
+        "paper-status",
+        help="Connect to the configured exchange (CCXT) and print live balance.",
+    )
+    p_ps.set_defaults(func=cmd_paper_status)
 
     return parser
 

@@ -1,0 +1,267 @@
+"""Tests for the broker abstraction with a mocked CCXT exchange.
+
+No live API, no network. The mock exchange satisfies the
+``_CcxtExchange`` Protocol structurally and lets us assert that the
+broker calls it correctly and surfaces errors clearly.
+"""
+from __future__ import annotations
+
+import pytest
+
+import ccxt
+
+from trade_lab.execution.broker import (
+    BalanceSnapshot, Broker, BrokerError, ConnectionRefused,
+)
+from trade_lab.execution.config import PaperConfig
+
+
+# ---------------------------------------------------------------------------
+# Mock exchange satisfying the Protocol
+# ---------------------------------------------------------------------------
+
+
+class _MockExchange:
+    """Implements just enough of the CCXT exchange surface for the broker."""
+
+    id = "mock"
+
+    def __init__(self):
+        self.sandbox = False
+        self.balance = {
+            "USDT": {"free": 1000.0, "used": 50.0, "total": 1050.0},
+            "BTC":  {"free": 0.1,    "used": 0.0,  "total": 0.1},
+            "ETH":  {"free": 0.0,    "used": 0.0,  "total": 0.0},
+        }
+        self.tickers = {
+            "BTC/USDT": {"last": 50000.0, "close": 50000.0},
+            "ETH/USDT": {"last": 3000.0, "close": 3000.0},
+        }
+        # For failure-mode tests:
+        self.fetch_balance_raises = None
+        self.set_sandbox_mode_calls = 0
+
+    def set_sandbox_mode(self, enabled):
+        self.set_sandbox_mode_calls += 1
+        self.sandbox = enabled
+
+    def fetch_balance(self):
+        if self.fetch_balance_raises:
+            raise self.fetch_balance_raises
+        return self.balance
+
+    def fetch_ticker(self, symbol):
+        if symbol not in self.tickers:
+            raise ccxt.BadSymbol(f"unknown symbol {symbol}")
+        return self.tickers[symbol]
+
+    def fetch_status(self):
+        return {"status": "ok"}
+
+    def load_markets(self, reload=False):
+        return {sym: {} for sym in self.tickers}
+
+
+def _config(sandbox=True, allow_mainnet=False) -> PaperConfig:
+    return PaperConfig(
+        exchange_id="binance",
+        sandbox=sandbox,
+        api_key="k",
+        api_secret="s",
+        allow_mainnet=allow_mainnet,
+        quote_currency="USDT",
+        basket=("BTC", "ETH"),
+        request_timeout_ms=5000,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Constructor + connection verification
+# ---------------------------------------------------------------------------
+
+
+def test_broker_constructed_with_exchange_keeps_reference():
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    assert broker.exchange is exch
+
+
+def test_verify_connection_passes_on_ok_balance():
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    broker._verify_connection()  # must not raise
+
+
+def test_verify_connection_raises_on_auth_error():
+    exch = _MockExchange()
+    exch.fetch_balance_raises = ccxt.AuthenticationError("bad key")
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="Authentication failed"):
+        broker._verify_connection()
+
+
+def test_verify_connection_raises_on_network_error():
+    exch = _MockExchange()
+    exch.fetch_balance_raises = ccxt.NetworkError("timeout")
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="Network error"):
+        broker._verify_connection()
+
+
+def test_verify_connection_raises_on_unexpected_exception():
+    exch = _MockExchange()
+    exch.fetch_balance_raises = RuntimeError("weird")
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="Unexpected error"):
+        broker._verify_connection()
+
+
+def test_verify_connection_raises_when_balance_not_dict():
+    exch = _MockExchange()
+    exch.balance = "not a dict"
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="non-dict"):
+        broker._verify_connection()
+
+
+# ---------------------------------------------------------------------------
+# Mainnet safety gate at connect() level
+# ---------------------------------------------------------------------------
+
+
+def test_connect_refuses_mainnet_without_allow_flag(monkeypatch):
+    """Even if a malformed config slips through, the connect classmethod
+    refuses to point at mainnet without explicit allow_mainnet."""
+    cfg = _config(sandbox=False, allow_mainnet=False)
+    with pytest.raises(ConnectionRefused, match="mainnet"):
+        Broker.connect(cfg)
+
+
+def test_connect_uses_real_ccxt_for_unknown_exchange_id():
+    """An exchange_id not present in CCXT must raise BrokerError, not
+    silently fall back to anything."""
+    cfg = PaperConfig(
+        exchange_id="not_a_real_exchange",
+        sandbox=True, api_key="k", api_secret="s",
+        allow_mainnet=False, quote_currency="USDT",
+        basket=("BTC",), request_timeout_ms=5000,
+    )
+    with pytest.raises(BrokerError, match="Unknown CCXT exchange"):
+        Broker.connect(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Balance snapshot
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_balance_snapshot_pulls_quote_and_asset_totals():
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    snap = broker.fetch_balance_snapshot()
+    assert isinstance(snap, BalanceSnapshot)
+    assert snap.quote_currency == "USDT"
+    assert snap.quote_free == 1000.0
+    assert snap.quote_used == 50.0
+    assert snap.quote_total == 1050.0
+    assert snap.asset_totals == {"BTC": 0.1, "ETH": 0.0}
+
+
+def test_fetch_balance_snapshot_handles_missing_currencies():
+    """An asset in the basket with no entry on the exchange returns 0,
+    not a KeyError. Real testnets often have empty balances on listed
+    pairs."""
+    exch = _MockExchange()
+    exch.balance = {"USDT": {"free": 100.0, "used": 0.0, "total": 100.0}}
+    broker = Broker(_config(), exch)
+    snap = broker.fetch_balance_snapshot()
+    assert snap.asset_totals == {"BTC": 0.0, "ETH": 0.0}
+
+
+def test_fetch_balance_snapshot_handles_none_balance_fields():
+    """CCXT sometimes returns None for unused fields; we coerce to 0."""
+    exch = _MockExchange()
+    exch.balance = {"USDT": {"free": None, "used": None, "total": None}}
+    broker = Broker(_config(), exch)
+    snap = broker.fetch_balance_snapshot()
+    assert snap.quote_free == 0.0
+    assert snap.quote_total == 0.0
+
+
+def test_fetch_balance_snapshot_does_not_cache():
+    """Two consecutive calls must each round-trip — the broker must NOT
+    return stale state. The mock counts calls implicitly via the
+    fetch_balance method; we change the balance between calls and
+    confirm the second result reflects the change."""
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    first = broker.fetch_balance_snapshot()
+    # Simulate the testnet wiping or topping up our balance mid-session.
+    exch.balance["USDT"]["total"] = 9999.0
+    exch.balance["USDT"]["free"] = 9999.0
+    second = broker.fetch_balance_snapshot()
+    assert first.quote_total == 1050.0
+    assert second.quote_total == 9999.0
+
+
+# ---------------------------------------------------------------------------
+# Ticker pricing
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_ticker_price_uses_last_then_close():
+    exch = _MockExchange()
+    exch.tickers["BTC/USDT"] = {"last": 51000.0, "close": 50000.0}
+    broker = Broker(_config(), exch)
+    assert broker.fetch_ticker_price("BTC/USDT") == 51000.0
+
+
+def test_fetch_ticker_price_falls_back_to_close_when_last_missing():
+    exch = _MockExchange()
+    exch.tickers["BTC/USDT"] = {"last": None, "close": 50000.0}
+    broker = Broker(_config(), exch)
+    assert broker.fetch_ticker_price("BTC/USDT") == 50000.0
+
+
+def test_fetch_ticker_price_raises_when_both_missing():
+    exch = _MockExchange()
+    exch.tickers["BTC/USDT"] = {}
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="no last/close"):
+        broker.fetch_ticker_price("BTC/USDT")
+
+
+# ---------------------------------------------------------------------------
+# Equity estimate
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_total_equity_marks_assets_to_market():
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    # USDT total = 1050; BTC 0.1 × $50k = $5000; ETH 0 → 0.
+    equity = broker.estimate_total_equity_usd()
+    assert equity == pytest.approx(1050.0 + 5000.0)
+
+
+def test_estimate_total_equity_skips_failing_ticker_with_warning(caplog):
+    exch = _MockExchange()
+    # Remove the BTC ticker so its mark fails.
+    del exch.tickers["BTC/USDT"]
+    broker = Broker(_config(), exch)
+    with caplog.at_level("WARNING"):
+        equity = broker.estimate_total_equity_usd()
+    # USDT 1050 only — BTC contribution dropped due to ticker failure.
+    assert equity == pytest.approx(1050.0)
+    assert any("BTC" in r.message for r in caplog.records)
+
+
+def test_estimate_total_equity_accepts_explicit_snapshot():
+    """Passing a snapshot avoids the duplicate fetch_balance call."""
+    exch = _MockExchange()
+    broker = Broker(_config(), exch)
+    snap = broker.fetch_balance_snapshot()
+    exch.balance["USDT"]["total"] = 99999.0  # changes after the snapshot
+    equity = broker.estimate_total_equity_usd(snapshot=snap)
+    # We computed from the OLD snapshot, not the new exchange state.
+    assert equity == pytest.approx(1050.0 + 5000.0)

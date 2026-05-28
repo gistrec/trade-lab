@@ -1,0 +1,170 @@
+"""Tests for the paper-trading config layer.
+
+No network, no real CCXT. The config layer is pure env-var parsing
+with strict safety gates; these tests verify those gates fire when
+they should.
+"""
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from trade_lab.execution.config import (
+    PaperConfig, PaperConfigError, load_paper_config,
+)
+
+
+# A reasonable env to start from; tests override individual keys.
+_DEFAULT_ENV = {
+    "TRADE_LAB_PAPER_EXCHANGE": "binance",
+    "TRADE_LAB_PAPER_SANDBOX": "true",
+    "TRADE_LAB_PAPER_API_KEY": "test_key_12345",
+    "TRADE_LAB_PAPER_API_SECRET": "test_secret_12345",
+}
+
+
+def _apply_env(monkeypatch, env: dict, clear: list[str] | None = None):
+    """Set the env vars in ``env`` and unset any in ``clear``."""
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    for k in (clear or []):
+        monkeypatch.delenv(k, raising=False)
+
+
+# ---------------------------------------------------------------------------
+# Required vars
+# ---------------------------------------------------------------------------
+
+
+def test_missing_exchange_raises(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_EXCHANGE"])
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_EXCHANGE"):
+        load_paper_config()
+
+
+def test_missing_api_key_raises(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_API_KEY"])
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_API_KEY"):
+        load_paper_config()
+
+
+def test_missing_api_secret_raises(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_API_SECRET"])
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_API_SECRET"):
+        load_paper_config()
+
+
+def test_missing_sandbox_flag_raises(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_SANDBOX"])
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_SANDBOX"):
+        load_paper_config()
+
+
+def test_empty_required_var_raises(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_API_KEY": "   "}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_API_KEY"):
+        load_paper_config()
+
+
+# ---------------------------------------------------------------------------
+# Sandbox / mainnet safety gate
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_true_loads_cleanly(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV)
+    cfg = load_paper_config()
+    assert cfg.sandbox is True
+    assert cfg.allow_mainnet is False  # default
+    assert cfg.exchange_id == "binance"
+
+
+def test_mainnet_refused_without_allow_flag(monkeypatch):
+    """sandbox=False but TRADE_LAB_PAPER_ALLOW_MAINNET unset → refuse."""
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_SANDBOX": "false"}
+    _apply_env(monkeypatch, env, clear=["TRADE_LAB_PAPER_ALLOW_MAINNET"])
+    with pytest.raises(PaperConfigError, match="Mainnet trading refused"):
+        load_paper_config()
+
+
+def test_mainnet_refused_with_allow_false(monkeypatch):
+    """sandbox=False AND allow_mainnet=false → still refuse."""
+    env = {
+        **_DEFAULT_ENV,
+        "TRADE_LAB_PAPER_SANDBOX": "false",
+        "TRADE_LAB_PAPER_ALLOW_MAINNET": "false",
+    }
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="Mainnet trading refused"):
+        load_paper_config()
+
+
+def test_mainnet_allowed_with_both_flags_true(monkeypatch):
+    """The only path to mainnet: two explicit flags."""
+    env = {
+        **_DEFAULT_ENV,
+        "TRADE_LAB_PAPER_SANDBOX": "false",
+        "TRADE_LAB_PAPER_ALLOW_MAINNET": "true",
+    }
+    _apply_env(monkeypatch, env)
+    cfg = load_paper_config()
+    assert cfg.sandbox is False
+    assert cfg.allow_mainnet is True
+
+
+def test_ambiguous_bool_raises(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_SANDBOX": "maybe"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="bool-like"):
+        load_paper_config()
+
+
+# ---------------------------------------------------------------------------
+# Defaults and parsing
+# ---------------------------------------------------------------------------
+
+
+def test_default_basket_is_seven_assets(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_BASKET"])
+    cfg = load_paper_config()
+    assert cfg.basket == ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")
+
+
+def test_custom_basket_is_parsed_and_upcased(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_BASKET": "btc,eth,sol "}
+    _apply_env(monkeypatch, env)
+    cfg = load_paper_config()
+    assert cfg.basket == ("BTC", "ETH", "SOL")
+
+
+def test_default_quote_currency_is_usdt(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_QUOTE"])
+    cfg = load_paper_config()
+    assert cfg.quote_currency == "USDT"
+
+
+def test_default_timeout_is_20s(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV, clear=["TRADE_LAB_PAPER_TIMEOUT_MS"])
+    cfg = load_paper_config()
+    assert cfg.request_timeout_ms == 20_000
+
+
+# ---------------------------------------------------------------------------
+# Secret masking
+# ---------------------------------------------------------------------------
+
+
+def test_repr_masks_api_key_and_secret(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV)
+    cfg = load_paper_config()
+    r = repr(cfg)
+    # The full secret must never appear.
+    assert "test_secret_12345" not in r
+    # The full key must not appear either (only the tail).
+    assert "test_key_12345" not in r
+    # Last 4 chars of the key are intentionally shown for log debugging.
+    assert "2345" in r
+    # Secret is fully masked.
+    assert "api_secret='***'" in r
