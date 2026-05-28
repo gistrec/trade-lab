@@ -69,6 +69,20 @@ from .walk_forward import (
     run_multi_walk_forward,
     run_sma_walk_forward,
 )
+from .walk_forward_v2 import (
+    OBJECTIVE_SHARPE,
+    STRATEGY_WALK_FORWARD_COLUMNS,
+    ParamGridSpec,
+    WindowSpec,
+    aggregate_walk_forward,
+    generate_month_windows,
+    run_strategy_walk_forward,
+)
+from .walk_forward_grids import (
+    build_pma_grid,
+    build_sma_grid,
+    build_tsmom_grid,
+)
 
 __all__ = [
     "BacktestResult",
@@ -85,7 +99,17 @@ __all__ = [
     "MULTI_ASSET_SUMMARY_COLUMNS",
     "MULTI_WALK_FORWARD_COLUMNS",
     "OBJECTIVE_RETURN_DIV_DRAWDOWN",
+    "OBJECTIVE_SHARPE",
     "OBJECTIVE_TOTAL_RETURN",
+    "ParamGridSpec",
+    "STRATEGY_WALK_FORWARD_COLUMNS",
+    "WindowSpec",
+    "aggregate_walk_forward",
+    "build_pma_grid",
+    "build_sma_grid",
+    "build_tsmom_grid",
+    "generate_month_windows",
+    "run_strategy_walk_forward",
     "REGIME_SWEEP_COLUMNS",
     "SWEEP_COLUMNS",
     "TRADE_COLUMNS",
