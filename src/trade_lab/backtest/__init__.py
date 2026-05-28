@@ -93,6 +93,7 @@ from .ensemble import (
     sortino_ratio,
 )
 from .ensemble_sleeves import DEFAULT_ASSETS, default_sleeves
+from .market_index import build_crypto_market_index
 
 __all__ = [
     "BacktestResult",
@@ -118,6 +119,7 @@ __all__ = [
     "aggregate_walk_forward",
     "DEFAULT_ASSETS",
     "EnsembleResult",
+    "build_crypto_market_index",
     "SleeveSpec",
     "build_pma_grid",
     "build_sma_grid",
