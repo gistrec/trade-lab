@@ -196,3 +196,59 @@ The record format is:
 This is a separate file from `cycles.jsonl` by design — smoke tests
 are not strategy cycles and should not appear in the monitoring
 dashboard's Status / Cycles tabs alongside real bot activity.
+
+## Live paper trading on testnet
+
+`paper-place-orders` is the production daily CLI. Once
+`paper-place-test-order` (smoke test) passes, this is what runs
+the strategy against the testnet exchange.
+
+```bash
+trade-lab paper-place-orders --journal data/journal/cycles.jsonl
+```
+
+What it does:
+
+1. Reconstructs the state of any open orders left from a prior cycle
+   (`fetch_order` + `fetch_my_trades` fallback). closed/canceled
+   become terminal in local state; lost orders get `lost_track` plus
+   a warning that survives in the journal.
+2. Fetches a fresh balance — now reflecting the reconciliation.
+3. Computes signal, target allocation, delta plan — same primitives
+   as `paper-dry-run`.
+4. Places the plan in sell-first order, 200ms inter-order spacing,
+   5-minute per-order wait-for-ack budget.
+5. Writes one Cycle entry (schema v2) with `outcome` ∈ {success,
+   partial, unknown_orders, failed} and `orders_executed` populated.
+
+Refuses to start when SANDBOX=false unless ALLOW_MAINNET=true is
+also set (CLAUDE.md two-flag gate). Even when both flags pass,
+prints a loud last-chance warning before connecting.
+
+### Daily cron
+
+```cron
+5 0 * * * /opt/trade-lab/.venv/bin/trade-lab paper-place-orders \
+    --journal /opt/trade-lab/data/journal/cycles.jsonl \
+    >> /opt/trade-lab/data/logs/paper-place-orders.log 2>&1
+```
+
+00:05 UTC gives the daily candle a few minutes to settle in
+Binance's API before the strategy reads it. Same minute pattern as
+the hourly dry-run cron — they don't conflict because they share
+the journal file but use different state and `clientOrderId`
+namespaces (`tsmom_` for both production and dry-run, `smoke_` for
+smoke tests).
+
+### Why dry-run is hourly but live is daily
+
+Dry-run can run as often as you like — it never sends an order.
+Hourly gives monitoring a fresh staleness signal every hour, surfaces
+testnet balance wipes or manual deposits within the hour, and catches
+bot failures (network, revoked key) before the next live cycle.
+
+Live placement is exactly daily, no more often. The backtest computed
+the signal at daily resolution against daily candles; placing orders
+more often than that is a different turnover profile and an
+un-validated strategy — CLAUDE.md hard rule "execution must
+replicate the backtest exactly" applied to cadence.
