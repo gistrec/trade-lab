@@ -256,6 +256,42 @@ def test_estimate_total_equity_skips_failing_ticker_with_warning(caplog):
     assert any("BTC" in r.message for r in caplog.records)
 
 
+def test_fetch_market_constraints_normalizes_limits():
+    exch = _MockExchange()
+    # Override load_markets to expose CCXT-style limits.
+    exch.load_markets = lambda reload=False: {
+        "BTC/USDT": {
+            "limits": {"amount": {"min": 0.0001}, "cost": {"min": 10.0}},
+            "precision": {"amount": 8},
+        }
+    }
+    broker = Broker(_config(), exch)
+    c = broker.fetch_market_constraints("BTC/USDT")
+    assert c.min_amount == 0.0001
+    assert c.min_cost == 10.0
+    assert c.amount_precision == 8
+
+
+def test_fetch_market_constraints_handles_missing_fields():
+    exch = _MockExchange()
+    exch.load_markets = lambda reload=False: {
+        "BTC/USDT": {"limits": {}, "precision": {}}
+    }
+    broker = Broker(_config(), exch)
+    c = broker.fetch_market_constraints("BTC/USDT")
+    assert c.min_amount is None
+    assert c.min_cost is None
+    assert c.amount_precision is None
+
+
+def test_fetch_market_constraints_raises_for_unknown_pair():
+    exch = _MockExchange()
+    exch.load_markets = lambda reload=False: {}
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="not found"):
+        broker.fetch_market_constraints("WAT/USDT")
+
+
 def test_estimate_total_equity_accepts_explicit_snapshot():
     """Passing a snapshot avoids the duplicate fetch_balance call."""
     exch = _MockExchange()

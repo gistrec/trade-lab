@@ -65,6 +65,41 @@ class _CcxtExchange(Protocol):
     def load_markets(self, reload: bool = ...) -> dict: ...
 
 
+def _coerce_float_or_none(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_or_none(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class MarketConstraints:
+    """Minimum-size / precision constraints for one trading pair.
+
+    ``min_amount`` is the smallest order in BASE units. ``min_cost`` is
+    the smallest order in QUOTE notional. ``amount_precision`` is the
+    decimal-place count CCXT exposes; treat it as a rough lot-step
+    proxy. Any field may be ``None`` if the exchange doesn't expose it.
+    """
+
+    symbol: str
+    min_amount: Optional[float]
+    min_cost: Optional[float]
+    amount_precision: Optional[int]
+    raw: dict
+
+
 @dataclass
 class BalanceSnapshot:
     """Snapshot of balances pulled live from the exchange.
@@ -240,6 +275,40 @@ class Broker:
                 f"Ticker for {symbol} has no last/close field; cannot mark."
             )
         return float(last)
+
+    def fetch_market_constraints(self, symbol: str) -> "MarketConstraints":
+        """Pull minimum notional and amount-step for a symbol via CCXT.
+
+        CCXT normalizes per-exchange ``markets[symbol]['limits']`` to a
+        uniform shape:
+
+        * ``limits.amount.min`` — minimum base-asset quantity per order.
+        * ``limits.cost.min``   — minimum quote-asset notional per order.
+        * ``precision.amount``  — number of decimals (lot-step proxy).
+
+        Different exchanges populate different subsets; we accept None
+        for missing fields and let the caller decide the policy
+        (skip the order, round up to min, etc.). For Binance: cost.min
+        is usually populated; for Kraken: amount.min and precision.
+        """
+        markets = self.exchange.load_markets()
+        if symbol not in markets:
+            raise BrokerError(
+                f"Market {symbol!r} not found on {self.config.exchange_id}. "
+                "Pair may not be listed or quote-currency may not match."
+            )
+        m = markets[symbol]
+        limits = (m.get("limits") or {})
+        amount = (limits.get("amount") or {})
+        cost = (limits.get("cost") or {})
+        precision = (m.get("precision") or {})
+        return MarketConstraints(
+            symbol=symbol,
+            min_amount=_coerce_float_or_none(amount.get("min")),
+            min_cost=_coerce_float_or_none(cost.get("min")),
+            amount_precision=_coerce_int_or_none(precision.get("amount")),
+            raw=m,
+        )
 
     def estimate_total_equity_usd(
         self,

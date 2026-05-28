@@ -781,6 +781,32 @@ def cmd_paper_status(args: argparse.Namespace) -> None:
     print(f"Estimated total equity: {equity:,.2f} {config.quote_currency}")
 
 
+def cmd_paper_dry_run(args: argparse.Namespace) -> None:
+    """Compute the deployable signal + plan orders without sending them.
+
+    The whole pipeline: fetch candles, build basket, run TSMOM(28, 60)
+    + SMA(200) gate, get balance + ticker prices, compute target qty
+    per asset, compute deltas vs current holdings, filter sub-min
+    notional, print the plan. NO orders sent.
+    """
+    from .execution import (
+        Broker, BrokerError, load_paper_config, PaperConfigError,
+        print_dry_run, run_dry_cycle,
+    )
+
+    try:
+        config = load_paper_config()
+    except PaperConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+    try:
+        broker = Broker.connect(config)
+    except BrokerError as exc:
+        raise SystemExit(f"Broker connection failed: {exc}")
+
+    result = run_dry_cycle(broker, candles_per_asset=int(args.candles))
+    print_dry_run(result, quote=config.quote_currency)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -1053,6 +1079,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Connect to the configured exchange (CCXT) and print live balance.",
     )
     p_ps.set_defaults(func=cmd_paper_status)
+
+    p_pd = sub.add_parser(
+        "paper-dry-run",
+        help="Compute the deployable signal + plan orders WITHOUT sending them.",
+    )
+    p_pd.add_argument("--candles", type=int, default=400,
+                       help="Daily candles fetched per asset (default 400).")
+    p_pd.set_defaults(func=cmd_paper_dry_run)
 
     return parser
 

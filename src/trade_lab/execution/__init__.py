@@ -12,13 +12,34 @@ sandbox flag is false, the broker will not connect unless
 independent decisions, not one.
 """
 from .config import PaperConfig, load_paper_config, PaperConfigError
-from .broker import Broker, BrokerError, ConnectionRefused
+from .broker import Broker, BrokerError, ConnectionRefused, MarketConstraints
+from .signal import SignalSnapshot, SignalComputationError, compute_live_signal
+from .allocator import TargetAllocation, compute_target_allocation
+from .delta import (
+    DeltaPlan, OrderIntent, SkippedDelta,
+    compute_delta_plan, total_skipped_quote_drift,
+)
+from .dry_run import DryRunResult, print_dry_run, run_dry_cycle
 
 __all__ = [
     "Broker",
     "BrokerError",
     "ConnectionRefused",
+    "DeltaPlan",
+    "DryRunResult",
+    "MarketConstraints",
+    "OrderIntent",
     "PaperConfig",
     "PaperConfigError",
+    "SignalComputationError",
+    "SignalSnapshot",
+    "SkippedDelta",
+    "TargetAllocation",
+    "compute_delta_plan",
+    "compute_live_signal",
+    "compute_target_allocation",
     "load_paper_config",
+    "print_dry_run",
+    "run_dry_cycle",
+    "total_skipped_quote_drift",
 ]
