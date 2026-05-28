@@ -63,6 +63,20 @@ class _CcxtExchange(Protocol):
     def fetch_ticker(self, symbol: str) -> dict: ...
     def fetch_status(self) -> dict: ...
     def load_markets(self, reload: bool = ...) -> dict: ...
+    # Phase #2b — order placement and reconstruction:
+    def create_order(
+        self, symbol: str, type: str, side: str, amount: float,
+        price: Optional[float] = ..., params: Optional[dict] = ...,
+    ) -> dict: ...
+    def fetch_order(
+        self, id: str, symbol: Optional[str] = ...,
+        params: Optional[dict] = ...,
+    ) -> dict: ...
+    def fetch_open_orders(self, symbol: Optional[str] = ...) -> list: ...
+    def fetch_my_trades(
+        self, symbol: Optional[str] = ...,
+        since: Optional[int] = ..., limit: Optional[int] = ...,
+    ) -> list: ...
 
 
 def _coerce_float_or_none(value) -> Optional[float]:
@@ -309,6 +323,84 @@ class Broker:
             amount_precision=_coerce_int_or_none(precision.get("amount")),
             raw=m,
         )
+
+    # ------------------------------------------------------------------
+    # Order placement (phase #2b)
+    # ------------------------------------------------------------------
+
+    def create_order_safe(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        client_order_id: str,
+    ) -> dict:
+        """Place a market order with a deterministic client order ID.
+
+        Re-raises CCXT exceptions verbatim. Mapping to rejection /
+        timeout / partial outcomes happens in
+        :mod:`trade_lab.execution.orders`, not here — the broker stays
+        a thin transport.
+
+        The ``newClientOrderId`` param is the Binance name; if a future
+        exchange uses a different one, this is the single line to swap.
+        """
+        if side not in ("buy", "sell"):
+            raise ValueError(f"side must be buy or sell, got {side!r}")
+        if amount <= 0:
+            raise ValueError(f"amount must be positive, got {amount}")
+        return self.exchange.create_order(
+            symbol, "market", side, amount, None,
+            {"newClientOrderId": client_order_id},
+        )
+
+    def fetch_order_by_coid(
+        self,
+        client_order_id: str,
+        symbol: str,
+    ) -> dict:
+        """Fetch an order by its client order ID.
+
+        Binance reads the ID from ``origClientOrderId`` in params and
+        ignores the positional ``id`` arg when both are present. We
+        pass the clientOrderId in both spots so mocks can match on
+        either path; real ccxt+Binance prefers the params version.
+
+        Re-raises ``ccxt.OrderNotFound`` when the exchange has no
+        record of the ID — the caller turns that into a "needs
+        placement" decision.
+        """
+        return self.exchange.fetch_order(
+            client_order_id, symbol,
+            {"origClientOrderId": client_order_id},
+        )
+
+    def fetch_open_orders(self, symbol: Optional[str] = None) -> list:
+        """Open orders, optionally filtered to one symbol.
+
+        Used at cycle startup to discover orders that exist on the
+        exchange but are not in our local state — for example because
+        the state file was wiped or a previous cycle crashed before
+        persisting.
+        """
+        return self.exchange.fetch_open_orders(symbol)
+
+    def fetch_my_trades_since(
+        self,
+        symbol: str,
+        since_ms: Optional[int] = None,
+    ) -> list:
+        """Recent trades for a symbol. Used by reconstruction fallback.
+
+        ``since_ms`` is a Unix epoch milliseconds timestamp; ``None``
+        lets the exchange decide the default window (Binance returns
+        the last 24h by default).
+        """
+        return self.exchange.fetch_my_trades(symbol, since_ms)
+
+    # ------------------------------------------------------------------
+    # Equity estimate
+    # ------------------------------------------------------------------
 
     def estimate_total_equity_usd(
         self,
