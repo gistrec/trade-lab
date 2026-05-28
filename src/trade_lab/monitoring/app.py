@@ -37,7 +37,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness, cycle_orders_executed,
+    JournalReader, ReadStats, Staleness, cycle_orders_executed, parse_iso,
 )
 
 
