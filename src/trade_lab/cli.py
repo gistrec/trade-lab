@@ -26,6 +26,7 @@ from .backtest.compare import (
     render_comparison_markdown,
     run_comparison_report,
 )
+from .backtest.cross_sectional import run_cross_sectional_momentum
 from .backtest.multi_asset import (
     aggregate_multi_asset,
     run_multi_asset_yearly_validation,
@@ -47,8 +48,10 @@ from .strategies.base import Strategy
 from .strategies.donchian_trend import DonchianTrendEnsembleStrategy
 from .strategies.regime_only import RegimeOnlyStrategy
 from .strategies.regime_sma_cross import RegimeSMACrossStrategy
+from .strategies.pma_ratio import PriceMaRatioStrategy
 from .strategies.rsi import RSIMeanReversionStrategy
 from .strategies.sma_cross import SMACrossStrategy
+from .strategies.tsmom import TimeSeriesMomentumStrategy
 
 
 STRATEGIES: dict[str, type[Strategy]] = {
@@ -56,6 +59,8 @@ STRATEGIES: dict[str, type[Strategy]] = {
     "regime_sma_cross": RegimeSMACrossStrategy,
     "regime_only": RegimeOnlyStrategy,
     "donchian_trend": DonchianTrendEnsembleStrategy,
+    "tsmom": TimeSeriesMomentumStrategy,
+    "pma_ratio": PriceMaRatioStrategy,
     "rsi": RSIMeanReversionStrategy,
 }
 
@@ -644,6 +649,92 @@ def cmd_compare(args: argparse.Namespace) -> None:
     print(f"Markdown table: {md_path}")
 
 
+def cmd_xsmom(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if not symbols:
+        raise SystemExit("--symbols must list at least one symbol")
+
+    asset_candles: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        try:
+            asset_candles[symbol] = load_candles(
+                data_dir=cfg.data_dir,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=args.timeframe,
+            )
+        except FileNotFoundError as exc:
+            print(f"warn: skipping {symbol} ({exc})")
+    if not asset_candles:
+        raise SystemExit("No candle files found for any of the requested symbols.")
+
+    btc_candles = None
+    if args.btc_gate_symbol:
+        try:
+            btc_candles = load_candles(
+                data_dir=cfg.data_dir,
+                exchange=exchange,
+                symbol=args.btc_gate_symbol,
+                timeframe=args.timeframe,
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                f"--btc-gate-symbol {args.btc_gate_symbol}: candles not found ({exc})"
+            )
+        # Conventional XSMOM only rotates altcoins — drop the gate symbol
+        # from the universe if it happens to be there.
+        asset_candles.pop(args.btc_gate_symbol, None)
+        if not asset_candles:
+            raise SystemExit(
+                "Universe is empty after removing the BTC gate symbol; "
+                "pass at least one altcoin symbol via --symbols."
+            )
+
+    result = run_cross_sectional_momentum(
+        asset_candles,
+        lookback_days=args.lookback_days,
+        rebalance_days=args.rebalance_days,
+        top_k=args.top_k,
+        weighting=args.weighting,
+        vol_lookback=args.vol_lookback,
+        btc_candles=btc_candles,
+        btc_gate_sma_period=args.btc_gate_sma_period,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    weights_path = out_dir / "xsmom_weights.csv"
+    equity_path = out_dir / "xsmom_equity.csv"
+    result.weights.to_csv(weights_path)
+    result.equity.to_frame(name="equity").to_csv(equity_path)
+
+    print("Cross-sectional momentum:")
+    print(f"  Universe:          {', '.join(asset_candles.keys())}")
+    print(f"  BTC gate:          "
+          f"{args.btc_gate_symbol or '(none)'} > SMA({args.btc_gate_sma_period})")
+    print(f"  Lookback (days):   {args.lookback_days}")
+    print(f"  Rebalance (days):  {args.rebalance_days}")
+    print(f"  Top-K:             {args.top_k}")
+    print(f"  Weighting:         {args.weighting}")
+    print()
+    print(f"  Total return:      {result.total_return:+.2%}")
+    print(f"  Max drawdown:      {result.max_drawdown:.2%}")
+    print(f"  Sharpe (annual):   {result.sharpe:+.2f}")
+    print(f"  Num rebalances:    {result.num_rebalances}")
+    print(f"  Avg basket size:   {result.average_basket_size:.2f}")
+    print(f"  Avg cash fraction: {result.average_cash_fraction:.2%}")
+    print(f"  Total fees:        ${result.total_fees:,.2f}")
+    print(f"  Total slippage:    ${result.total_slippage:,.2f}")
+    print()
+    print(f"  Weights CSV:       {weights_path}")
+    print(f"  Equity CSV:        {equity_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -876,6 +967,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Markdown summary (default: alongside --output-csv)",
     )
     p_cm.set_defaults(func=cmd_compare)
+
+    p_xs = sub.add_parser(
+        "xsmom",
+        help="Cross-sectional momentum (top-N rotation) across an asset universe.",
+    )
+    p_xs.add_argument(
+        "--symbols",
+        default="ETH/USDT,BNB/USDT,SOL/USDT",
+        help="Comma-separated alt universe (BTC excluded by convention if it is "
+             "the BTC-gate symbol).",
+    )
+    p_xs.add_argument("--timeframe", default="1d")
+    p_xs.add_argument("--exchange", default=None)
+    p_xs.add_argument("--lookback-days", type=int, default=30)
+    p_xs.add_argument("--rebalance-days", type=int, default=7)
+    p_xs.add_argument("--top-k", type=int, default=2)
+    p_xs.add_argument(
+        "--weighting",
+        choices=("equal", "inverse_vol"),
+        default="equal",
+    )
+    p_xs.add_argument("--vol-lookback", type=int, default=30)
+    p_xs.add_argument(
+        "--btc-gate-symbol",
+        default="BTC/USDT",
+        help="Pass empty string to disable the BTC > SMA(N) gate.",
+    )
+    p_xs.add_argument("--btc-gate-sma-period", type=int, default=200)
+    p_xs.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="Directory for the weights/equity CSV outputs.",
+    )
+    p_xs.set_defaults(func=cmd_xsmom)
 
     return parser
 

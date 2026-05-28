@@ -475,8 +475,19 @@ example CLI invocations, and any per-strategy results worth pinning:
   regime filter, no crossover.
 - [`donchian_trend`](docs/strategies/donchian_trend.md) — Donchian
   breakout ensemble + SMA filter + volatility targeting.
+- [`tsmom`](docs/strategies/tsmom.md) — multi-lookback time-series
+  momentum (Moskowitz et al. 2012, Liu & Tsyvinski 2021).
+- [`pma_ratio`](docs/strategies/pma_ratio.md) — price-to-MA ratio
+  ensemble (Detzel et al. 2021).
+- [`cross_sectional_momentum`](docs/strategies/cross_sectional_momentum.md)
+  — multi-asset top-N rotation (Liu, Tsyvinski, Wu 2022). Lives in
+  `backtest/cross_sectional.py` because it spans the panel.
 - [`rsi`](docs/strategies/rsi.md) — RSI mean reversion (contrast
   baseline, not a recommendation).
+
+For a side-by-side comparison of the trend strategies above on the
+BTC/ETH/BNB/SOL panel, see
+[Strategy comparison](docs/results/strategy_comparison.md).
 
 Adding a new strategy is a five-minute job — subclass `Strategy`,
 implement `generate_signals(candles)`, register the class in

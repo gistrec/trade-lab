@@ -14,7 +14,9 @@ import pandas as pd
 from ..data.storage import filter_candles_by_date
 from ..strategies.base import Strategy
 from ..strategies.donchian_trend import DonchianTrendEnsembleStrategy
+from ..strategies.pma_ratio import PriceMaRatioStrategy
 from ..strategies.sma_cross import SMACrossStrategy
+from ..strategies.tsmom import TimeSeriesMomentumStrategy
 from .engine import run_backtest
 from .metrics import _max_drawdown, compute_metrics
 
@@ -47,6 +49,20 @@ DEFAULT_COMPARISON_STRATEGIES: Sequence[StrategySpec] = (
     StrategySpec(
         "donchian_trend_rb005",
         lambda: DonchianTrendEnsembleStrategy(rebalance_threshold=0.05),
+    ),
+    # TSMOM: sign-of-trailing-return ensemble over 1, 3, 6, 12 months.
+    # Moskowitz et al. 2012 + Liu & Tsyvinski 2021. Uses the same SMA(200)
+    # regime filter + vol-targeting layer so it stays comparable to the
+    # other trend-following entries.
+    StrategySpec(
+        "tsmom_1_3_6_12m",
+        lambda: TimeSeriesMomentumStrategy(),
+    ),
+    # P/MA ratio ensemble. Detzel et al. 2021 (Financial Management).
+    # ``close > SMA(k)`` votes over k in {5, 10, 20, 50, 100}.
+    StrategySpec(
+        "pma_ratio_ensemble",
+        lambda: PriceMaRatioStrategy(),
     ),
 )
 

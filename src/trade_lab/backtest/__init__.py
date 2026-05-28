@@ -32,6 +32,16 @@ from .compare import (
     render_comparison_markdown,
     run_comparison_report,
 )
+from .cross_sectional import (
+    CrossSectionalResult,
+    run_cross_sectional_momentum,
+)
+from .dsr import (
+    deflated_sharpe_from_trial_sharpes,
+    deflated_sharpe_ratio,
+    expected_max_sharpe,
+    sharpe_ratio_per_period,
+)
 from .multi_asset import (
     MULTI_ASSET_AGGREGATE_COLUMNS,
     MULTI_ASSET_DETAIL_COLUMNS,
@@ -67,6 +77,7 @@ __all__ = [
     "FixedStrategySpec",
     "Metrics",
     "COMPARISON_COLUMNS",
+    "CrossSectionalResult",
     "DEFAULT_COMPARISON_STRATEGIES",
     "DEFAULT_SUBPERIODS",
     "MULTI_ASSET_AGGREGATE_COLUMNS",
@@ -94,9 +105,14 @@ __all__ = [
     "benchmark_verdict",
     "compute_metrics",
     "debug_trades_dataframe",
+    "deflated_sharpe_from_trial_sharpes",
+    "deflated_sharpe_ratio",
+    "expected_max_sharpe",
+    "sharpe_ratio_per_period",
     "execution_bars",
     "render_comparison_markdown",
     "run_comparison_report",
+    "run_cross_sectional_momentum",
     "generate_windows",
     "plot_equity_curve",
     "run_backtest",

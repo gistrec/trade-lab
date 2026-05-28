@@ -118,6 +118,16 @@ def test_strategies_include_donchian_with_both_threshold_settings():
     assert "donchian_trend_rb005" in strategies
 
 
+def test_strategies_include_tsmom_and_pma_from_research_panel():
+    """The Research-Claude survey put TSMOM (Moskowitz et al. 2012;
+    Liu & Tsyvinski 2021) and the P/MA ensemble (Detzel et al. 2021) at
+    priority 5/5 — both must appear in the default comparison panel."""
+    df = run_comparison_report(_multi_asset())
+    strategies = set(df["strategy"].unique())
+    assert "tsmom_1_3_6_12m" in strategies
+    assert "pma_ratio_ensemble" in strategies
+
+
 def test_donchian_rb005_has_fewer_or_equal_fees_than_rb0_on_average():
     """The rebalance band shouldn't *increase* fees on any given run.
     Per-cell variance is fine; we check the average across the panel."""
