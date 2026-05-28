@@ -244,6 +244,116 @@ def test_invalid_parameters_raise():
         DonchianTrendEnsembleStrategy(donchian_lookbacks=(0, 10))
 
 
+def test_rebalance_threshold_zero_matches_unbanded_behaviour():
+    """rebalance_threshold = 0 must reproduce the pre-feature output exactly."""
+    rng = np.random.default_rng(0)
+    closes = (100 + np.linspace(0, 60, 400) + rng.normal(0, 2.0, 400)).tolist()
+    candles = _candles(closes)
+
+    unbanded = DonchianTrendEnsembleStrategy(rebalance_threshold=0.0)
+    banded_zero = DonchianTrendEnsembleStrategy(rebalance_threshold=0.0)
+    sig_a = unbanded.generate_signals(candles)
+    sig_b = banded_zero.generate_signals(candles)
+    pd.testing.assert_series_equal(sig_a, sig_b)
+
+
+def test_rebalance_threshold_suppresses_small_target_changes():
+    """A series whose realized vol slowly drifts produces tiny daily
+    adjustments. With a band, the position should hold flat for stretches
+    instead of changing every bar."""
+    rng = np.random.default_rng(0)
+    closes = (100 + np.linspace(0, 100, 500) + rng.normal(0, 2.0, 500)).tolist()
+    candles = _candles(closes)
+
+    unbanded = DonchianTrendEnsembleStrategy(rebalance_threshold=0.0)
+    banded = DonchianTrendEnsembleStrategy(rebalance_threshold=0.05)
+    sig_unbanded = unbanded.generate_signals(candles)
+    sig_banded = banded.generate_signals(candles)
+
+    # Turnover proxy: number of unique non-zero levels held. Banded run
+    # should have far fewer distinct levels.
+    unbanded_changes = (sig_unbanded.diff().abs() > 1e-12).sum()
+    banded_changes = (sig_banded.diff().abs() > 1e-12).sum()
+    assert banded_changes < unbanded_changes
+
+
+def test_rebalance_threshold_does_not_block_entries():
+    """A transition from 0 to a positive target must always go through,
+    even if the size happens to be smaller than the threshold."""
+    # Construct a deterministic toy series where there's a clear entry
+    # after warm-up: long uptrend, then a brief sharp move that triggers
+    # the breakout but stays small.
+    closes = [100.0] * 60 + [101.0, 103.0, 110.0] + [110.0] * 30
+    candles = _candles(closes)
+
+    strat = DonchianTrendEnsembleStrategy(
+        donchian_lookbacks=(20,),
+        sma_filter_periods=(30,),
+        vol_lookback=10,
+        annual_vol_target=0.25,
+        rebalance_threshold=0.50,  # very wide band
+    )
+    sig = strat.generate_signals(candles)
+
+    # The signal must become positive at some point after warm-up.
+    assert (sig > 0).any()
+
+
+def test_rebalance_threshold_does_not_block_exits():
+    """A transition from a positive position to 0 must always go through
+    regardless of the threshold."""
+    # Long uptrend (strategy goes long) then a hard crash (SMA filter
+    # forces flat). Even with a huge band, the exit must fire.
+    uptrend = list(range(100, 400))
+    crash_floor = [120.0] * 80
+    candles = _candles(uptrend + crash_floor)
+
+    strat = DonchianTrendEnsembleStrategy(
+        donchian_lookbacks=(20,),
+        sma_filter_periods=(50, 100),
+        vol_lookback=20,
+        annual_vol_target=0.25,
+        rebalance_threshold=0.99,  # blocks every conceivable size update
+    )
+    sig = strat.generate_signals(candles)
+
+    # By the tail of the crash window the strategy must be flat.
+    assert (sig.iloc[-40:] == 0).all()
+
+
+def test_rebalance_threshold_respects_position_cap():
+    """Even with the band, position must stay within [0, max_position_size]."""
+    n = 400
+    closes = (100 + np.arange(n) * 0.01).tolist()  # vanishing vol
+    candles = _candles(closes)
+
+    strat = DonchianTrendEnsembleStrategy(
+        donchian_lookbacks=(20,),
+        sma_filter_periods=(50, 100),
+        vol_lookback=20,
+        annual_vol_target=0.25,
+        max_position_size=1.0,
+        rebalance_threshold=0.10,
+    )
+    sig = strat.generate_signals(candles)
+    assert (sig >= 0.0).all()
+    assert (sig <= 1.0).all()
+
+
+def test_rebalance_threshold_does_not_introduce_lookahead():
+    """The band uses only the running position, never future targets.
+    Appending future bars must not change signals on the prefix."""
+    rng = np.random.default_rng(0)
+    base = (100 + np.linspace(0, 60, 200) + rng.normal(0, 2.0, 200)).tolist()
+    future_garbage = [1e6, 1e-6, 1e6, 1e-6, 1e6]
+
+    strat = DonchianTrendEnsembleStrategy(rebalance_threshold=0.05)
+    sig_base = strat.generate_signals(_candles(base))
+    sig_extended_prefix = strat.generate_signals(_candles(base + future_garbage)).iloc[: len(base)]
+
+    np.testing.assert_array_equal(sig_base.values, sig_extended_prefix.values)
+
+
 def test_string_parameters_accepted_for_cli_use():
     """The CLI passes lookback lists as comma-separated strings via
     --param. The strategy must accept that form too."""

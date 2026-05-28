@@ -49,6 +49,7 @@ def _build_strategy(name: str, params: dict):
             vol_lookback=int(params["vol_lookback"]),
             annual_vol_target=float(params["annual_vol_target"]),
             max_position_size=float(params["max_position_size"]),
+            rebalance_threshold=float(params["rebalance_threshold"]),
         )
     if name == "rsi":
         return RSIMeanReversionStrategy(
@@ -118,6 +119,10 @@ def _sidebar_controls() -> dict:
             params["max_position_size"] = st.number_input(
                 "max_position_size", min_value=0.05, max_value=1.0,
                 value=1.0, step=0.05, format="%.2f",
+            )
+            params["rebalance_threshold"] = st.number_input(
+                "rebalance_threshold", min_value=0.0, max_value=0.5,
+                value=0.05, step=0.01, format="%.3f",
             )
         else:
             params["rsi_period"] = st.number_input(

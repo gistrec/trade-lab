@@ -38,6 +38,20 @@ baked into the strategy itself.
    `BTC > BTC SMA(btc_gate_sma_period)` (default 200). Useful when
    running the same rules on altcoins; redundant on BTC itself.
 
+5. **Rebalance band** (`rebalance_threshold`, default `0.05`). The
+   pure target from steps 1-4 changes every bar because realized vol
+   drifts daily. Without smoothing, every small adjustment pays fees
+   + slippage. The band only updates the held position when
+   `abs(target - current) >= rebalance_threshold`; otherwise it sticks
+   with the previous size. **Entries (0 → positive target) and exits
+   (positive → 0) are never suppressed** — the band only ignores size
+   tweaks, not state changes. Setting `rebalance_threshold=0`
+   reproduces the unfiltered behaviour exactly.
+
+   The band exists to reduce fee drag, not to create alpha. It does
+   not change *when* the strategy is in or out of the market; it just
+   reduces unnecessary micro-rebalancing while in a position.
+
 ## Execution and lookahead
 
 All signals at bar `N` use only data available at close of `N`. The
@@ -87,18 +101,46 @@ bears (0% exposure, 0% return, 0% drawdown), at the cost of leaving
 most of the 2020-2021 and 2023-2025 bull-run upside on the table. The
 full-window verdict is `LOWER_RETURN_LOWER_DD` — *not* a profitability
 claim. 44 round-trip trades across 8 years cost ~16% of initial
-capital in cumulative fees + slippage.
+capital in cumulative fees + slippage (default `rebalance_threshold=0`
+results; the default 0.05 band trims that by ~10%, see below).
+
+## Rebalance-band sensitivity (BTC/USDT 1d, full window)
+
+Same backtest, varying `rebalance_threshold`; everything else default.
+
+| threshold | net return | max DD | completed trades | total fees | exposure |
+|-----------|------------|--------|------------------|------------|----------|
+| 0.00      | +314.02%   | 22.62% | 44               | $1,587.60  | 45.45%   |
+| 0.025     | +314.83%   | 22.09% | 44               | $1,465.61  | 45.45%   |
+| 0.05      | +326.16%   | 22.19% | 44               | $1,418.05  | 45.45%   |
+| 0.10      | +322.34%   | 21.69% | 44               | $1,360.23  | 45.45%   |
+
+What this shows:
+
+- **Trade count and exposure are unchanged** across every threshold.
+  The band only suppresses *size adjustments*, never entries or exits.
+- **Fees drop monotonically** as the threshold widens — from $1,588
+  (~16% of initial capital) at 0 to $1,360 (~14%) at 0.10.
+- **Return / drawdown are essentially unchanged.** The 3-4pp return
+  improvement at higher thresholds is within noise and should not be
+  treated as alpha. *Do not pick the threshold that maximizes return.*
+
+The default `0.05` is a conservative pick: cuts ~10% off fees while
+keeping the return / DD shape recognizable. If you care more about
+turnover, `0.10` is fine too. If you want to reproduce the historical
+(no-band) behaviour, set `rebalance_threshold=0`.
 
 ## Known limitations
 
 - **Single-asset only.** The engine processes one symbol at a time; the
   multi-asset portfolio cap from the strategy spec is enforced per-asset
   by `max_position_size` rather than across a basket.
-- **Daily turnover from vol-targeting.** There is no rebalance band, so
-  a daily change in realized vol creates a (small) rebalance every bar
-  the strategy is long. Fees scale with that — the 16% lifetime fee
-  burn on the BTC backtest above is partly from those micro rebalances.
-  A rebalance band parameter is a natural follow-up.
+- **Turnover is still continuous within a trade.** The rebalance band
+  (`rebalance_threshold`, default 0.05) reduces *micro*-rebalancing but
+  doesn't eliminate it — every time realized vol drifts by more than
+  the threshold, the position resizes once and pays a fee. For the
+  defaults on BTC/USDT 1d, cumulative fees + slippage are still ~14%
+  of initial capital over 8 years.
 - **BTC gate is per-instance.** It works programmatically by passing
   `btc_candles` to the constructor but isn't yet wired into the CLI
   (which loads only one symbol's candles).
