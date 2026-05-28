@@ -31,7 +31,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-KNOWN_SCHEMA_VERSIONS = frozenset({1})
+KNOWN_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 class Staleness(str, Enum):

@@ -349,5 +349,43 @@ def test_parse_iso_naive_treated_as_utc():
     assert dt.tzinfo == timezone.utc
 
 
-def test_known_schema_versions_includes_one():
+def test_known_schema_versions_includes_one_and_two():
+    """v1 is the dry-run-only shape; v2 adds orders_executed."""
     assert 1 in KNOWN_SCHEMA_VERSIONS
+    assert 2 in KNOWN_SCHEMA_VERSIONS
+
+
+def test_v2_entry_with_orders_executed_reads_correctly(tmp_path):
+    """A schema_version=2 entry with orders_executed must parse and be
+    surfaced by latest_cycle / cycles like any v1 entry."""
+    journal = tmp_path / "j.jsonl"
+    entry = _cycle_entry("v2-cycle", schema_version=2)
+    entry["orders_executed"] = [
+        {"client_order_id": "tsmom_20260530_BTCUSDT_buy",
+         "exchange_order_id": "exch-1", "symbol": "BTC/USDT",
+         "side": "buy", "intended_amount": 0.001,
+         "terminal_status": "closed", "filled_amount": 0.001,
+         "filled_notional_quote": 50.0, "average_price": 50000.0,
+         "fees_paid_quote": 0.05, "placed_at": "...",
+         "terminal_at": "...", "error": None},
+    ]
+    _write_journal(journal, [entry])
+    reader = JournalReader(journal)
+    latest = reader.latest_cycle()
+    assert latest["cycle_id"] == "v2-cycle"
+    assert latest["schema_version"] == 2
+    assert len(latest["orders_executed"]) == 1
+    assert latest["orders_executed"][0]["terminal_status"] == "closed"
+
+
+def test_v1_entry_without_orders_executed_still_reads(tmp_path):
+    """Backward compat — old v1 entries written before the schema bump
+    have no orders_executed field at all and must still parse."""
+    journal = tmp_path / "j.jsonl"
+    entry = _cycle_entry("v1-cycle", schema_version=1)
+    # Explicitly omit orders_executed; v1 readers never had it.
+    assert "orders_executed" not in entry
+    _write_journal(journal, [entry])
+    reader = JournalReader(journal)
+    latest = reader.latest_cycle()
+    assert latest["cycle_id"] == "v1-cycle"

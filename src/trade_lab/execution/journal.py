@@ -7,10 +7,13 @@ this module; the bot writes, monitoring reads.
 
 Schema versioning
 =================
-``schema_version=1`` is the dry-run shape: signal + balance + planned
-orders, no fills. Phase #2b will introduce ``schema_version=2`` with
-order results and fill events. Readers must accept all known versions
-and skip unknown ones with a warning — never crash.
+``schema_version=1`` was the dry-run-only shape: signal + balance +
+planned orders, no fills. ``schema_version=2`` (current) adds
+``orders_executed`` for real orders placed by ``run_live_cycle``;
+dry-run cycles continue to write the same shape with
+``orders_executed=None`` so a v1 reader still parses them. Readers
+must accept all known versions and skip unknown ones with a warning
+— never crash.
 
 Atomicity
 =========
@@ -34,7 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 
-JOURNAL_SCHEMA_VERSION = 1
+JOURNAL_SCHEMA_VERSION = 2
 MAX_LINE_BYTES = 4096
 
 
@@ -62,7 +65,7 @@ class Cycle:
     started_at: str             # ISO-8601 UTC
     ended_at: str               # ISO-8601 UTC
     duration_ms: int
-    outcome: str                # "success" | "failed"
+    outcome: str                # success | failed | partial | unknown_orders | reconstructed
     error: Optional[dict]       # {"type": ..., "message": ...} or None
     git_commit: Optional[str]
     python_version: str
@@ -76,6 +79,7 @@ class Cycle:
     orders_planned: Optional[list]
     orders_skipped: Optional[list]
     total_skipped_quote_drift: Optional[float]
+    orders_executed: Optional[list] = None  # NEW in v2 — real-order results
     schema_version: int = JOURNAL_SCHEMA_VERSION
 
 

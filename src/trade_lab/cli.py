@@ -935,6 +935,61 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
         print(f"  appended to:       {path}")
 
 
+def cmd_paper_place_orders(args: argparse.Namespace) -> None:
+    """Production daily cycle: reconstruct, plan, place real orders, journal.
+
+    Refuses to start at the config level if mainnet is not explicitly
+    enabled. When mainnet IS enabled, prints a loud last-chance warning
+    before the broker is even constructed — the operator can still
+    Ctrl-C.
+    """
+    from .execution import (
+        Broker, BrokerError, JournalWriter, load_paper_config,
+        OrderStateStore, PaperConfigError, run_live_cycle,
+    )
+
+    try:
+        config = load_paper_config()
+    except PaperConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+
+    if not config.sandbox and config.allow_mainnet:
+        print()
+        print("=" * 60)
+        print("WARNING: about to place REAL ORDERS on MAINNET")
+        print(f"  Exchange: {config.exchange_id}")
+        print("  This is your last chance to abort with Ctrl-C.")
+        print("=" * 60)
+        print()
+
+    try:
+        broker = Broker.connect(config)
+    except BrokerError as exc:
+        raise SystemExit(f"Broker connection failed: {exc}")
+
+    journal = JournalWriter(args.journal)
+    state = OrderStateStore(args.state)
+
+    result = run_live_cycle(
+        broker,
+        candles_per_asset=int(args.candles),
+        journal=journal,
+        state=state,
+        total_timeout_s=float(args.timeout_s),
+    )
+
+    print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
+    print(f"  reconstructed:    {result.reconstructed_count}")
+    print(f"  orders placed:    {len(result.order_results)}")
+    for r in result.order_results:
+        print(
+            f"    {r.side.upper():4s} {r.symbol:12s} "
+            f"{r.terminal_status:15s} "
+            f"filled={r.filled_amount:.8f}/{r.intended_amount:.8f}  "
+            f"({r.filled_notional_quote:.2f} {config.quote_currency})"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -1240,6 +1295,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_smoke.add_argument("--timeout-s", dest="timeout_s", type=float, default=60.0,
                           help="Wait-for-ack budget in seconds (default 60).")
     p_smoke.set_defaults(func=cmd_paper_place_test_order)
+
+    p_live = sub.add_parser(
+        "paper-place-orders",
+        help="Production daily cycle: signal -> plan -> place real orders -> journal.",
+    )
+    p_live.add_argument("--journal", required=True,
+                         help="Path to cycles.jsonl (one Cycle entry per run).")
+    p_live.add_argument("--state", default="data/state/orders.json",
+                         help="Path to order-state JSON (default: data/state/orders.json).")
+    p_live.add_argument("--candles", type=int, default=400,
+                         help="Daily candles fetched per asset (default 400).")
+    p_live.add_argument("--timeout-s", dest="timeout_s", type=float, default=300.0,
+                         help="Per-order wait-for-ack budget in seconds (default 300).")
+    p_live.set_defaults(func=cmd_paper_place_orders)
 
     return parser
 

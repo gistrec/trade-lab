@@ -24,6 +24,12 @@ from .journal import (
     JOURNAL_SCHEMA_VERSION, MAX_LINE_BYTES,
 )
 from .dry_run import DryRunResult, print_dry_run, run_dry_cycle
+from .live_cycle import LiveCycleResult, run_live_cycle
+from .order_state import (
+    OrderStateEntry, OrderStateStore,
+    TERMINAL_STATUSES, NON_TERMINAL_STATUSES,
+)
+from .orders import OrderResult, place_order, sort_orders_for_placement
 
 __all__ = [
     "Broker",
@@ -35,20 +41,29 @@ __all__ = [
     "JOURNAL_SCHEMA_VERSION",
     "JournalEntryTooLarge",
     "JournalWriter",
+    "LiveCycleResult",
     "MAX_LINE_BYTES",
     "MarketConstraints",
+    "NON_TERMINAL_STATUSES",
     "OrderIntent",
+    "OrderResult",
+    "OrderStateEntry",
+    "OrderStateStore",
     "PaperConfig",
     "PaperConfigError",
     "SignalComputationError",
     "SignalSnapshot",
     "SkippedDelta",
+    "TERMINAL_STATUSES",
     "TargetAllocation",
     "compute_delta_plan",
     "compute_live_signal",
     "compute_target_allocation",
     "load_paper_config",
+    "place_order",
     "print_dry_run",
     "run_dry_cycle",
+    "run_live_cycle",
+    "sort_orders_for_placement",
     "total_skipped_quote_drift",
 ]
