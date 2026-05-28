@@ -27,7 +27,7 @@ orders are placed here.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -51,6 +51,13 @@ class SignalSnapshot:
     asset_closes: dict[str, float]    # base symbol -> close at asof
     sma_gate_open: bool               # True if basket close > SMA(200)
     n_assets_in_basket: int           # active count at asof (excludes NaN-only)
+    per_lookback_states: dict[int, int] = field(default_factory=dict)
+    # Pre-gate {0,1} state per lookback. Averaged → ladder before the
+    # SMA(200) gate is applied. Monitoring uses this to explain *why*
+    # the ladder landed where it did on a given day.
+    basket_close_tail: Optional[pd.Series] = None
+    # Last N basket closes for the monitoring chart (basket vs SMA(200)).
+    # None means "not computed" — older callers stay backward-compatible.
 
 
 def compute_live_signal(
@@ -123,6 +130,18 @@ def compute_live_signal(
     sma = basket["close"].rolling(sma_filter_period).mean().iloc[-1]
     sma_gate_open = bool(pd.notna(sma) and basket_close > sma)
 
+    # Pre-gate per-lookback states. Mirrors the strategy's internal
+    # _tsmom_ensemble logic exactly: sign of pct_change(L) at the last
+    # bar. The strategy then zeroes them out via the SMA(200) gate; we
+    # expose the pre-gate values for diagnostic visibility.
+    per_lookback_states: dict[int, int] = {}
+    close_series = basket["close"]
+    for L in lookbacks:
+        past = close_series.pct_change(int(L)).iloc[-1]
+        per_lookback_states[int(L)] = (
+            1 if (pd.notna(past) and past > 0) else 0
+        )
+
     return SignalSnapshot(
         asof=asof,
         signal=signal_value,
@@ -132,6 +151,8 @@ def compute_live_signal(
         },
         sma_gate_open=sma_gate_open,
         n_assets_in_basket=len(asset_candles),
+        per_lookback_states=per_lookback_states,
+        basket_close_tail=basket["close"].tail(100),
     )
 
 

@@ -790,8 +790,8 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     notional, print the plan. NO orders sent.
     """
     from .execution import (
-        Broker, BrokerError, load_paper_config, PaperConfigError,
-        print_dry_run, run_dry_cycle,
+        Broker, BrokerError, JournalWriter, load_paper_config,
+        PaperConfigError, print_dry_run, run_dry_cycle,
     )
 
     try:
@@ -803,7 +803,10 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     except BrokerError as exc:
         raise SystemExit(f"Broker connection failed: {exc}")
 
-    result = run_dry_cycle(broker, candles_per_asset=int(args.candles))
+    journal = JournalWriter(args.journal) if args.journal else None
+    result = run_dry_cycle(
+        broker, candles_per_asset=int(args.candles), journal=journal,
+    )
     print_dry_run(result, quote=config.quote_currency)
 
 
@@ -1086,6 +1089,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pd.add_argument("--candles", type=int, default=400,
                        help="Daily candles fetched per asset (default 400).")
+    p_pd.add_argument(
+        "--journal", default=None,
+        help="Path to append-only JSON Lines journal. If set, one Cycle entry "
+             "is written per call. Read-only consumer: monitoring dashboard.",
+    )
     p_pd.set_defaults(func=cmd_paper_dry_run)
 
     return parser

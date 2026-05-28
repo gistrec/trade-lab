@@ -19,14 +19,23 @@ from .delta import (
     DeltaPlan, OrderIntent, SkippedDelta,
     compute_delta_plan, total_skipped_quote_drift,
 )
+from .journal import (
+    Cycle, JournalEntryTooLarge, JournalWriter,
+    JOURNAL_SCHEMA_VERSION, MAX_LINE_BYTES,
+)
 from .dry_run import DryRunResult, print_dry_run, run_dry_cycle
 
 __all__ = [
     "Broker",
     "BrokerError",
     "ConnectionRefused",
+    "Cycle",
     "DeltaPlan",
     "DryRunResult",
+    "JOURNAL_SCHEMA_VERSION",
+    "JournalEntryTooLarge",
+    "JournalWriter",
+    "MAX_LINE_BYTES",
     "MarketConstraints",
     "OrderIntent",
     "PaperConfig",
