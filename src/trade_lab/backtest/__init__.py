@@ -35,6 +35,7 @@ from .compare import (
 from .cross_sectional import (
     CrossSectionalResult,
     run_cross_sectional_momentum,
+    run_cross_sectional_reversal,
 )
 from .dsr import (
     deflated_sharpe_from_trial_sharpes,
@@ -158,6 +159,7 @@ __all__ = [
     "render_comparison_markdown",
     "run_comparison_report",
     "run_cross_sectional_momentum",
+    "run_cross_sectional_reversal",
     "generate_windows",
     "plot_equity_curve",
     "run_backtest",

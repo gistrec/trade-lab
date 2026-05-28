@@ -210,6 +210,158 @@ def _build_btc_gate(
     return gate.reindex(target_index, method="ffill").fillna(False)
 
 
+def run_cross_sectional_reversal(
+    asset_candles: Mapping[str, pd.DataFrame],
+    lookback_days: int = 1,
+    rebalance_days: int = 1,
+    bottom_k: int = 3,
+    weighting: str = "equal",
+    vol_lookback: int = 30,
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+    annualization_factor: int = 365,
+    eligibility: Optional[pd.DataFrame] = None,
+) -> CrossSectionalResult:
+    """Long-only cross-sectional one-day reversal (Zaremba 2021, Bianchi 2022).
+
+    Each rebalance: rank assets by trailing ``lookback_days`` return
+    and go long the **bottom-K** (the losers). Hold for the next
+    ``rebalance_days`` bars (default 1), then re-evaluate.
+
+    No "positive return only" filter: the whole point of the strategy
+    is to lean against fresh negative moves. ``eligibility`` mirrors
+    the momentum runner's PIT-mask semantics — pass it to restrict
+    the selection pool. No BTC gate (the strategy is supposed to be
+    market-neutral in spirit, even though we cannot short here).
+
+    The academic versions trade long-short with very wide rebalance
+    frequencies (daily, 1-day holding); transaction costs at retail
+    Binance fees + slippage are large for this style. We trust the
+    engine's symmetric cost model to tell the honest story.
+    """
+    if lookback_days < 1:
+        raise ValueError("lookback_days must be >= 1")
+    if rebalance_days < 1:
+        raise ValueError("rebalance_days must be >= 1")
+    if bottom_k < 1:
+        raise ValueError("bottom_k must be >= 1")
+    if weighting not in ("equal", "inverse_vol"):
+        raise ValueError("weighting must be 'equal' or 'inverse_vol'")
+    if vol_lookback < 2:
+        raise ValueError("vol_lookback must be >= 2")
+
+    if not asset_candles:
+        empty = pd.Series(dtype=float)
+        return CrossSectionalResult(
+            equity=empty, returns=empty, weights=pd.DataFrame(),
+            initial_capital=initial_capital,
+        )
+
+    closes = _align_closes(asset_candles)
+    if closes.empty:
+        empty = pd.Series(dtype=float)
+        return CrossSectionalResult(
+            equity=empty, returns=empty, weights=pd.DataFrame(columns=closes.columns),
+            initial_capital=initial_capital,
+        )
+
+    aligned_eligibility = _align_eligibility(eligibility, closes)
+    trailing_return = closes.pct_change(lookback_days)
+    realized_vol = closes.pct_change().rolling(vol_lookback).std()
+
+    weights = pd.DataFrame(0.0, index=closes.index, columns=closes.columns)
+    last_weights = pd.Series(0.0, index=closes.columns)
+    for i, date in enumerate(closes.index):
+        eligible_row = (
+            aligned_eligibility.iloc[i] if aligned_eligibility is not None else None
+        )
+        if i % rebalance_days == 0:
+            last_weights = _rebalance_reversal(
+                trailing_return.iloc[i],
+                realized_vol.iloc[i] if weighting == "inverse_vol" else None,
+                bottom_k=bottom_k,
+                weighting=weighting,
+                eligibility=eligible_row,
+            )
+        if eligible_row is not None:
+            last_weights = last_weights.where(eligible_row, other=0.0)
+        weights.iloc[i] = last_weights
+
+    positions = weights.shift(1).fillna(0.0)
+    rebalance_dates = [
+        positions.index[i] for i in range(len(positions))
+        if i > 0 and not np.allclose(positions.iloc[i].to_numpy(),
+                                     positions.iloc[i - 1].to_numpy())
+    ]
+    asset_returns = closes.pct_change().fillna(0.0)
+    gross_returns = (positions * asset_returns).sum(axis=1)
+    turnover = positions.diff().abs().sum(axis=1)
+    turnover.iloc[0] = positions.iloc[0].abs().sum()
+    fee_costs = turnover * fee_rate
+    slippage_costs = turnover * slippage_rate
+    net_returns = gross_returns - fee_costs - slippage_costs
+
+    equity = initial_capital * (1.0 + net_returns).cumprod()
+    prior_equity = equity.shift(1).fillna(initial_capital)
+    total_fees = float((turnover * fee_rate * prior_equity).sum())
+    total_slippage = float((turnover * slippage_rate * prior_equity).sum())
+    total_return = float(equity.iloc[-1] / equity.iloc[0] - 1) if len(equity) >= 2 else 0.0
+    max_dd = _max_drawdown(equity)
+    sharpe = _sharpe(net_returns, annualization_factor)
+    basket_size = float((positions > 0).sum(axis=1).mean())
+    cash_fraction = float(
+        (1.0 - positions.sum(axis=1)).clip(lower=0.0, upper=1.0).mean()
+    )
+
+    return CrossSectionalResult(
+        equity=equity, returns=net_returns, weights=positions,
+        rebalance_dates=rebalance_dates, initial_capital=initial_capital,
+        total_fees=total_fees, total_slippage=total_slippage,
+        total_return=total_return, max_drawdown=max_dd, sharpe=sharpe,
+        num_rebalances=len(rebalance_dates),
+        average_basket_size=basket_size, average_cash_fraction=cash_fraction,
+    )
+
+
+def _rebalance_reversal(
+    returns_now: pd.Series,
+    vol_now: Optional[pd.Series],
+    bottom_k: int,
+    weighting: str,
+    eligibility: Optional[pd.Series] = None,
+) -> pd.Series:
+    """Pick the bottom-K worst trailing returns (no sign filter)."""
+    out = pd.Series(0.0, index=returns_now.index)
+    eligible = returns_now.dropna()
+    if eligibility is not None:
+        mask = eligibility.reindex(eligible.index).fillna(False)
+        eligible = eligible[mask]
+    if eligible.empty:
+        return out
+    chosen = eligible.nsmallest(bottom_k)
+    if chosen.empty:
+        return out
+    if weighting == "equal":
+        weight = 1.0 / len(chosen)
+        for asset in chosen.index:
+            out[asset] = weight
+        return out
+    if vol_now is None:
+        return out
+    vols = vol_now.reindex(chosen.index).replace(0.0, np.nan).dropna()
+    if vols.empty:
+        weight = 1.0 / len(chosen)
+        for asset in chosen.index:
+            out[asset] = weight
+        return out
+    inv = 1.0 / vols
+    inv = inv / inv.sum()
+    for asset, w in inv.items():
+        out[asset] = float(w)
+    return out
+
+
 def _align_eligibility(
     eligibility: Optional[pd.DataFrame],
     closes: pd.DataFrame,
