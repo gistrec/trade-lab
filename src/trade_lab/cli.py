@@ -810,6 +810,131 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     print_dry_run(result, quote=config.quote_currency)
 
 
+def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
+    """Place one test order through orders.py, bypassing strategy.
+
+    Smoke test for the CCXT integration on testnet. Independent of
+    whether TSMOM is currently producing a non-zero ladder — exercises
+    the order-placement plumbing directly. Refuses to run against
+    mainnet even with TRADE_LAB_PAPER_ALLOW_MAINNET=true.
+    """
+    from datetime import datetime, timezone
+    import json
+    from pathlib import Path
+
+    from .execution import (
+        Broker, BrokerError, load_paper_config, PaperConfigError,
+    )
+    from .execution.clientorder import normalize_symbol
+    from .execution.delta import OrderIntent
+    from .execution.order_state import OrderStateStore
+    from .execution.orders import place_order
+
+    try:
+        config = load_paper_config()
+    except PaperConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+
+    if not config.sandbox:
+        raise SystemExit(
+            "Smoke test refuses to run against mainnet. "
+            "Set TRADE_LAB_PAPER_SANDBOX=true."
+        )
+
+    try:
+        broker = Broker.connect(config)
+    except BrokerError as exc:
+        raise SystemExit(f"Broker connection failed: {exc}")
+
+    try:
+        price = broker.fetch_ticker_price(args.symbol)
+    except BrokerError as exc:
+        raise SystemExit(f"Could not fetch ticker for {args.symbol}: {exc}")
+
+    notional = float(args.notional)
+    base_amount = notional / price
+
+    # Sub-minimum pre-flight: replicate the constraint check from
+    # delta.py so a doomed order never even reaches create_order.
+    # BrokerError (e.g., unknown symbol) → clean SystemExit. Network /
+    # ccxt errors propagate by design: without constraints the
+    # preflight is impossible, and proceeding blind is a worse failure
+    # mode than aborting loudly.
+    try:
+        constraints = broker.fetch_market_constraints(args.symbol)
+    except BrokerError as exc:
+        raise SystemExit(
+            f"Could not fetch market constraints for {args.symbol}: {exc}"
+        )
+
+    if constraints.min_cost is not None and notional < constraints.min_cost:
+        raise SystemExit(
+            f"SKIPPED: notional {notional:.2f} {config.quote_currency} "
+            f"< min_cost {constraints.min_cost:.2f}. "
+            "Exchange would reject — not sent."
+        )
+    if constraints.min_amount is not None and base_amount < constraints.min_amount:
+        raise SystemExit(
+            f"SKIPPED: amount {base_amount:.8f} < min_amount "
+            f"{constraints.min_amount:.8f}. Exchange would reject — not sent."
+        )
+
+    normalized = normalize_symbol(args.symbol)
+    utc_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    client_order_id = f"smoke_{utc_date}_{normalized}_{args.side}"
+
+    intent = OrderIntent(
+        symbol=args.symbol,
+        side=args.side,
+        base_amount=base_amount,
+        notional_quote=notional,
+        price_used=price,
+        reason="smoke_test",
+    )
+    state = OrderStateStore(args.state)
+
+    print(f"Smoke test: {args.side.upper()} {args.symbol} "
+          f"for {notional:.2f} {config.quote_currency}")
+    print(f"  client_order_id: {client_order_id}")
+    print(f"  ticker price:    {price:,.2f}")
+    print(f"  base amount:     {base_amount:.8f}")
+    print()
+
+    result = place_order(
+        broker, intent,
+        client_order_id=client_order_id,
+        state=state,
+        total_timeout_s=float(args.timeout_s),
+    )
+
+    print(f"Result: terminal_status={result.terminal_status}")
+    print(f"  exchange_order_id: {result.exchange_order_id}")
+    print(f"  filled:            {result.filled_amount:.8f} "
+          f"(intended {intent.base_amount:.8f})")
+    print(f"  notional filled:   {result.filled_notional_quote:,.4f} "
+          f"{config.quote_currency}")
+    print(f"  avg price:         {result.average_price}")
+    print(f"  fees:              {result.fees_paid_quote:.4f} "
+          f"{config.quote_currency}")
+    if result.error:
+        print(f"  ERROR:             {result.error['type']}: "
+              f"{result.error['message']}")
+
+    if args.journal:
+        record = {
+            "kind": "smoke_test",
+            "asof": datetime.now(timezone.utc).isoformat(),
+            "exchange": config.exchange_id,
+            "sandbox": config.sandbox,
+            "result": result.to_dict(),
+        }
+        path = Path(args.journal)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "ab") as f:
+            f.write((json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+        print(f"  appended to:       {path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -1095,6 +1220,26 @@ def build_parser() -> argparse.ArgumentParser:
              "is written per call. Read-only consumer: monitoring dashboard.",
     )
     p_pd.set_defaults(func=cmd_paper_dry_run)
+
+    p_smoke = sub.add_parser(
+        "paper-place-test-order",
+        help="Place one test order via orders.py, bypassing strategy. "
+             "Smoke test for the CCXT integration on testnet.",
+    )
+    p_smoke.add_argument("--symbol", required=True,
+                          help='Trading pair, e.g. "BTC/USDT".')
+    p_smoke.add_argument("--side", required=True, choices=["buy", "sell"],
+                          help="Order side.")
+    p_smoke.add_argument("--notional", type=float, required=True,
+                          help="Order size in quote-currency units (e.g. USDT).")
+    p_smoke.add_argument("--state", default="data/state/orders.json",
+                          help="Path to order-state JSON (default: data/state/orders.json).")
+    p_smoke.add_argument("--journal", default=None,
+                          help="Optional: append the result as a JSON line to this "
+                               "smoke-test log file (separate from cycles.jsonl).")
+    p_smoke.add_argument("--timeout-s", dest="timeout_s", type=float, default=60.0,
+                          help="Wait-for-ack budget in seconds (default 60).")
+    p_smoke.set_defaults(func=cmd_paper_place_test_order)
 
     return parser
 

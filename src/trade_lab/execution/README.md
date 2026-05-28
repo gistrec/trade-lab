@@ -110,3 +110,89 @@ so I don't forget.
    if `ALLOW_MAINNET=false`, but `Broker.connect` should also detect
    `sandbox=True && exchange_id="kraken"` and refuse (Kraken has no
    testnet to point to). **Add this check in a follow-up.**
+
+## Smoke testing the order pipeline
+
+`paper-place-test-order` exercises the order placement plumbing
+(`orders.py`, `clientorder.py`, `order_state.py`, `Broker.create_order_safe`)
+on the actual testnet, independently of whether TSMOM is currently
+producing a non-zero ladder. Run it before each execution-layer
+release — every commit that touches the modules above or
+`live_cycle.py` (which lands in #2b commit #4).
+
+It uses a dedicated clientOrderId namespace,
+`smoke_{YYYYMMDD}_{SYMBOL_NORMALIZED}_{side}`, that **never collides**
+with the production `tsmom_…` IDs. Running smoke tests during a
+production cron window does not interfere with the scheduled cycle.
+
+### Canonical sequence (all four must pass end-to-end)
+
+```bash
+# 1. Buy: places a real testnet order for $20 of BTC.
+trade-lab paper-place-test-order \
+    --symbol BTC/USDT --side buy --notional 20
+
+# Expect: terminal_status=closed, filled_amount > 0,
+#         exchange_order_id set in the output.
+```
+
+```bash
+# 2. Sell back: reverse the test trade so the testnet balance
+#    returns to within +/- 2x slippage of pre-test.
+trade-lab paper-place-test-order \
+    --symbol BTC/USDT --side sell --notional 20
+
+# Expect: terminal_status=closed. Balance check is manual via
+#         `trade-lab paper-status` before and after.
+```
+
+```bash
+# 3. Idempotency: re-run step 1 with identical args on the same day.
+trade-lab paper-place-test-order \
+    --symbol BTC/USDT --side buy --notional 20
+
+# Expect ONE of:
+#   * "skipping exchange roundtrip" (state cache had the terminal
+#      record) — fast path, ideal.
+#   * "already exists on exchange" then a wait-for-ack against the
+#      pre-existing order — slow path, also correct.
+# In both cases the create_order call count on Binance does NOT
+# increase. NO duplicate position is opened.
+```
+
+```bash
+# 4. Sub-minimum preflight: tiny notional below Binance's min_cost.
+trade-lab paper-place-test-order \
+    --symbol BTC/USDT --side buy --notional 5
+
+# Expect: output starts with "SKIPPED: notional 5.00 USDT < min_cost
+#         10.00. Exchange would reject — not sent." The exchange is
+#         never contacted for placement.
+```
+
+If all four pass: the execution layer's order plumbing is healthy. If
+any fail: investigate before relying on `paper-place-orders` (commit
+#4) for production cron. The most likely root causes are listed in
+each test's expected output above — a mismatch there is a real
+regression.
+
+### Optional smoke-test log
+
+`--journal PATH` appends one JSON Lines record per smoke test:
+
+```bash
+trade-lab paper-place-test-order \
+    --symbol BTC/USDT --side buy --notional 20 \
+    --journal data/journal/smoke_tests.jsonl
+```
+
+The record format is:
+
+```json
+{"kind":"smoke_test","asof":"...","exchange":"binance","sandbox":true,
+ "result":{"client_order_id":"smoke_...","terminal_status":"closed",...}}
+```
+
+This is a separate file from `cycles.jsonl` by design — smoke tests
+are not strategy cycles and should not appear in the monitoring
+dashboard's Status / Cycles tabs alongside real bot activity.
