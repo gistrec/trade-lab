@@ -22,6 +22,10 @@ from .backtest.walk_forward import (
     OBJECTIVE_TOTAL_RETURN,
     run_multi_walk_forward,
 )
+from .backtest.compare import (
+    render_comparison_markdown,
+    run_comparison_report,
+)
 from .backtest.multi_asset import (
     aggregate_multi_asset,
     run_multi_asset_yearly_validation,
@@ -571,6 +575,75 @@ def cmd_multi_asset(args: argparse.Namespace) -> None:
     print(f"Summary CSV:    {summary_path}")
 
 
+def cmd_compare(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if not symbols:
+        raise SystemExit("--symbols must list at least one symbol")
+
+    asset_candles: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        try:
+            asset_candles[symbol] = load_candles(
+                data_dir=cfg.data_dir,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=args.timeframe,
+            )
+        except FileNotFoundError as exc:
+            print(f"warn: skipping {symbol} ({exc})")
+
+    if not asset_candles:
+        raise SystemExit("No candle files found for any of the requested symbols.")
+
+    detail = run_comparison_report(
+        asset_candles,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+    if detail.empty:
+        raise SystemExit("No rows produced.")
+
+    csv_path = Path(args.output_csv)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    detail.to_csv(csv_path, index=False)
+
+    md_path = (
+        Path(args.output_md)
+        if args.output_md
+        else csv_path.with_suffix(".md")
+    )
+    md_path.parent.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(render_comparison_markdown(detail))
+
+    fmt_pct = "{:+.2%}".format
+    fmt_pct_abs = "{:.2%}".format
+    formatters = {
+        "total_return_pct": fmt_pct,
+        "cagr_pct": fmt_pct,
+        "max_drawdown_pct": fmt_pct_abs,
+        "sharpe": "{:+.2f}".format,
+        "exposure_pct": fmt_pct_abs,
+        "total_fees": "${:,.2f}".format,
+        "total_slippage": "${:,.2f}".format,
+        "turnover": "{:.2f}".format,
+    }
+    display_cols = [
+        "asset", "strategy", "period",
+        "total_return_pct", "cagr_pct", "max_drawdown_pct", "sharpe",
+        "exposure_pct", "num_trades", "total_fees", "turnover",
+    ]
+    print(f"Comparison report:    {', '.join(asset_candles.keys())}")
+    print(f"Timeframe:            {args.timeframe}")
+    print()
+    print(detail[display_cols].to_string(index=False, formatters=formatters))
+    print()
+    print(f"Detail CSV:     {csv_path}")
+    print(f"Markdown table: {md_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -780,6 +853,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Across-asset summary CSV (default: alongside --output-csv)",
     )
     p_ma.set_defaults(func=cmd_multi_asset)
+
+    p_cm = sub.add_parser(
+        "compare",
+        help="Subperiod comparison across strategies and assets.",
+    )
+    p_cm.add_argument(
+        "--symbols",
+        default="BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT",
+        help="Comma-separated list of symbols",
+    )
+    p_cm.add_argument("--timeframe", default="1d")
+    p_cm.add_argument("--exchange", default=None)
+    p_cm.add_argument(
+        "--output-csv",
+        default="outputs/compare.csv",
+        help="Per-(asset, strategy, subperiod) detail CSV",
+    )
+    p_cm.add_argument(
+        "--output-md",
+        default=None,
+        help="Markdown summary (default: alongside --output-csv)",
+    )
+    p_cm.set_defaults(func=cmd_compare)
 
     return parser
 

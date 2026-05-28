@@ -23,6 +23,15 @@ from .sweep import (
     run_regime_sma_sweep,
     run_sma_sweep,
 )
+from .compare import (
+    COMPARISON_COLUMNS,
+    DEFAULT_COMPARISON_STRATEGIES,
+    DEFAULT_SUBPERIODS,
+    StrategySpec,
+    Subperiod,
+    render_comparison_markdown,
+    run_comparison_report,
+)
 from .multi_asset import (
     MULTI_ASSET_AGGREGATE_COLUMNS,
     MULTI_ASSET_DETAIL_COLUMNS,
@@ -57,6 +66,9 @@ __all__ = [
     "DEFAULT_FIXED_STRATEGIES",
     "FixedStrategySpec",
     "Metrics",
+    "COMPARISON_COLUMNS",
+    "DEFAULT_COMPARISON_STRATEGIES",
+    "DEFAULT_SUBPERIODS",
     "MULTI_ASSET_AGGREGATE_COLUMNS",
     "MULTI_ASSET_DETAIL_COLUMNS",
     "MULTI_ASSET_SUMMARY_COLUMNS",
@@ -72,6 +84,8 @@ __all__ = [
     "VERDICT_OUTPERFORMS_BH",
     "VERDICT_UNDERPERFORMS_BH",
     "WALK_FORWARD_COLUMNS",
+    "StrategySpec",
+    "Subperiod",
     "WalkForwardWindow",
     "YEARLY_AGGREGATE_COLUMNS",
     "YEARLY_COLUMNS",
@@ -81,6 +95,8 @@ __all__ = [
     "compute_metrics",
     "debug_trades_dataframe",
     "execution_bars",
+    "render_comparison_markdown",
+    "run_comparison_report",
     "generate_windows",
     "plot_equity_curve",
     "run_backtest",
