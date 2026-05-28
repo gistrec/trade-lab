@@ -84,6 +84,15 @@ from .walk_forward_grids import (
     build_sma_grid,
     build_tsmom_grid,
 )
+from .ensemble import (
+    EnsembleResult,
+    SleeveSpec,
+    compute_portfolio_metrics,
+    correlation_summary,
+    run_ensemble_walk_forward,
+    sortino_ratio,
+)
+from .ensemble_sleeves import DEFAULT_ASSETS, default_sleeves
 
 __all__ = [
     "BacktestResult",
@@ -107,9 +116,17 @@ __all__ = [
     "STRATEGY_WALK_FORWARD_COLUMNS",
     "WindowSpec",
     "aggregate_walk_forward",
+    "DEFAULT_ASSETS",
+    "EnsembleResult",
+    "SleeveSpec",
     "build_pma_grid",
     "build_sma_grid",
     "build_tsmom_grid",
+    "compute_portfolio_metrics",
+    "correlation_summary",
+    "default_sleeves",
+    "run_ensemble_walk_forward",
+    "sortino_ratio",
     "generate_month_windows",
     "run_strategy_walk_forward",
     "REGIME_SWEEP_COLUMNS",
