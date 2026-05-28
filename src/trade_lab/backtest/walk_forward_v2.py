@@ -44,6 +44,30 @@ _VALID_OBJECTIVES = (
     OBJECTIVE_RETURN_DIV_DRAWDOWN,
 )
 
+# Project-wide upper bound on the number of distinct (strategy, params)
+# combinations a human in this repo has ever directly evaluated.
+#
+# Bailey & López de Prado (2014) recommend using *every* trial the
+# decision-maker was exposed to — including ones thrown away — when
+# computing the Deflated Sharpe Ratio. In practice this is impossible
+# to count exactly; the standard advice is to fix a conservative
+# number and never change it retroactively.
+#
+# This number is FIXED. Census as of commit (do not amend after-the-fact):
+#   * SMA crossover sweep: 19 variants
+#   * TSMOM ensemble configurations: 3 baseline + ~6 sensitivity (lookbacks, vol_target)
+#   * PMA ladder configurations: 3 baseline + ~6 sensitivity
+#   * Donchian rebalance-threshold sweep: 4
+#   * VolatilityTargetWrapper target sweep: 5 (15/20/30/50/70 %) × 3 strategies = 15
+#   * Cross-sectional momentum knobs: ~12 (top_k × weighting × BTC gate variants)
+#   * Per-strategy × asset combinations in `wf_voltarget_7assets`: 63
+#   * Walk-forward window variations explored informally: ~10
+#   * Buffer for trials we honestly can't enumerate but that
+#     happened during development: ~350
+#
+# Total ≈ 130 + 350 buffer = 480. Rounded up to 500.
+PROJECT_NUM_TRIALS = 500
+
 
 STRATEGY_WALK_FORWARD_COLUMNS = [
     "train_start",
@@ -55,6 +79,7 @@ STRATEGY_WALK_FORWARD_COLUMNS = [
     "train_return_pct",
     "train_max_drawdown_pct",
     "train_calmar",
+    "train_dsr",                # selection-bias-corrected DSR on train (per-fold N=|grid|)
     "test_sharpe",
     "test_return_pct",
     "test_max_drawdown_pct",
@@ -182,7 +207,8 @@ def run_strategy_walk_forward(
     fee_rate: float = 0.001,
     slippage_rate: float = 0.0005,
     position_size: float = 1.0,
-) -> pd.DataFrame:
+    return_oos_returns: bool = False,
+):
     """Walk-forward an arbitrary set of strategy variants.
 
     For each rolling window: evaluate every variant on the train slice
@@ -190,12 +216,21 @@ def run_strategy_walk_forward(
     ``objective``, then re-evaluate it on the test slice (with warmup
     from before ``test_start``, possibly preceded by ``purge_days`` of
     gap).
+
+    When ``return_oos_returns=True`` the function returns a tuple
+    ``(detail_df, oos_returns_list)`` where each list entry is the
+    per-bar net-return series for one fold's test window — useful for
+    computing the concatenated-OOS DSR. The default keeps the
+    original DataFrame-only signature so existing callers are
+    untouched.
     """
     if objective not in _VALID_OBJECTIVES:
         raise ValueError(
             f"objective must be one of {_VALID_OBJECTIVES}, got {objective!r}"
         )
     if not grid:
+        if return_oos_returns:
+            return pd.DataFrame(columns=STRATEGY_WALK_FORWARD_COLUMNS), []
         return pd.DataFrame(columns=STRATEGY_WALK_FORWARD_COLUMNS)
 
     windows = generate_month_windows(
@@ -207,6 +242,7 @@ def run_strategy_walk_forward(
     )
 
     rows: list[dict] = []
+    oos_returns_list: list[pd.Series] = []
     for window in windows:
         # 1) Score every variant on train.
         scored = []
@@ -229,6 +265,16 @@ def run_strategy_walk_forward(
         scored.sort(key=lambda x: -_objective_score(x[1], objective))
         best_spec, best_train = scored[0]
 
+        # 2b) Per-fold train DSR — Bailey-LdP DSR with selection-bias
+        # correction over THIS fold's grid only. ``num_trials`` is the
+        # number of variants tried *in this fold*; the cross-trial
+        # sigma is the std of the variants' per-bar Sharpes (NOT
+        # annualized — DSR's formula wants per-period Sharpes).
+        train_dsr = _per_fold_train_dsr(
+            [m for _, m in scored],
+            annualization_factor=annualization_factor,
+        )
+
         # 3) Evaluate the chosen variant on the held-out test slice.
         test_metrics = _evaluate_strategy_on_window(
             candles=candles,
@@ -242,6 +288,10 @@ def run_strategy_walk_forward(
             position_size=position_size,
             annualization_factor=annualization_factor,
         )
+
+        # Stash the OOS returns for the concatenated-OOS DSR computed
+        # at the aggregation step.
+        oos_returns_list.append(test_metrics["returns"])
 
         # Buy-and-hold benchmark on the test slice — same window only.
         bh_return, bh_dd = _buy_and_hold_on_window(
@@ -261,6 +311,7 @@ def run_strategy_walk_forward(
                 "train_calmar": _safe_calmar(
                     best_train["total_return"], best_train["max_drawdown"]
                 ),
+                "train_dsr": train_dsr,
                 "test_sharpe": test_metrics["sharpe"],
                 "test_return_pct": test_metrics["total_return"],
                 "test_max_drawdown_pct": test_metrics["max_drawdown"],
@@ -273,22 +324,81 @@ def run_strategy_walk_forward(
             }
         )
 
-    return pd.DataFrame(rows, columns=STRATEGY_WALK_FORWARD_COLUMNS)
+    detail_df = pd.DataFrame(rows, columns=STRATEGY_WALK_FORWARD_COLUMNS)
+    if return_oos_returns:
+        return detail_df, oos_returns_list
+    return detail_df
+
+
+def _per_fold_train_dsr(
+    metrics_list: Sequence[dict],
+    *,
+    annualization_factor: int = 365,
+) -> float:
+    """DSR on the train slice with selection over the same-fold grid.
+
+    Pass the list of metric-dicts (one per variant evaluated on train
+    in this fold). The function uses each variant's per-period returns
+    to compute a non-annualized Sharpe, picks the best, and applies
+    Bailey-LdP DSR with ``num_trials = len(metrics_list)`` and the
+    cross-trial standard deviation of those Sharpes as
+    ``sharpe_std_dev``.
+    """
+    # Lazy import to avoid circular module loading at package import time.
+    from .dsr import deflated_sharpe_ratio, sharpe_ratio_per_period
+
+    if not metrics_list:
+        return 0.0
+    # Per-period (non-annualized) Sharpes — the DSR formula expects them.
+    per_period_sharpes = []
+    return_series_for_best: pd.Series = pd.Series(dtype=float)
+    best_idx = -1
+    for i, m in enumerate(metrics_list):
+        r = m.get("returns")
+        if r is None or len(r) < 4:
+            sr = 0.0
+        else:
+            sr = sharpe_ratio_per_period(r)
+        per_period_sharpes.append(sr)
+        if i == 0 or sr > per_period_sharpes[best_idx]:
+            best_idx = i
+            return_series_for_best = m.get("returns", pd.Series(dtype=float))
+
+    sharpe_std_dev = float(np.std(per_period_sharpes, ddof=1)) if len(per_period_sharpes) > 1 else 0.0
+    return deflated_sharpe_ratio(
+        returns=return_series_for_best,
+        num_trials=len(metrics_list),
+        sharpe_std_dev=sharpe_std_dev,
+    )
 
 
 def aggregate_walk_forward(
     detail_df: pd.DataFrame,
     *,
     annualization_factor: int = 365,
+    oos_returns: Optional[Sequence[pd.Series]] = None,
+    num_trials: int = PROJECT_NUM_TRIALS,
 ) -> dict:
     """Summary statistics across all OOS folds.
 
-    Returns a dict with ``oos_sharpe`` (annualized, computed from the
-    *concatenated* per-fold returns is preferable but we don't carry
-    them; we approximate with the mean of per-fold annualized Sharpes,
-    which is fine for >=10 folds), ``hit_rate`` (folds with
-    test_return_pct > 0), and the median / IQR of per-fold returns.
+    When ``oos_returns`` (the per-fold return series list returned by
+    ``run_strategy_walk_forward(..., return_oos_returns=True)``) is
+    provided, the function also computes:
+
+    * ``concatenated_oos_sharpe`` — annualized Sharpe on the stitched
+      per-bar return series (assumes folds are non-overlapping and
+      adjacent — true when ``step_months == test_months``).
+    * ``concatenated_oos_dsr`` — Bailey-LdP DSR on the same stitched
+      series with ``num_trials`` defaulting to
+      :data:`PROJECT_NUM_TRIALS`. Pass ``num_trials`` explicitly if
+      you want a different correction strength.
+    * ``mean_per_fold_train_dsr`` — diagnostic for selection-bias
+      strength fold-by-fold (high = train Sharpe is robust within
+      the fold's grid; low = train Sharpe might be selection noise).
     """
+    # Lazy import to avoid circular module loading at package import time.
+    from .dsr import deflated_sharpe_ratio
+
     if detail_df.empty:
         return {
             "n_folds": 0,
@@ -302,8 +412,12 @@ def aggregate_walk_forward(
             "mean_test_max_dd": 0.0,
             "worst_test_return": 0.0,
             "best_test_return": 0.0,
+            "mean_per_fold_train_dsr": 0.0,
+            "concatenated_oos_sharpe": 0.0,
+            "concatenated_oos_dsr": 0.0,
+            "num_trials": num_trials,
         }
-    return {
+    summary = {
         "n_folds": len(detail_df),
         "mean_test_sharpe": float(detail_df["test_sharpe"].mean()),
         "median_test_sharpe": float(detail_df["test_sharpe"].median()),
@@ -315,7 +429,58 @@ def aggregate_walk_forward(
         "mean_test_max_dd": float(detail_df["test_max_drawdown_pct"].mean()),
         "worst_test_return": float(detail_df["test_return_pct"].min()),
         "best_test_return": float(detail_df["test_return_pct"].max()),
+        "mean_per_fold_train_dsr": float(detail_df["train_dsr"].mean())
+            if "train_dsr" in detail_df.columns else 0.0,
+        "num_trials": num_trials,
     }
+
+    if oos_returns is None:
+        summary["concatenated_oos_sharpe"] = 0.0
+        summary["concatenated_oos_dsr"] = 0.0
+        return summary
+
+    # Concatenate per-fold OOS returns into one continuous series.
+    # We accept that folds may have overlapping date stamps if the
+    # caller used step_months < test_months; in that case we drop
+    # duplicates by keeping the FIRST occurrence (i.e. the earlier
+    # fold's view of that bar).
+    valid_series = [s for s in oos_returns if s is not None and len(s) > 0]
+    if not valid_series:
+        summary["concatenated_oos_sharpe"] = 0.0
+        summary["concatenated_oos_dsr"] = 0.0
+        return summary
+    concatenated = pd.concat(valid_series).sort_index()
+    concatenated = concatenated[~concatenated.index.duplicated(keep="first")]
+
+    std = float(concatenated.std())
+    if std > 0 and not np.isnan(std):
+        ann_sharpe = float(
+            concatenated.mean() / std * np.sqrt(annualization_factor)
+        )
+    else:
+        ann_sharpe = 0.0
+    summary["concatenated_oos_sharpe"] = ann_sharpe
+
+    # ``sharpe_std_dev`` should be the standard deviation of *trial*
+    # per-period Sharpes under the null of zero true skill. When we
+    # have no panel of trial-OOS-Sharpes to estimate it empirically,
+    # the textbook fallback is the null estimator: per-period Sharpe
+    # estimates have std ≈ 1/sqrt(T) under N(0, 1/T) sampling. That's
+    # also what López de Prado uses when the trial cross-section is
+    # unavailable.
+    #
+    # Earlier implementation accidentally used the std of *out-of-sample*
+    # fold Sharpes, which is sample-driven noise, not null-driven, and
+    # several times larger — making SR_0 huge and DSR collapse to 0.
+    T = len(concatenated)
+    sharpe_std_dev = 1.0 / np.sqrt(T) if T > 0 else 0.0
+
+    summary["concatenated_oos_dsr"] = deflated_sharpe_ratio(
+        returns=concatenated,
+        num_trials=num_trials,
+        sharpe_std_dev=sharpe_std_dev,
+    )
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +547,7 @@ def _evaluate_strategy_on_window(
         "total_return": total_return,
         "max_drawdown": max_dd,
         "bars": int(len(window_returns)),
+        "returns": window_returns,
     }
 
 
@@ -391,6 +557,7 @@ def _empty_metrics() -> dict:
         "total_return": 0.0,
         "max_drawdown": 0.0,
         "bars": 0,
+        "returns": pd.Series(dtype=float),
     }
 
 

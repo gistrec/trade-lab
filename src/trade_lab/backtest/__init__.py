@@ -71,6 +71,7 @@ from .walk_forward import (
 )
 from .walk_forward_v2 import (
     OBJECTIVE_SHARPE,
+    PROJECT_NUM_TRIALS,
     STRATEGY_WALK_FORWARD_COLUMNS,
     ParamGridSpec,
     WindowSpec,
@@ -101,6 +102,7 @@ __all__ = [
     "OBJECTIVE_RETURN_DIV_DRAWDOWN",
     "OBJECTIVE_SHARPE",
     "OBJECTIVE_TOTAL_RETURN",
+    "PROJECT_NUM_TRIALS",
     "ParamGridSpec",
     "STRATEGY_WALK_FORWARD_COLUMNS",
     "WindowSpec",

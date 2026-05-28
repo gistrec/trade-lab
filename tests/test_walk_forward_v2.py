@@ -255,6 +255,75 @@ def test_aggregate_summary_handles_empty_frame():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# DSR integration
+# ---------------------------------------------------------------------------
+
+
+def test_train_dsr_column_is_populated_and_bounded():
+    """train_dsr is a probability — every fold must produce a value in [0, 1]."""
+    candles = _candles(1000, seed=7)
+    grid = _trivial_grid()
+    res = run_strategy_walk_forward(
+        candles, grid, train_months=12, test_months=3, step_months=3,
+    )
+    assert "train_dsr" in res.columns
+    assert res["train_dsr"].notna().all()
+    assert ((res["train_dsr"] >= 0.0) & (res["train_dsr"] <= 1.0)).all()
+
+
+def test_concatenated_oos_dsr_returned_when_oos_returns_requested():
+    """With return_oos_returns=True the aggregate must include the
+    concatenated OOS Sharpe and DSR."""
+    candles = _candles(1100, seed=8)
+    grid = _trivial_grid()
+    detail, oos = run_strategy_walk_forward(
+        candles, grid,
+        train_months=12, test_months=3, step_months=3,
+        return_oos_returns=True,
+    )
+    assert isinstance(detail, pd.DataFrame) and isinstance(oos, list)
+    assert len(oos) == len(detail)
+    summary = aggregate_walk_forward(detail, oos_returns=oos, num_trials=100)
+    assert "concatenated_oos_sharpe" in summary
+    assert "concatenated_oos_dsr" in summary
+    assert 0.0 <= summary["concatenated_oos_dsr"] <= 1.0
+    assert summary["num_trials"] == 100
+
+
+def test_aggregate_without_oos_returns_skips_concat_dsr():
+    """When the caller does not supply per-fold returns, concatenated
+    OOS metrics are zero (not NaN, not erroring out)."""
+    candles = _candles(1100, seed=9)
+    detail = run_strategy_walk_forward(
+        candles, _trivial_grid(),
+        train_months=12, test_months=3, step_months=3,
+    )
+    summary = aggregate_walk_forward(detail)  # no oos_returns
+    assert summary["concatenated_oos_sharpe"] == 0.0
+    assert summary["concatenated_oos_dsr"] == 0.0
+
+
+def test_higher_num_trials_lowers_concatenated_dsr():
+    """The whole point of the deflation: more trials, lower confidence."""
+    candles = _candles(1100, seed=10)
+    detail, oos = run_strategy_walk_forward(
+        candles, _trivial_grid(),
+        train_months=12, test_months=3, step_months=3,
+        return_oos_returns=True,
+    )
+    a = aggregate_walk_forward(detail, oos_returns=oos, num_trials=10)
+    b = aggregate_walk_forward(detail, oos_returns=oos, num_trials=10_000)
+    assert b["concatenated_oos_dsr"] <= a["concatenated_oos_dsr"]
+
+
+def test_project_num_trials_is_constant_500():
+    """The project's selection-bias correction constant should be
+    pinned; the commit history is the audit trail for any change."""
+    from trade_lab.backtest.walk_forward_v2 import PROJECT_NUM_TRIALS
+    assert PROJECT_NUM_TRIALS == 500
+
+
 def test_purge_days_does_not_change_train_metrics():
     """Train ends on the same date with or without purge — the gap is
     inserted between train_end and test_start, so train metrics must
