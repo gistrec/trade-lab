@@ -425,7 +425,7 @@ def _render_overview_tab(
 
 
 def _render_price_tab(candles: pd.DataFrame, positions: pd.Series) -> None:
-    st.plotly_chart(_price_figure(candles, positions), use_container_width=True)
+    st.plotly_chart(_price_figure(candles, positions), width="stretch")
     st.caption(
         "Markers are placed on execution candles — one bar after the signal "
         "candle, by construction of the look-ahead-protecting shift."
@@ -433,7 +433,7 @@ def _render_price_tab(candles: pd.DataFrame, positions: pd.Series) -> None:
 
 
 def _render_equity_tab(result, initial_cash: float) -> None:
-    st.plotly_chart(_equity_figure(result, initial_cash), use_container_width=True)
+    st.plotly_chart(_equity_figure(result, initial_cash), width="stretch")
     st.download_button(
         "Download equity curve (CSV)",
         data=_equity_to_csv(result),
@@ -443,7 +443,7 @@ def _render_equity_tab(result, initial_cash: float) -> None:
 
 
 def _render_drawdown_tab(equity: pd.Series) -> None:
-    st.plotly_chart(_drawdown_figure(equity), use_container_width=True)
+    st.plotly_chart(_drawdown_figure(equity), width="stretch")
 
 
 def _render_trades_tab(result, candles: pd.DataFrame) -> None:
@@ -451,7 +451,7 @@ def _render_trades_tab(result, candles: pd.DataFrame) -> None:
     if trades_df.empty:
         st.info("No trades on this window.")
     else:
-        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+        st.dataframe(trades_df, width="stretch", hide_index=True)
     st.download_button(
         "Download trades (CSV)",
         data=_trades_to_csv(result, candles),

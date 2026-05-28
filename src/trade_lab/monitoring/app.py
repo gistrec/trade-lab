@@ -189,7 +189,7 @@ def _render_signal(reader: JournalReader) -> None:
     )
     history = reader.signal_history(days=history_days)
     if history:
-        st.plotly_chart(_signal_history_figure(history), use_container_width=True)
+        st.plotly_chart(_signal_history_figure(history), width="stretch")
     else:
         st.info("No signal history in the selected window.")
 
@@ -199,7 +199,7 @@ def _render_signal(reader: JournalReader) -> None:
         df = pd.DataFrame(
             [{"lookback": int(k), "state": int(v)} for k, v in plb.items()]
         ).sort_values("lookback")
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         st.caption(
             "State is the pre-gate {0, 1} sign of pct_change(lookback). "
             "Averaged → ladder; SMA(200) gate then zeroes it if closed."
@@ -258,7 +258,7 @@ def _render_portfolio(reader: JournalReader) -> None:
         total_current += c
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     cols = st.columns(3)
     cols[0].metric(f"Equity ({quote})", f"{equity:,.2f}")
@@ -302,7 +302,7 @@ def _render_cycles(reader: JournalReader) -> None:
             "cycle_id": (c.get("cycle_id") or "")[:8],
         })
     st.dataframe(
-        pd.DataFrame(summary_rows), use_container_width=True, hide_index=True,
+        pd.DataFrame(summary_rows), width="stretch", hide_index=True,
     )
 
     st.subheader("Cycle detail")
@@ -335,10 +335,10 @@ def _render_cycle_detail(cycle: dict) -> None:
     skipped = cycle.get("orders_skipped") or []
     if planned:
         st.write("**Orders planned**")
-        st.dataframe(pd.DataFrame(planned), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(planned), width="stretch", hide_index=True)
     if skipped:
         st.write("**Orders skipped (sub-minimum)**")
-        st.dataframe(pd.DataFrame(skipped), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(skipped), width="stretch", hide_index=True)
     err = cycle.get("error")
     if err:
         st.error(f"{err.get('type', '?')}: {err.get('message', '?')}")
