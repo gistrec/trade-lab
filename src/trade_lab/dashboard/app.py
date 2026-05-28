@@ -13,6 +13,7 @@ from trade_lab.backtest.metrics import Metrics, compute_metrics
 from trade_lab.backtest.reports import trades_to_dataframe
 from trade_lab.data.fetch_ohlcv import validate_ohlcv
 from trade_lab.data.storage import filter_candles_by_date
+from trade_lab.strategies.regime_only import RegimeOnlyStrategy
 from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
 from trade_lab.strategies.rsi import RSIMeanReversionStrategy
 from trade_lab.strategies.sma_cross import SMACrossStrategy
@@ -38,6 +39,8 @@ def _build_strategy(name: str, params: dict):
             slow_period=int(params["slow_period"]),
             regime_period=int(params["regime_period"]),
         )
+    if name == "regime_only":
+        return RegimeOnlyStrategy(regime_period=int(params["regime_period"]))
     if name == "rsi":
         return RSIMeanReversionStrategy(
             period=int(params["rsi_period"]),
@@ -58,7 +61,8 @@ def _sidebar_controls() -> dict:
 
         st.header("Strategy")
         strategy_name = st.selectbox(
-            "Strategy", ["sma_cross", "regime_sma_cross", "rsi"]
+            "Strategy",
+            ["sma_cross", "regime_sma_cross", "regime_only", "rsi"],
         )
         params: dict = {}
         if strategy_name == "sma_cross":
@@ -77,6 +81,10 @@ def _sidebar_controls() -> dict:
             )
             params["regime_period"] = st.number_input(
                 "regime_period", min_value=3, max_value=2000, value=200, step=1
+            )
+        elif strategy_name == "regime_only":
+            params["regime_period"] = st.number_input(
+                "regime_period", min_value=1, max_value=2000, value=200, step=1
             )
         else:
             params["rsi_period"] = st.number_input(

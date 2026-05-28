@@ -104,6 +104,55 @@ trade-lab backtest --strategy sma_cross \
 The actual tested window is echoed in the report's `Period:` line along with
 the bar count, so you can confirm the slice landed where you expected.
 
+### Yearly validation (fixed parameters)
+
+`trade-lab yearly` evaluates a *fixed* set of strategies on each calendar
+year and lays out a comparison alongside buy-and-hold. There is no
+parameter sweep — every strategy uses preset parameters — so the report
+is a clean test of whether those specific configurations earn their
+keep year over year.
+
+```bash
+trade-lab yearly --symbol BTC/USDT --timeframe 1d \
+    --output-csv outputs/yearly.csv
+```
+
+Bundled strategies (you can pass your own via the Python API):
+
+- `buy_and_hold` (baseline)
+- `regime_only_200` / `regime_only_300` — long when `close > SMA(N)`,
+  flat otherwise. No crossover.
+- `sma_cross_20_100`
+- `regime_sma_cross_20_100_200`
+- `golden_cross_50_200`
+
+Per-year columns: `return`, `buy_and_hold_return`, `max_drawdown`,
+`buy_and_hold_max_drawdown`, `exposure`, `num_trades`, `fees_paid`,
+`verdict`. The aggregate table adds avg / median / best / worst annual
+return per strategy, the count of years that beat B&H on return and on
+drawdown, and average exposure.
+
+Aggregate across years for BTC/USDT 1d (2018-2026, 9 calendar years):
+
+```
+strategy                    total_years  avg_annual  median  best     worst   bh_wins  lower_dd_yrs  avg_exposure
+buy_and_hold                          9    +61.53%   +57.57%  +301.67%  -72.33%      0           0         100%
+regime_only_200                       9    +40.58%    +0.00%  +173.23%  -21.71%      3           8         48%
+regime_only_300                       9    +41.60%    +0.00%  +191.17%   -5.61%      5           7         55%
+sma_cross_20_100                      9    +40.92%   +52.72%  +169.55%  -33.28%      5           6         50%
+regime_sma_cross_20_100_200           9    +44.16%   +10.95%  +140.19%   +0.00%      5           7         43%
+golden_cross_50_200                   9    +32.00%   +17.47%  +108.56%  -28.93%      3           7         48%
+```
+
+The honest reading: all strategies trail buy-and-hold on average return
+(40-44% vs 61%), but every single one wraps that gap inside a much
+better worst-year (regime_sma_cross's worst year was 0% vs B&H's -72%)
+and lower drawdowns in 6-8 out of 9 years. The defensive ones earn
+their keep by sitting in cash during 2018, 2022, and parts of 2025 —
+years where holding BTC was painful. That tradeoff — slightly lower
+upside, dramatically better downside — is the actual reason to run any
+of these strategies over passive holding.
+
 ### Walk-forward validation
 
 `trade-lab walk-forward` cuts the dataset into rolling train / test

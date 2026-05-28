@@ -22,6 +22,10 @@ from .backtest.walk_forward import (
     OBJECTIVE_TOTAL_RETURN,
     run_multi_walk_forward,
 )
+from .backtest.yearly import (
+    aggregate_yearly_results,
+    run_yearly_validation,
+)
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import (
@@ -31,6 +35,7 @@ from .data.storage import (
     save_candles,
 )
 from .strategies.base import Strategy
+from .strategies.regime_only import RegimeOnlyStrategy
 from .strategies.regime_sma_cross import RegimeSMACrossStrategy
 from .strategies.rsi import RSIMeanReversionStrategy
 from .strategies.sma_cross import SMACrossStrategy
@@ -39,6 +44,7 @@ from .strategies.sma_cross import SMACrossStrategy
 STRATEGIES: dict[str, type[Strategy]] = {
     "sma_cross": SMACrossStrategy,
     "regime_sma_cross": RegimeSMACrossStrategy,
+    "regime_only": RegimeOnlyStrategy,
     "rsi": RSIMeanReversionStrategy,
 }
 
@@ -402,6 +408,78 @@ def _format_params(row: pd.Series) -> str:
     return f"f={int(row['fast_period'])}/s={int(row['slow_period'])}"
 
 
+def cmd_yearly(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+
+    candles = load_candles(
+        data_dir=cfg.data_dir,
+        exchange=exchange,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+    )
+    if candles.empty:
+        raise SystemExit("No candles to validate on.")
+
+    detail = run_yearly_validation(
+        candles,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+    if detail.empty:
+        raise SystemExit("No yearly rows produced.")
+
+    aggregate = aggregate_yearly_results(detail)
+
+    fmt = "%Y-%m-%d"
+    print(f"Yearly validation:    {args.symbol} {args.timeframe}")
+    print(
+        f"Period:               {candles.index[0].strftime(fmt)} "
+        f"to {candles.index[-1].strftime(fmt)}"
+    )
+    print(f"Years:                {sorted(detail['year'].unique())}")
+    print(f"Strategies:           {sorted(detail['strategy'].unique())}")
+
+    detail_path = Path(args.output_csv)
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail.to_csv(detail_path, index=False)
+
+    aggregate_path = (
+        Path(args.aggregate_csv)
+        if args.aggregate_csv
+        else detail_path.with_name(detail_path.stem + "_aggregate.csv")
+    )
+    aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+    aggregate.to_csv(aggregate_path, index=False)
+
+    detail_formatters = {
+        "return_pct": "{:+.2%}".format,
+        "buy_and_hold_return_pct": "{:+.2%}".format,
+        "max_drawdown_pct": "{:.2%}".format,
+        "buy_and_hold_max_drawdown_pct": "{:.2%}".format,
+        "exposure_pct": "{:.2%}".format,
+        "fees_paid": "${:,.2f}".format,
+    }
+    aggregate_formatters = {
+        "avg_annual_return": "{:+.2%}".format,
+        "median_annual_return": "{:+.2%}".format,
+        "best_year_return": "{:+.2%}".format,
+        "worst_year_return": "{:+.2%}".format,
+        "avg_exposure": "{:.2%}".format,
+    }
+
+    print()
+    print("Per-year detail")
+    print(detail.to_string(index=False, formatters=detail_formatters))
+    print()
+    print("Aggregate across years (per strategy)")
+    print(aggregate.to_string(index=False, formatters=aggregate_formatters))
+    print()
+    print(f"Detail CSV:     {detail_path}")
+    print(f"Aggregate CSV:  {aggregate_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -564,6 +642,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to write the per-window results",
     )
     p_wf.set_defaults(func=cmd_walk_forward)
+
+    p_yr = sub.add_parser(
+        "yearly",
+        help="Fixed-parameter yearly validation across a set of strategies.",
+    )
+    p_yr.add_argument("--symbol", default="BTC/USDT")
+    p_yr.add_argument("--timeframe", default="1d")
+    p_yr.add_argument("--exchange", default=None)
+    p_yr.add_argument(
+        "--output-csv",
+        default="outputs/yearly.csv",
+        help="Per-(year, strategy) detail CSV",
+    )
+    p_yr.add_argument(
+        "--aggregate-csv",
+        default=None,
+        help="Aggregate per-strategy CSV (default: alongside --output-csv)",
+    )
+    p_yr.set_defaults(func=cmd_yearly)
 
     return parser
 

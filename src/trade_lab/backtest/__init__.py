@@ -23,6 +23,15 @@ from .sweep import (
     run_regime_sma_sweep,
     run_sma_sweep,
 )
+from .yearly import (
+    DEFAULT_FIXED_STRATEGIES,
+    FixedStrategySpec,
+    VERDICT_BUY_AND_HOLD,
+    YEARLY_AGGREGATE_COLUMNS,
+    YEARLY_COLUMNS,
+    aggregate_yearly_results,
+    run_yearly_validation,
+)
 from .walk_forward import (
     MULTI_WALK_FORWARD_COLUMNS,
     OBJECTIVE_RETURN_DIV_DRAWDOWN,
@@ -37,6 +46,8 @@ from .walk_forward import (
 __all__ = [
     "BacktestResult",
     "DEBUG_TRADE_COLUMNS",
+    "DEFAULT_FIXED_STRATEGIES",
+    "FixedStrategySpec",
     "Metrics",
     "MULTI_WALK_FORWARD_COLUMNS",
     "OBJECTIVE_RETURN_DIV_DRAWDOWN",
@@ -45,11 +56,15 @@ __all__ = [
     "SWEEP_COLUMNS",
     "TRADE_COLUMNS",
     "Trade",
+    "VERDICT_BUY_AND_HOLD",
     "VERDICT_LOWER_RETURN_LOWER_DD",
     "VERDICT_OUTPERFORMS_BH",
     "VERDICT_UNDERPERFORMS_BH",
     "WALK_FORWARD_COLUMNS",
     "WalkForwardWindow",
+    "YEARLY_AGGREGATE_COLUMNS",
+    "YEARLY_COLUMNS",
+    "aggregate_yearly_results",
     "benchmark_verdict",
     "compute_metrics",
     "debug_trades_dataframe",
@@ -61,6 +76,7 @@ __all__ = [
     "run_regime_sma_sweep",
     "run_sma_sweep",
     "run_sma_walk_forward",
+    "run_yearly_validation",
     "trades_to_dataframe",
     "write_debug_trades_csv",
     "write_trades_csv",
