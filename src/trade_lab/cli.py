@@ -22,6 +22,11 @@ from .backtest.walk_forward import (
     OBJECTIVE_TOTAL_RETURN,
     run_multi_walk_forward,
 )
+from .backtest.multi_asset import (
+    aggregate_multi_asset,
+    run_multi_asset_yearly_validation,
+    summarize_across_assets,
+)
 from .backtest.yearly import (
     aggregate_yearly_results,
     run_yearly_validation,
@@ -480,6 +485,90 @@ def cmd_yearly(args: argparse.Namespace) -> None:
     print(f"Aggregate CSV:  {aggregate_path}")
 
 
+def cmd_multi_asset(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    exchange = args.exchange or cfg.default_exchange
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    if not symbols:
+        raise SystemExit("--symbols must list at least one symbol")
+
+    # Load each symbol's candles. Missing files are reported and skipped so
+    # one missing asset doesn't tank the rest of the report.
+    asset_candles: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        try:
+            asset_candles[symbol] = load_candles(
+                data_dir=cfg.data_dir,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=args.timeframe,
+            )
+        except FileNotFoundError as exc:
+            print(f"warn: skipping {symbol} ({exc})")
+
+    if not asset_candles:
+        raise SystemExit("No candle files found for any of the requested symbols.")
+
+    detail = run_multi_asset_yearly_validation(
+        asset_candles,
+        initial_capital=cfg.initial_capital,
+        fee_rate=cfg.fee_rate,
+        slippage_rate=cfg.slippage_rate,
+    )
+    if detail.empty:
+        raise SystemExit("No rows produced.")
+    aggregate = aggregate_multi_asset(detail)
+    summary = summarize_across_assets(aggregate)
+
+    detail_path = Path(args.output_csv)
+    detail_path.parent.mkdir(parents=True, exist_ok=True)
+    detail.to_csv(detail_path, index=False)
+
+    aggregate_path = (
+        Path(args.aggregate_csv)
+        if args.aggregate_csv
+        else detail_path.with_name(detail_path.stem + "_aggregate.csv")
+    )
+    aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+    aggregate.to_csv(aggregate_path, index=False)
+
+    summary_path = (
+        Path(args.summary_csv)
+        if args.summary_csv
+        else detail_path.with_name(detail_path.stem + "_summary.csv")
+    )
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(summary_path, index=False)
+
+    pct = "{:+.2%}".format
+    pct_abs = "{:.2%}".format
+    aggregate_formatters = {
+        "avg_annual_return": pct,
+        "median_annual_return": pct,
+        "best_year_return": pct,
+        "worst_year_return": pct,
+        "avg_exposure": pct_abs,
+    }
+    summary_formatters = {
+        "avg_return_across_assets": pct,
+        "avg_worst_year": pct,
+        "avg_exposure_across_assets": pct_abs,
+    }
+
+    print(f"Multi-asset yearly:   {', '.join(asset_candles.keys())}")
+    print(f"Timeframe:            {args.timeframe}")
+    print()
+    print("Per-(asset, strategy) aggregate")
+    print(aggregate.to_string(index=False, formatters=aggregate_formatters))
+    print()
+    print("Across-asset summary (per strategy)")
+    print(summary.to_string(index=False, formatters=summary_formatters))
+    print()
+    print(f"Detail CSV:     {detail_path}")
+    print(f"Aggregate CSV:  {aggregate_path}")
+    print(f"Summary CSV:    {summary_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trade-lab",
@@ -661,6 +750,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Aggregate per-strategy CSV (default: alongside --output-csv)",
     )
     p_yr.set_defaults(func=cmd_yearly)
+
+    p_ma = sub.add_parser(
+        "multi-asset",
+        help="Fixed-strategy yearly validation across multiple assets.",
+    )
+    p_ma.add_argument(
+        "--symbols",
+        default="BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT",
+        help="Comma-separated list of symbols to evaluate",
+    )
+    p_ma.add_argument("--timeframe", default="1d")
+    p_ma.add_argument("--exchange", default=None)
+    p_ma.add_argument(
+        "--output-csv",
+        default="outputs/multi_asset.csv",
+        help="Per-(asset, year, strategy) detail CSV",
+    )
+    p_ma.add_argument(
+        "--aggregate-csv",
+        default=None,
+        help="Aggregate per-(asset, strategy) CSV (default: alongside --output-csv)",
+    )
+    p_ma.add_argument(
+        "--summary-csv",
+        default=None,
+        help="Across-asset summary CSV (default: alongside --output-csv)",
+    )
+    p_ma.set_defaults(func=cmd_multi_asset)
 
     return parser
 
