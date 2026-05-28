@@ -60,6 +60,7 @@ class TimeSeriesMomentumStrategy(Strategy):
         annualization_factor: int = 365,
         max_position_size: float = 1.0,
         rebalance_threshold: float = 0.05,
+        use_vol_target: bool = True,
     ) -> None:
         self.lookbacks = _coerce_int_sequence(lookbacks, "lookbacks")
         self.sma_filter_periods = (
@@ -85,6 +86,7 @@ class TimeSeriesMomentumStrategy(Strategy):
         self.annualization_factor = int(annualization_factor)
         self.max_position_size = float(max_position_size)
         self.rebalance_threshold = float(rebalance_threshold)
+        self.use_vol_target = bool(use_vol_target)
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)
@@ -92,6 +94,13 @@ class TimeSeriesMomentumStrategy(Strategy):
         raw_signal = self._tsmom_ensemble(close)
         if self.sma_filter_periods:
             raw_signal = raw_signal.where(self._sma_filter(close), 0.0)
+
+        if not self.use_vol_target:
+            # Skip the vol-target layer entirely. The ensemble's
+            # {0, 1/k, ..., 1} ladder passes through to the engine.
+            # The rebalance band is also disabled — there's nothing
+            # for it to suppress on a discrete ladder.
+            return raw_signal.clip(lower=0.0, upper=self.max_position_size).fillna(0.0)
 
         vol_weight = self._vol_weight(close)
         target_position = (raw_signal * vol_weight).clip(

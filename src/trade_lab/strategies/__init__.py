@@ -7,6 +7,7 @@ from .regime_sma_cross import RegimeSMACrossStrategy
 from .rsi import RSIMeanReversionStrategy
 from .sma_cross import SMACrossStrategy
 from .tsmom import TimeSeriesMomentumStrategy
+from .vol_target_wrapper import VolatilityTargetWrapper
 
 __all__ = [
     "DonchianTrendEnsembleStrategy",
@@ -17,4 +18,5 @@ __all__ = [
     "SMACrossStrategy",
     "Strategy",
     "TimeSeriesMomentumStrategy",
+    "VolatilityTargetWrapper",
 ]

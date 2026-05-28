@@ -54,13 +54,30 @@ STRATEGY_WALK_FORWARD_COLUMNS = [
     "train_sharpe",
     "train_return_pct",
     "train_max_drawdown_pct",
+    "train_calmar",
     "test_sharpe",
     "test_return_pct",
     "test_max_drawdown_pct",
+    "test_calmar",
     "test_buy_and_hold_return_pct",
     "test_buy_and_hold_max_drawdown_pct",
     "test_bars",
 ]
+
+
+def _safe_calmar(return_pct: float, max_drawdown_pct: float) -> float:
+    """Calmar = return / max DD with safe handling of zero drawdown.
+
+    A zero-DD fold (strategy in cash the whole window) returns 0.0 — we
+    explicitly do *not* return inf or NaN since that would poison
+    downstream aggregates. A negative-return / zero-DD fold also
+    returns 0.0; that asymmetry is intentional, since a strategy that
+    stayed flat and returned 0% is being correctly summarized as
+    "neither risk nor reward".
+    """
+    if max_drawdown_pct <= 1e-9:
+        return 0.0
+    return return_pct / max_drawdown_pct
 
 
 @dataclass(frozen=True)
@@ -241,9 +258,15 @@ def run_strategy_walk_forward(
                 "train_sharpe": best_train["sharpe"],
                 "train_return_pct": best_train["total_return"],
                 "train_max_drawdown_pct": best_train["max_drawdown"],
+                "train_calmar": _safe_calmar(
+                    best_train["total_return"], best_train["max_drawdown"]
+                ),
                 "test_sharpe": test_metrics["sharpe"],
                 "test_return_pct": test_metrics["total_return"],
                 "test_max_drawdown_pct": test_metrics["max_drawdown"],
+                "test_calmar": _safe_calmar(
+                    test_metrics["total_return"], test_metrics["max_drawdown"]
+                ),
                 "test_buy_and_hold_return_pct": bh_return,
                 "test_buy_and_hold_max_drawdown_pct": bh_dd,
                 "test_bars": test_metrics["bars"],
@@ -271,9 +294,12 @@ def aggregate_walk_forward(
             "n_folds": 0,
             "mean_test_sharpe": 0.0,
             "median_test_sharpe": 0.0,
+            "mean_test_calmar": 0.0,
+            "median_test_calmar": 0.0,
             "hit_rate": 0.0,
             "mean_test_return": 0.0,
             "median_test_return": 0.0,
+            "mean_test_max_dd": 0.0,
             "worst_test_return": 0.0,
             "best_test_return": 0.0,
         }
@@ -281,9 +307,12 @@ def aggregate_walk_forward(
         "n_folds": len(detail_df),
         "mean_test_sharpe": float(detail_df["test_sharpe"].mean()),
         "median_test_sharpe": float(detail_df["test_sharpe"].median()),
+        "mean_test_calmar": float(detail_df["test_calmar"].mean()),
+        "median_test_calmar": float(detail_df["test_calmar"].median()),
         "hit_rate": float((detail_df["test_return_pct"] > 0).mean()),
         "mean_test_return": float(detail_df["test_return_pct"].mean()),
         "median_test_return": float(detail_df["test_return_pct"].median()),
+        "mean_test_max_dd": float(detail_df["test_max_drawdown_pct"].mean()),
         "worst_test_return": float(detail_df["test_return_pct"].min()),
         "best_test_return": float(detail_df["test_return_pct"].max()),
     }

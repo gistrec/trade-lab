@@ -47,6 +47,7 @@ class PriceMaRatioStrategy(Strategy):
         annualization_factor: int = 365,
         max_position_size: float = 1.0,
         rebalance_threshold: float = 0.05,
+        use_vol_target: bool = True,
     ) -> None:
         self.ma_periods = _coerce_int_sequence(ma_periods, "ma_periods")
         self.sma_filter_periods = (
@@ -72,6 +73,7 @@ class PriceMaRatioStrategy(Strategy):
         self.annualization_factor = int(annualization_factor)
         self.max_position_size = float(max_position_size)
         self.rebalance_threshold = float(rebalance_threshold)
+        self.use_vol_target = bool(use_vol_target)
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)
@@ -79,6 +81,12 @@ class PriceMaRatioStrategy(Strategy):
         raw_signal = self._pma_ensemble(close)
         if self.sma_filter_periods:
             raw_signal = raw_signal.where(self._sma_filter(close), 0.0)
+
+        if not self.use_vol_target:
+            # Pass the {0, 1/n, ..., 1} P/MA-vote ladder straight to
+            # the engine; the rebalance band has nothing to suppress
+            # on a discrete ladder either.
+            return raw_signal.clip(lower=0.0, upper=self.max_position_size).fillna(0.0)
 
         vol_weight = self._vol_weight(close)
         target_position = (raw_signal * vol_weight).clip(
