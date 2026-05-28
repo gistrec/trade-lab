@@ -1,20 +1,36 @@
 # trade-lab
 
-A small research framework for fetching crypto OHLCV data, defining trading
-strategies, and backtesting them with realistic fees and slippage.
+A research framework for fetching crypto OHLCV data, defining trading
+strategies, and backtesting them with realistic fees and slippage — built
+around a **layered honesty** validation stack so the final number you ship
+to paper trading isn't a polished in-sample mirage.
 
-This is an MVP focused on:
+What lives in this repo today:
 
-- Pulling historical candles from any [ccxt](https://github.com/ccxt/ccxt)-supported
-  exchange.
-- Storing candles locally as Parquet for fast iteration.
-- Long-only, single-asset, vectorized backtests with no leverage.
-- Pluggable strategies (SMA crossover and RSI mean reversion bundled).
-- Performance metrics and an equity-curve plot saved under `outputs/`.
+- Candle fetching from any [ccxt](https://github.com/ccxt/ccxt)-supported
+  exchange, plus Coin Metrics community fetcher for historical market-cap
+  and survivability data.
+- Long-only, vectorized backtests with **symmetric** fee + slippage costs
+  (B&H benchmark gets billed the same entry round as strategies — see
+  `findings/buy_and_hold_cost_symmetry.md`).
+- Eight bundled long-only strategies including TSMOM, P/MA ratio ensemble,
+  Donchian trend, and SMA crossover — plus a `VolatilityTargetWrapper`
+  decorator that bolts vol-targeting onto any of them.
+- Cross-sectional momentum (`xsmom`) with a curated **point-in-time
+  universe** that explicitly includes LUNA / FTT / UST / etc. so
+  survivorship bias can't quietly inflate results.
+- **Walk-forward** runner with warmup-feed, optional purge gap, and
+  per-fold + concatenated-OOS Deflated Sharpe Ratio (Bailey & López de
+  Prado 2014). `PROJECT_NUM_TRIALS = 500` is pinned in code with a census
+  comment — it does not move retroactively.
+- A **21-sleeve equal-weight portfolio runner** (3 strategies × 7 assets,
+  per-asset vol-target picks, dynamic 1/N_active with rebalance-on-
+  universe-change costing) that aggregates everything above into a single
+  deployable artifact.
 
-Paper / live trading is intentionally out of scope; the strategy and engine
-interfaces are designed so an execution layer can be added later without
-touching strategy code.
+Paper / live execution is intentionally out of scope; the strategy, engine,
+and ensemble interfaces are designed so an execution layer can be wired in
+without touching strategy code.
 
 ## Install
 
@@ -444,11 +460,18 @@ extraction — your strategy only needs to express the target position.
 ```
 src/trade_lab/
   config.py             Environment-driven configuration
-  data/                 Candle fetching + Parquet storage
-  strategies/           Strategy base class + bundled strategies
-  backtest/             Engine, metrics, plotting
-  risk/                 Position sizing helpers
-  cli.py                argparse entry point
+  data/                 ccxt fetcher, parquet storage, Coin Metrics
+                        community client, curated coin registry, PIT
+                        universe builder.
+  strategies/           Strategy base class, 8 bundled strategies,
+                        VolatilityTargetWrapper decorator.
+  backtest/             engine, metrics, plotting, reports,
+                        sweep, compare, multi_asset, yearly,
+                        cross_sectional (XSMOM), dsr (Deflated
+                        Sharpe), walk_forward + walk_forward_v2
+                        (generic), ensemble (portfolio runner).
+  risk/                 Position sizing helpers.
+  cli.py                argparse entry point.
 ```
 
 ## Tests
@@ -485,6 +508,15 @@ example CLI invocations, and any per-strategy results worth pinning:
 - [`rsi`](docs/strategies/rsi.md) — RSI mean reversion (contrast
   baseline, not a recommendation).
 
+Plus a generic decorator:
+
+- `VolatilityTargetWrapper` — wraps any of the above with a
+  Moreira-Muir style `target_vol / realized_vol` position scaler.
+  Use deliberately: see `findings/vol_targeting_regime_gate.md` for
+  the per-asset Sharpe/Calmar tradeoffs (vol-targeting helps ETH and
+  most alts on Sharpe, hurts BTC on Calmar — decision is per-asset,
+  not universal).
+
 For a side-by-side comparison of the trend strategies above on the
 BTC/ETH/BNB/SOL panel, see
 [Strategy comparison](docs/results/strategy_comparison.md).
@@ -496,17 +528,22 @@ and the buy-and-hold cost-symmetry audit — see the `docs/results/`
 and `findings/` directories:
 
 - [PIT XSMOM universe](docs/results/pit_universe.md) —
-  survivorship-bias delta on cross-sectional momentum.
+  survivorship-bias delta on cross-sectional momentum (Sharpe 1.40 → 0.93
+  once delisted pairs are included point-in-time).
 - [Walk-forward priority-5](docs/results/walk_forward_priority5.md) —
   IS→OOS Sharpe shrinkage 0.55-0.82 across SMA / TSMOM / PMA.
 - [Vol-targeting wrapper](docs/results/vol_targeting.md) —
-  asset-conditional Sharpe / Calmar tradeoff.
+  asset-conditional Sharpe / Calmar tradeoff on BTC vs ETH.
 - [DSR in walk-forward](docs/results/dsr_in_walk_forward.md) —
   0/21 strategy×asset cells survive DSR > 0.5 at project N=500.
 - [Vol-targeting × regime gate (findings)](findings/vol_targeting_regime_gate.md) —
-  7-asset confirmation of asset-specific behaviour.
+  7-asset confirmation: per-asset vol-target decision required.
 - [B&H cost symmetry (findings)](findings/buy_and_hold_cost_symmetry.md) —
-  bug audit and quantified impact.
+  bug audit: B&H was getting a ~0.15% free head-start, now fixed.
+- [Multi-asset ensemble portfolio (findings)](findings/ensemble_portfolio.md) —
+  21-sleeve equal-weight portfolio Sharpe +1.13 / DSR 0.425, below
+  best single sleeve (`pma_medium × BNB` at DSR 0.564). Diversification
+  cuts max DD in half but does not lift statistical confidence.
 
 Adding a new strategy is a five-minute job — subclass `Strategy`,
 implement `generate_signals(candles)`, register the class in
@@ -515,7 +552,23 @@ implement `generate_signals(candles)`, register the class in
 
 ## Roadmap
 
-- Paper / live execution behind a `Broker` interface.
-- Multi-asset portfolios and rebalancing.
-- Short selling and leverage.
-- Walk-forward and parameter optimization helpers.
+Completed in earlier rounds (see `docs/results/` and `findings/`):
+
+- Multi-asset portfolios and rebalancing — `backtest/ensemble.py` with
+  dynamic equal-weight + rebalance-on-universe-change costing.
+- Walk-forward + parameter optimization — `backtest/walk_forward_v2.py`
+  with per-fold DSR and concatenated-OOS DSR.
+- Survivorship-free cross-sectional universe — `data/universe.py` with
+  Coin Metrics community fetcher and curated delisting registry.
+- Symmetric cost model for benchmarks — `engine.buy_and_hold_with_costs`.
+
+Open:
+
+- Paper trading via a `Broker` interface (Binance testnet first).
+- Live execution (gated on >=4-8 weeks of clean paper-trading results).
+- Inverse-vol and risk-parity allocators as alternatives to equal-weight.
+- Higher-frequency timeframes (4h, 1h) to widen the OOS sample. Tests
+  with 1d data sit at "marginal" DSR for the best single sleeve only;
+  more bars per asset should help.
+- Short selling and leverage are deliberately out of scope for the
+  spot-only research mandate.
