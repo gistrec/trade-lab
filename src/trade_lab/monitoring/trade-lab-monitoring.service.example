@@ -1,0 +1,78 @@
+[Unit]
+Description=Trade-lab monitoring dashboard (read-only)
+After=network.target
+# Intentionally NOT bound to the bot via Requires=/After=: monitoring
+# must keep running when the bot is down — that's exactly when an
+# operator needs to look at it.
+
+[Service]
+Type=simple
+User=monitoring
+Group=monitoring
+WorkingDirectory=/opt/trade-lab
+
+# Use the project's venv, never the system Python.
+Environment="PATH=/opt/trade-lab/.venv/bin"
+# Journal path — bot writes, monitoring reads (group-readable, see README).
+Environment="TRADE_LAB_MONITORING_JOURNAL_PATH=/opt/trade-lab/data/journal/cycles.jsonl"
+# Staleness threshold: 1h. Tune up if the bot's cadence is slower than
+# daily — a single late cycle should not trigger STALE.
+Environment="MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS=3600"
+
+# Listen on localhost only — nginx proxies from public 443.
+# WITHOUT --server.address 127.0.0.1, Streamlit binds 0.0.0.0 and the
+# dashboard is publicly exposed unauthenticated on :7000 the moment
+# this unit starts. Verify with `ss -tlnp | grep 7000` after start.
+ExecStart=/opt/trade-lab/.venv/bin/streamlit run \
+    /opt/trade-lab/src/trade_lab/monitoring/app.py \
+    --server.port 7000 \
+    --server.address 127.0.0.1 \
+    --server.headless true \
+    --browser.gatherUsageStats false
+
+Restart=on-failure
+RestartSec=5s
+
+# ===========================
+# Security hardening (systemd)
+# ===========================
+
+# Refuse privilege escalation via setuid/setgid binaries.
+NoNewPrivileges=true
+
+# Mount /usr, /boot, /efi read-only AND /etc read-only.
+ProtectSystem=strict
+
+# Hide users' home directories and /root from the unit.
+ProtectHome=true
+
+# Private /tmp namespace, discarded on exit.
+PrivateTmp=true
+
+# Minimal /dev — no access to physical devices.
+PrivateDevices=true
+
+# Make the project tree read-only for this unit. Monitoring must never
+# mutate bot code or data. (ReadWritePaths is intentionally omitted —
+# the unit needs zero writable filesystem locations under /opt.)
+ReadOnlyPaths=/opt/trade-lab
+
+# Lock down kernel surface.
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Only IPv4/IPv6 + Unix sockets. No raw, netlink, packet sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Block runtime personality(2) changes (PER_LINUX32 etc).
+LockPersonality=true
+
+# Refuse W+X memory pages. CPython, Streamlit, pandas, numpy do not
+# need WX; if a future dependency requires it the unit will fail
+# loudly with an obvious systemd log message — preferable to silently
+# expanding the attack surface.
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
