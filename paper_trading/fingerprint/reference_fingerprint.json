@@ -1,0 +1,88 @@
+{
+  "annualization_factor": 365,
+  "content_hash": "f8dd5bcf2a86dcc281a15c91ad35264e229827ce579ea6fb9f7d7e8ff8c903b6",
+  "drawdown_profile": {
+    "breach_criterion": "live_drawdown_from_peak < max_historical_dd (i.e., a deeper drawdown than the worst observed in the verified window 2022-01-21 \u2192 2026-05-28)",
+    "extremes": {
+      "max": 0.0,
+      "mean": -0.16257355422295192,
+      "min": -0.32165612697839163
+    },
+    "max_historical_dd": -0.32165612697839163,
+    "n_observations": 1589,
+    "percentiles": {
+      "p05": -0.2904817458889132,
+      "p25": -0.268620230869393,
+      "p50": -0.18667195559599337,
+      "p75": -0.05489803883435351,
+      "p95": 0.0
+    }
+  },
+  "exposure_flip_freq_rolling": {
+    "annualization_factor": 365,
+    "description": "Count of ladder transitions in trailing 90 bars \u00d7 (365/90). Each daily observation is a 90-day rolling window. Autocorrelated; bands descriptive only.",
+    "extremes": {
+      "max": 105.44444444444444,
+      "mean": 25.793333333333333,
+      "min": 0.0
+    },
+    "n_observations": 1500,
+    "name": "exposure_flip_freq_rolling_90d_annualized",
+    "percentiles": {
+      "p05": 0.0,
+      "p25": 4.055555555555555,
+      "p50": 20.27777777777778,
+      "p75": 37.513888888888886,
+      "p95": 77.05555555555556
+    },
+    "rolling_window_days": 90
+  },
+  "frozen_config_hash": "ac8919618ca6d5c6515ad9c26437f3fe28f1b4af3d4f37aeefcf989d0bce8753",
+  "n_bars": 1589,
+  "position_concentration": {
+    "mechanically_bounded_by": "ladder/N where N = len(assets)",
+    "status": "degenerate_for_equal_weight"
+  },
+  "rebalance_turnover_per_event": {
+    "annualization_factor": null,
+    "description": "Magnitude of |\u0394position| at each non-zero transition. Per-event distribution (NOT rolling).",
+    "extremes": {
+      "max": 1.0,
+      "mean": 0.5849056603773585,
+      "min": 0.5
+    },
+    "n_observations": 106,
+    "name": "rebalance_turnover_per_event",
+    "percentiles": {
+      "p05": 0.5,
+      "p25": 0.5,
+      "p50": 0.5,
+      "p75": 0.5,
+      "p95": 1.0
+    },
+    "rolling_window_days": null
+  },
+  "regime_gate_flip_freq_rolling": {
+    "annualization_factor": 365,
+    "description": "Count of SMA(200) gate flips (close crossing its SMA) per trailing 90 bars \u00d7 (365/90). Autocorrelated.",
+    "extremes": {
+      "max": 36.5,
+      "mean": 9.246666666666666,
+      "min": 0.0
+    },
+    "n_observations": 1500,
+    "name": "regime_gate_flip_freq_rolling_90d_annualized",
+    "percentiles": {
+      "p05": 0.0,
+      "p25": 0.0,
+      "p50": 4.055555555555555,
+      "p75": 16.22222222222222,
+      "p95": 32.44444444444444
+    },
+    "rolling_window_days": 90
+  },
+  "rolling_window_days": 90,
+  "schema_version": "v1",
+  "window_end": "2026-05-28",
+  "window_start": "2022-01-21"
+}

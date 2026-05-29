@@ -113,6 +113,70 @@ One JSON object per line. Field reference:
 | `net_position_return` | float | gross minus simulated turnover cost |
 | `notes` | str | optional free-text annotation |
 
+### `date` field semantics — anchor for Step 4 detector
+
+The journal's ``date`` field is the **signal date**: the date of the
+most recent OHLCV bar (close) used by the strategy to compute
+``ladder_state``. In bar-indexed terms: when ``date = T``,
+``ladder_state`` is the strategy's output computed from data through
+the close of bar T. The intended_trades carried by this row are the
+position changes that would be **placed at the open of bar T+1** to
+achieve the new target weights (mirroring the backtest engine's
+``signal.shift(1)`` convention).
+
+Why this matters: the look-ahead detector (Test 4) replays the
+backtest against the vintage data and compares the backtest's
+signal[T] against this row's ``ladder_state``. They must match
+exactly on identical input. A constant-1-bar offset (every live
+signal equals the backtest signal one bar earlier) would mean the
+two paths disagree on the convention for ``date`` — that is a
+**labeling artifact**, not a real look-ahead, and the detector
+should be able to recognize it as such by testing both alignments.
+This note is the anchor for that test.
+
+## Frozen reference fingerprint
+
+The reference behavioral fingerprint lives at
+``paper_trading/fingerprint/reference_fingerprint.json`` and is a
+**versioned frozen artifact**, like the production config. The file
+is hash-pinned (the JSON contains its own SHA-256 in the
+``content_hash`` field; ``load_reference`` verifies on read).
+
+Rebuilding the reference is a one-time operation:
+
+```bash
+.venv/bin/python scripts/build_reference_fingerprint.py
+```
+
+The script reads Binance parquets from ``data/`` and writes the
+fingerprint. Re-running on the same inputs produces a byte-identical
+file; a hash change indicates an input changed.
+
+## Behavioral monitor
+
+```bash
+.venv/bin/python -m trade_lab.paper_trading.fingerprint_cli
+```
+
+Reports whether live journal behaviour sits inside the reference
+bands. **Descriptive only — never auto-kills.** Exit code is always
+0 unless a real error occurred (missing reference, content-hash
+mismatch, etc.).
+
+The monitor's advisory levels (in increasing seriousness):
+
+* `Within historical envelope` — green.
+* `Single-day single-metric breach` — noise.
+* `Bootstrap` — fewer than the rolling-window-length of journal
+  rows; rolling metrics not yet evaluable.
+* `Multi-metric breach` — ≥ 3 metrics outside band simultaneously on
+  the same day. Operator review.
+* `Sustained breach on a behavioral metric` — same metric breached
+  for ≥ 7 consecutive days. Operator review.
+* `DRAWDOWN BREACH` — live drawdown deeper than the worst observed in
+  the reference window (2022 bear). Forward to Step-4 look-ahead
+  detector + operator review.
+
 ## Anti-patterns — DO NOT do these
 
 * **Do NOT edit `journal.jsonl` in place.** The look-ahead detector
