@@ -26,3 +26,10 @@ htmlcov/
 /outputs/
 *.parquet
 *.png
+
+# Paper-trading harness operational artifacts (validation Tests 3-4)
+# Keep the directory layout, ignore the per-cycle data.
+paper_trading/logs/*
+!paper_trading/logs/.gitkeep
+paper_trading/vintages/*
+!paper_trading/vintages/.gitkeep

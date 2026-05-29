@@ -106,14 +106,56 @@ Implications:
 * **Does NOT affect the deployable 7-major basket.** The basket is
   hand-picked (CLAUDE.md "Deployable strategy") and includes BNB
   unconditionally; `build_pit_universe` is not in the strategy
-  execution path.
-* **Does affect any future cross-sectional rotation strategy** that
-  derives its universe from `build_pit_universe` against the
-  community-tier cache. Such strategies would silently drop BNB.
-  Worth a data-quality patch when paid CoinMetrics access is
-  added, or a sentinel that raises when an asset has `mcap = NaN`
-  but `tradable_at = True` (currently the code drops it silently —
-  exactly the "fail loud" violation CLAUDE.md warns against).
+  execution path. This is the *only* reason the bug is harmless
+  today — we are saved by the bypass, not by the function being
+  correct.
+
+### Fixed blocker on the next cross-sectional research cycle
+
+**`build_pit_universe` MUST NOT be used to derive the candidate
+universe for any cross-sectional rotation strategy (including CTREND,
+the strategy explicitly named in the original compass report) until
+the NaN-mcap handling is repaired.** Reason: silent universe
+shrinkage is a failure mode that does not raise — it tilts the
+verdict on a different basket than the candidate strategy is
+supposed to be evaluated on. CTREND-v2 evaluated against a
+6-asset BNB-dropped universe would deliver a different number than
+CTREND-v2 against the intended 7-major universe, and the test
+operator would not know which one was measured. That is exactly the
+class of silent failure the validation phase has been chartered to
+catch.
+
+Acceptable fix paths (whoever opens the CTREND-v2 cycle):
+
+1. **Paid-tier CoinMetrics access.** Replaces the community-tier
+   `CapMrktEstUSD` gap with the trusted feed. Resolves BNB and any
+   other coin with the same missing-metric pattern.
+2. **Fail-loud on NaN inputs to `build_pit_universe`.** If
+   `tradable_at(date, meta)` is True but `market_cap[date, meta]`
+   is NaN, raise (or at minimum log a structured warning and
+   surface it in the returned eligibility frame's metadata). The
+   current `rank(..., na_option="bottom")` choice silently sorts
+   missing values to the end of the universe — i.e., it pretends
+   the asset has the *lowest* market cap rather than refusing to
+   rank it. That choice is the proximate bug.
+
+Broader principle, worth recording for future modules: **NaN in an
+eligibility computation must fail loudly, not silently re-rank the
+universe.** CLAUDE.md already enshrines this for missing candles,
+missing prices, missing basket assets; the same principle must apply
+to missing metadata.
+
+### Deliberately NOT fixed in this validation phase
+
+* The strategy path of the deployable config does not touch
+  `build_pit_universe`. Patching it now would be a change outside
+  the scope of this phase, against a function not in use, with
+  no measurable improvement to the deployable system. Per the
+  validation phase's freeze discipline, the patch waits.
+* This item is now a **fixed pre-condition for the next CTREND-class
+  research cycle**, not an open patch-item floating in the backlog.
+  Pinning it here prevents the surprise of "we ran CTREND on
+  6 assets and you didn't notice for a month."
 
 ## Aggregate verdict
 
