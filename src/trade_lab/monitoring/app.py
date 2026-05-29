@@ -127,13 +127,21 @@ def _render_status(reader: JournalReader) -> None:
 
     cols = st.columns(4)
     cols[0].metric("Staleness", staleness.value.upper())
+    last_ended_iso = latest.get("ended_at") if latest is not None else None
     if latest is not None:
-        cols[1].metric("Last cycle", _humanize_iso(latest.get("ended_at")))
+        # Use a *relative* time as the metric value (compact for narrow
+        # screens — "5m ago" fits in a column whereas the absolute UTC
+        # string truncates) and surface the precise timestamp below
+        # the row in a caption.
+        cols[1].metric("Last cycle", _humanize_relative(last_ended_iso))
         cols[2].metric("Last duration", f"{latest.get('duration_ms', 0)} ms")
         cols[3].metric("Outcome", str(latest.get("outcome") or "?").upper())
     else:
         for c in cols[1:]:
             c.metric("—", "—")
+
+    if last_ended_iso:
+        st.caption(f"Last cycle ended at {_humanize_iso(last_ended_iso)}")
 
     if staleness is Staleness.DOWN:
         st.error(
@@ -727,6 +735,37 @@ def _humanize_iso(s: Optional[str]) -> str:
     except ValueError:
         return s
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
+    """Compact relative-time string: '12s ago' / '5m ago' / '2h 30m ago' / '3d ago'.
+
+    Designed for ``st.metric`` value cells, which truncate on narrow
+    screens. Pair with ``_humanize_iso`` in a caption for the precise
+    timestamp.
+    """
+    if not s:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(tz=timezone.utc)
+    secs = int((now - dt).total_seconds())
+    if secs < 0:
+        return "in the future"
+    if secs < 60:
+        return f"{secs}s ago"
+    mins, _ = divmod(secs, 60)
+    if mins < 60:
+        return f"{mins}m ago"
+    hours, rem_min = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {rem_min}m ago" if rem_min else f"{hours}h ago"
+    days, rem_h = divmod(hours, 24)
+    return f"{days}d {rem_h}h ago" if rem_h and days < 30 else f"{days}d ago"
 
 
 # ---------------------------------------------------------------------------
