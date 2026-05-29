@@ -29,7 +29,7 @@ PAPER (testnet) status in the table below = "DSR-passed, currently running throu
 | 7 | VolatilityTargetWrapper | Overlay (any strategy) | Asset-conditional | Helps ETH/SOL on Sharpe; hurts BTC on Calmar | `findings/vol_targeting_regime_gate.md` |
 | 8 | Breadth filter (`GatedStrategy`) | Overlay (sequence count) | Does NOT improve on SMA200 | Basket DSR identical to SMA200 | `findings/breadth_filter.md` |
 | 9 | 21-sleeve ensemble portfolio (3 strats × 7 assets) | Portfolio aggregation | Below threshold | DSR 0.425 (below 0.5; DD halved but DSR lowered) | `findings/ensemble_portfolio.md` |
-| 10 | Symmetric B&H cost model (engine fix) | Engine / accounting | Bug fixed, no verdicts flipped | 0 cells in narrow-margin band | `findings/buy_and_hold_cost_symmetry.md` |
+| 10 | Symmetric B&H cost model (engine fix) | Engine / accounting (not a strategy) | Bug fixed | B&H was getting a free ~0.15% entry round vs strategies; symmetric cost now applied. **0 existing strategy-vs-B&H verdicts flipped** (Δ Sharpe ≤ ~0.05 across all pairs — within noise) | `findings/buy_and_hold_cost_symmetry.md` |
 | 11 | Cross-sectional one-day reversal | Cross-section rotation | REJECT | Sharpe +0.01, DSR 0.001 | `findings/cross_sectional_reversal.md` |
 | 12 | Cross-sectional momentum (rotation top-K) | Cross-section rotation | Available, used as benchmark | Sharpe 0.70–0.95 on 24-coin universe (benchmark in CTREND test) | (no standalone finding; lives in `backtest/cross_sectional.py`) |
 | 13 | CTREND-proxy (price-only) | Cross-section ML ranker | **REJECT** | Sharpe 0.32–0.50; underperforms BH-BTC and CSM | `findings/ctrend_proxy_price_only.md` |
@@ -95,7 +95,16 @@ All four families documented in `findings/cluster_stability.md` — the core met
 Adds a "breadth ≥ K%" filter on top of the SMA200 regime gate. **Does NOT improve** the market-basket TSMOM (basket DSR identical at 0.658). **Asset-conditional improvements only**: helps ETH (DSR 0.28 → 0.45), hurts BTC (0.31 → 0.13). Stacking breadth on top of SMA200 strictly hurts: the filters are substitutes, not complements. Finding: `findings/breadth_filter.md`.
 
 ### 10. Symmetric B&H cost model (engine fix, not a strategy)
-Before this fix, `buy_and_hold` benchmark didn't pay an entry round of fee+slippage while strategies did — a quiet ~0.15% head-start to B&H. Fixed in `engine.buy_and_hold_with_costs`. Verdict: bug found, no existing verdicts flipped (0 cells in the narrow-margin band), but the principle now holds. Finding: `findings/buy_and_hold_cost_symmetry.md`.
+**The bug.** The legacy `buy_and_hold` benchmark didn't pay an entry round of fee+slippage while strategies did — a quiet ~0.15% head-start to B&H on every comparison.
+
+**The fix.** `engine.buy_and_hold_with_costs` now charges B&H the same entry round any strategy pays.
+
+**The "result" — what we were checking after the fix.** After applying symmetric costs, every existing (strategy × asset) comparison from prior findings was re-evaluated to see whether any strategy that had been WINNING vs B&H now loses, or vice versa.
+* **0 verdicts flipped.** Every previous KEEP-vs-B&H or REJECT-vs-B&H stayed the same.
+* Δ Sharpe in the worst-affected pair was ≤ ~0.05 — inside the noise band of a single run.
+* Interpretation: the bug was real, but its magnitude (~15 bps/year for typical turnover) is smaller than every margin existing verdicts cleared. The fix matters going forward (no future comparison will be biased the same way), but it does not retroactively change anything we believed.
+
+Full Δ table per strategy × asset in `findings/buy_and_hold_cost_symmetry.md`.
 
 ---
 
