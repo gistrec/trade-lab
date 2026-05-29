@@ -6,11 +6,21 @@ finding for details. Project-wide convention: every Sharpe / DSR
 quoted is **net of cost** and **OOS** unless explicitly marked
 otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 
+## What "PAPER" status actually means
+
+A strategy that reaches PAPER status has cleared **one** gate, not all of them. Specifically:
+
+* **DSR > 0.5 at N=500, cluster-stable** means: after correcting for the project's effective multiple-testing budget (500 trials), the strategy's Sharpe is unlikely to be pure selection noise. **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact.**
+* The **next honest gate is paper trading itself** — ≥ 4–8 clean weeks on the target venue with the actual order-placement pipeline. Sources of failure that DSR cannot rule out and that only paper trading can catch: signal stability under live data feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw.
+* Real-money deployment requires the paper-trading gate to be passed first, AND (per CLAUDE.md hard rule "Live orders only on testnet") a manual mainnet-migration code-path change. Neither has happened.
+
+PAPER (testnet) status in the table below = "DSR-passed, currently running through `paper-place-orders` on Binance testnet as a deliberate validation step before any real money."
+
 ## All strategies at a glance
 
 | # | Strategy / variant | Class | Status | Key metric | Finding |
 |---|---|---|---|---|---|
-| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **DEPLOYED** | DSR 0.770 | `findings/han_28d_tsmom.md` |
+| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | DSR 0.770 — first config in the project to clear DSR > 0.5 at N=500 with margin | `findings/han_28d_tsmom.md` |
 | 2 | TSMOM short-ensemble (lookbacks 28/60/120, etc) | Strategy family | Cluster-stable | DSR median 0.736 (7/7 pass) | `findings/cluster_stability.md` |
 | 3 | TSMOM Han single lookbacks | Strategy family | Cluster-stable | DSR median 0.702 (6/6 pass) | `findings/cluster_stability.md` |
 | 4 | PMA ratio ladder | Strategy family | Cluster-stable | DSR median 0.716 (6/6 pass) | `findings/cluster_stability.md` |
@@ -27,7 +37,7 @@ otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 | 15 | HMM 2-state regime overlay | BTC regime gate (Markov-switching) | **REJECT** | Loses 5/6 cuts to existing VolTarget; Sharpe 0.46–0.77 | `findings/hmm_regime_overlay.md` |
 
 Status legend:
-* **DEPLOYED** — passes DSR > 0.5 at N=500, cluster-stable, currently the live paper-trading strategy.
+* **PAPER (Binance testnet)** — passes DSR > 0.5 at N=500, cluster-stable, currently being validated through `paper-place-orders` on Binance testnet. NOT cleared for real money. See "What PAPER status actually means" above.
 * Cluster-stable / Cluster-FAILS — see `findings/cluster_stability.md` for the rule.
 * Available / benchmark — implemented in code; not a standalone deploy candidate, used to verify other tests.
 * REJECT — net of cost and OOS, does not beat the relevant in-stack benchmark.
@@ -35,14 +45,22 @@ Status legend:
 
 ---
 
-## Deployed
+## Currently paper-trading (Binance testnet)
 
 ### 1. TSMOM (28, 60) on market-basket index with SMA(200) gate
 * **Universe:** equal-weight market-basket of 7 majors (BTC, ETH, BNB, SOL, ADA, XRP, DOGE). Monthly rebalance + on-`N_active`-change rebalance.
 * **Signal:** TSMOM ladder `{0, 0.5, 1.0}` = mean of binary `sign(28d return), sign(60d return)`. SMA(200) gate zeroes the ladder when basket close < SMA.
 * **Concatenated OOS Sharpe = +1.81** on the market-basket; **DSR = 0.770** at N=500.
 * First config in the project to clearly survive DSR > 0.5 at N=500 with margin.
-* Live execution path: `src/trade_lab/execution/` (paper trading on Binance testnet; Kraken move documented in `execution/README.md`).
+
+**What DSR 0.770 actually says.** After correcting for the 500-trial selection budget, the strategy's historical Sharpe is unlikely to be statistical noise. It does NOT say the strategy will be profitable going forward — only that the backtest's edge is unlikely to be a multiple-testing artifact. Backtest survival is the *previous* gate, not the *final* one.
+
+**Current state and what comes next.**
+* Now: running through `paper-place-orders` daily on Binance testnet (see `src/trade_lab/execution/README.md`).
+* Next gate: at least 4–8 clean weeks of testnet paper trading, during which signal stability, slippage divergence, partial-fill behaviour, and network-failure handling are observed against the actual order pipeline.
+* If testnet validation passes: a deliberate code-path migration to Kraken (CLAUDE.md hard rule "Live orders only on testnet" — mainnet is NOT a flag-flip, it's a manual engineering decision plus KYC plus exchange-specific market-constraint validation).
+* Until paper trading is done: this strategy is **not cleared for real money**, even though it has cleared every backtest-side gate.
+
 * Finding: `findings/han_28d_tsmom.md`.
 
 ---
