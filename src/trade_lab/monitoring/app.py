@@ -50,6 +50,27 @@ EXPECTED_INTERVAL_S = int(
 )
 REFRESH_SECONDS = int(os.environ.get("MONITORING_REFRESH_SECONDS", "30"))
 
+# Validation forward-test paths (see paper_trading/README.md). All
+# read-only; the validation panel never writes.
+VALIDATION_LOG_PATH = Path(
+    os.environ.get(
+        "TRADE_LAB_VALIDATION_LOG_PATH",
+        "paper_trading/logs/journal.jsonl",
+    )
+)
+VALIDATION_VINTAGE_ROOT = Path(
+    os.environ.get(
+        "TRADE_LAB_VALIDATION_VINTAGE_ROOT",
+        "paper_trading/vintages",
+    )
+)
+VALIDATION_REFERENCE_PATH = Path(
+    os.environ.get(
+        "TRADE_LAB_VALIDATION_REFERENCE_PATH",
+        "paper_trading/fingerprint/reference_fingerprint.json",
+    )
+)
+
 
 # Single reader instance reused across reruns. JournalReader is
 # cache-aware (mtime-based), so this is safe and cheap.
@@ -535,6 +556,169 @@ def _render_cycle_detail(cycle: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Validation tab — forward-test harness + fingerprint + look-ahead detector
+# ---------------------------------------------------------------------------
+
+
+def _render_validation() -> None:
+    """Read-only view of the validation forward-test infrastructure.
+
+    Shows: frozen-config hash gate, journal stats, latest harness row,
+    fingerprint-monitor breach status, and look-ahead-detector status.
+    Imports validation modules directly — these are research-side code
+    without exchange credentials, so the API-separation rationale that
+    prevents the regular tabs from importing ``trade_lab.execution``
+    does not apply here.
+    """
+    # Lazy import to keep the regular tabs loading even if these
+    # modules are renamed during research.
+    from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG, production_config_hash
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+    from trade_lab.paper_trading.journal import read_log
+    from trade_lab.paper_trading.lookahead_detector import (
+        check_journal_for_lookahead,
+    )
+
+    st.markdown("### Frozen-config gate")
+    runtime_hash = production_config_hash(PRODUCTION_CONFIG)
+    cols = st.columns(2)
+    if runtime_hash == CANONICAL_HASH:
+        cols[0].success("Hash MATCH — harness will run")
+    else:
+        cols[0].error("Hash DRIFT — harness will refuse to run")
+    cols[1].code(f"{runtime_hash[:16]}…", language="text")
+
+    st.markdown("### Validation journal")
+    if not VALIDATION_LOG_PATH.exists():
+        st.info(
+            f"No validation journal yet at `{VALIDATION_LOG_PATH}`. "
+            "Forward paper-clock has not started — run "
+            "`python -m trade_lab.paper_trading.cli` daily to begin."
+        )
+        return
+
+    rows = read_log(VALIDATION_LOG_PATH)
+    cols = st.columns(4)
+    cols[0].metric("Rows", len(rows))
+    if rows:
+        cols[1].metric("First date", rows[0].date)
+        cols[2].metric("Last date", rows[-1].date)
+        cols[3].metric("Latest ladder", f"{rows[-1].ladder_state:.2f}")
+    else:
+        for c in cols[1:]:
+            c.metric("—", "—")
+
+    if rows:
+        latest = rows[-1]
+        st.markdown("**Latest cycle**")
+        cols = st.columns(4)
+        cols[0].metric("Basket close", f"{latest.basket_close:.2f}")
+        cols[1].metric(
+            "SMA(200)",
+            f"{latest.sma_value:.2f}" if latest.sma_value is not None else "—",
+        )
+        cols[2].metric("Gate", "OPEN" if latest.sma_gate_open else "CLOSED")
+        cols[3].metric("Equity", f"${latest.portfolio_equity:.2f}")
+        with st.expander("Per-lookback signals + intended trades"):
+            st.write("**Per-lookback states / returns**")
+            st.json({
+                "states": latest.per_lookback_states,
+                "returns": {k: f"{v*100:+.2f}%"
+                            for k, v in latest.per_lookback_returns.items()},
+            })
+            st.write("**Target / intended trades (delta from prior)**")
+            df = pd.DataFrame({
+                "target_weight": latest.target_weights,
+                "current_weight": latest.current_weights,
+                "intended_delta": latest.intended_trades,
+            })
+            st.dataframe(df, width="stretch")
+
+    st.markdown("### Behavioral fingerprint — live vs frozen reference")
+    if not VALIDATION_REFERENCE_PATH.exists():
+        st.warning(
+            f"No reference fingerprint at `{VALIDATION_REFERENCE_PATH}`. "
+            "Run `scripts/build_reference_fingerprint.py`."
+        )
+    else:
+        try:
+            report = check_journal_against_reference(
+                log_path=VALIDATION_LOG_PATH,
+                reference_path=VALIDATION_REFERENCE_PATH,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            st.error(f"Fingerprint monitor error: {exc}")
+        else:
+            cols = st.columns(3)
+            cols[0].metric(
+                "Drawdown headroom",
+                f"{report.drawdown.headroom_pp:+.2f} pp",
+            )
+            cols[1].metric(
+                "Multi-metric days",
+                report.multi_metric_days,
+            )
+            cols[2].metric(
+                "Sustained breach",
+                "YES" if report.overall_sustained_breach else "no",
+            )
+            if report.drawdown.breached:
+                st.error(report.advisory)
+            elif report.overall_sustained_breach or report.overall_multi_metric_breach:
+                st.warning(report.advisory)
+            else:
+                st.info(report.advisory)
+            with st.expander("Per-metric live status"):
+                for metric in (report.exposure_flip, report.regime_gate_flip):
+                    st.write(f"**{metric.name}**")
+                    st.write({
+                        "latest": metric.latest_value,
+                        "band [p05, p95]": [metric.p05, metric.p95],
+                        "currently_breached": metric.currently_breached,
+                        "consecutive_breach_days_now": metric.currently_consecutive_breach,
+                        "longest_run_observed": metric.longest_consecutive_breach,
+                    })
+
+    st.markdown("### Look-ahead detector — live vs backtest replay")
+    if not rows:
+        st.info(
+            "No live rows to check. Part A (`scripts/validation_lookahead_"
+            "truncation_audit.py`) is the dispositive look-ahead test for "
+            "the backtest path itself — it has run CLEAN (0 mismatches on "
+            "1589 verified-window bars)."
+        )
+    else:
+        try:
+            la = check_journal_for_lookahead(
+                log_path=VALIDATION_LOG_PATH,
+                vintage_root=VALIDATION_VINTAGE_ROOT,
+            )
+        except Exception as exc:
+            st.error(f"Look-ahead detector error: {exc}")
+        else:
+            cols = st.columns(4)
+            cols[0].metric("Match", la.n_match)
+            cols[1].metric("Offset-1 (labeling)", la.n_offset_1_match)
+            cols[2].metric("Random disagreement", la.n_random_disagreement)
+            cols[3].metric("Vintage missing", la.n_vintage_missing)
+            if la.random_disagreement_present:
+                st.error(la.advisory)
+            elif la.constant_offset_pattern:
+                st.warning(la.advisory)
+            elif la.n_match > 0:
+                st.success(la.advisory)
+            else:
+                st.info(la.advisory)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _humanize_iso(s: Optional[str]) -> str:
     if not s:
         return "—"
@@ -572,8 +756,8 @@ def main() -> None:
     latest = reader.latest_cycle()
     _render_top_banner(latest)
 
-    tab_status, tab_signal, tab_portfolio, tab_cycles = st.tabs(
-        ["Status", "Signal", "Portfolio", "Cycles"]
+    tab_status, tab_signal, tab_portfolio, tab_cycles, tab_validation = st.tabs(
+        ["Status", "Signal", "Portfolio", "Cycles", "Validation"]
     )
     with tab_status:
         _render_status(reader)
@@ -583,6 +767,8 @@ def main() -> None:
         _render_portfolio(reader)
     with tab_cycles:
         _render_cycles(reader)
+    with tab_validation:
+        _render_validation()
 
 
 if __name__ == "__main__":

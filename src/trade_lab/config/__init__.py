@@ -12,10 +12,13 @@ from .production_config import (
     ProductionConfig,
     production_config_hash,
 )
+from .runtime import Config, load_config
 
 __all__ = [
     "CANONICAL_HASH",
+    "Config",
     "PRODUCTION_CONFIG",
     "ProductionConfig",
+    "load_config",
     "production_config_hash",
 ]

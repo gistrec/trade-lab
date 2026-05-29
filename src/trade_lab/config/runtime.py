@@ -1,4 +1,10 @@
-"""Configuration loaded from environment variables (with `.env` support)."""
+"""Runtime configuration loaded from environment variables (with ``.env``).
+
+This is the *operational* config — paths and exchange defaults the
+``trade_lab.cli`` family reads at process startup. Distinct from
+``production_config.py``, which is the *strategy* parameter freeze
+(hash-pinned, never read from env).
+"""
 from __future__ import annotations
 
 import os
