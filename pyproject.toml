@@ -38,6 +38,10 @@ research = [
     # Pin minor version: sklearn ElasticNet/Ridge solver defaults drift,
     # and research runs must be reproducible.
     "scikit-learn>=1.5,<1.6",
+    # 2-state Gaussian HMM for regime-switching backtests. Pinned —
+    # convergence behaviour and init randomization change between
+    # minor versions and would invalidate replay.
+    "hmmlearn>=0.3,<0.4",
 ]
 
 [project.scripts]
