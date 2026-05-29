@@ -241,12 +241,22 @@ index.
 | XRP  | 2018-05-04 | 2018-05-04 | 0    | CLEAN |
 | DOGE | 2019-07-05 | 2019-07-05 | 0    | CLEAN |
 
-**Verdict A: CLEAN.** No pre-listing rows in any parquet. The first
-three lines are truncations (data starts later than the Binance
-listing, not earlier) and not contaminations from a third-party
-source. For this 7-asset universe `closes.notna()` is empirically
-equivalent to `tradable_at(date, meta)`, so the baseline DSR is not
-suspect on that axis.
+**Verdict A: CLEAN.** No pre-listing rows in any parquet.
+
+Important clarification on BTC/ETH/BNB (Δ +137 / +137 / +56 days):
+the parquet starts **later** than the Binance listing date, i.e. the
+backtest history is **truncated** (data drops the late-2017 listing
+window), not contaminated from a third-party source. Concretely, the
+backtest does not include the late-2017 mania (Aug–Dec 2017 for
+BTC/ETH; Nov–Dec 2017 for BNB). The baseline sample is therefore
+**conservative**, not polluted — a Δ > 0 days reduces what the
+strategy sees, never adds spurious rows. The "+137 days" line in the
+table reads ambiguously without this note; it should NOT be
+mis-read as "137 days of pre-listing data".
+
+For this 7-asset universe `closes.notna()` is empirically equivalent
+to `tradable_at(date, meta)`, so the baseline DSR is not suspect on
+the data-pollution axis.
 
 Structural caveat (does **not** affect this verdict but matters for
 Test 5): the equivalence is coincidental. The basket-index code still
@@ -287,8 +297,10 @@ Bybit reproduces Binance on every regime block tested.
 | 2022-01-21 → 2026-05-28 (venue-verified vs Bybit) | ~4.4 | +0.721 | +131% |
 | Full Binance (2018-01-01 → 2026-05-28) | ~8.4 | +1.377 | +13,221% |
 
-The Binance full-sample Sharpe 1.38 is roughly **2.5× the
-venue-verified post-2022 Sharpe**. The DSR-0.770 number that put this
+The Binance full-sample Sharpe 1.38 is roughly **1.9× the
+venue-verified post-2022 Sharpe** (1.377 / 0.721 = 1.91). The
+early-block alone (2018-2022, SR 1.86) is **2.6× the verified
+window** (1.857 / 0.721). The DSR-0.770 number that put this
 candidate into validation is dominated by the 2018-2022 sub-period,
 which **no independent venue can confirm at the public REST tier**:
 
