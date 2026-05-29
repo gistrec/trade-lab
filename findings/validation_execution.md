@@ -18,13 +18,22 @@ not a single PASS/FAIL.
   Post-ETF Δ ≈ −0.13 to −0.16. Adding +30 bps of marginal taker fee
   on a 24-flip/year strategy is a structural drag that does not
   selectively affect bull vs bear regimes.
-* **Kraken pre-ETF Sharpe is ~0.30-0.33** — below the project's own
-  DSR > 0.5 confidence floor. A multi-cycle Kraken deployment would
-  spend half its time in this regime.
+* **Kraken pre-ETF raw Sharpe is ~0.30-0.33** on a 2-year sub-sample.
+  This is raw sub-period Sharpe, **not** DSR — and the project's
+  DSR > 0.5 confidence floor is a *DSR* threshold. A real DSR on
+  this 2-year sample with the `PROJECT_NUM_TRIALS = 500` penalty
+  would land **lower** than 0.30 raw Sharpe, not higher. (DSR
+  computation is deferred to the final synthesis — see "What this
+  test does NOT settle".) The pre-ETF cell therefore reads as
+  *strongly below confidence-of-edge*, not as *near confidence*.
 * **Binance remains the deployable venue** at its existing testnet
-  paper trading. **Kraken is fee-fragile** at this strategy's flip
-  rate — not a refutation of the strategy, but a venue-deployability
-  veto under the current fee schedule.
+  paper trading. **Kraken is fee-fragile**: this is a risk-posture
+  call that **weights the bear sub-period more heavily** than the
+  bull (adverse regimes weigh more than favorable for go/no-go),
+  *not* a claim that the Kraken full-verified edge is statistically
+  zero (it is +0.58, above 0.5). A maker-priced or ≤0.20%-taker
+  fee tier would close most of the gap and warrants a separate
+  evaluation if it materializes.
 
 ## Methodology — what is being measured
 
@@ -161,12 +170,15 @@ firm fail territory.
   the venue-verified band, not the headline.
 * Already in paper trading on Binance testnet per project phase.
 
-### Kraken — **fee-fragile but positive**
+### Kraken — **fee-fragile (not advisable at current 0.40% taker)**
 
 * Verified net Sharpe **+0.56 to +0.59** across the cost-sensitivity
-  band — survives positive, but:
-  - Pre-ETF Sharpe **+0.30 to +0.33** — below DSR > 0.5 confidence
-    floor.
+  band — survives positive (above 0.5 raw), but:
+  - Pre-ETF raw Sharpe **+0.30 to +0.33** on the 2-year sub-sample.
+    This is raw Sharpe, not DSR; the DSR (with `N_TRIALS = 500`
+    penalty applied on a 2-year sample) would land **further below
+    confidence-of-edge**, not closer to it. See note at TL;DR for
+    the DSR-vs-raw-Sharpe distinction.
   - Marginal cost-drag **+540 to +671 bps/y** vs Binance, persistent
     across regimes.
   - The strategy's 24-flip/year cadence is the driver; a faster
@@ -175,10 +187,15 @@ firm fail territory.
   signal-fragile. The Binance↔Bybit 100% signal agreement (Test 1)
   is preserved here — the difference is solely in the
   cost-multiplier.
-* **Implication for Kraken deployment:** at the current 0.40% taker
-  schedule and 24-flip/year cadence, a real-money Kraken deployment
-  is not advisable. A Kraken maker-priced or lower-tier-fee
-  deployment (taker ≤ 0.20%) would close most of the gap and
+* **Decision framing — risk-posture, not "edge = zero".** Verified
+  Kraken Sharpe at 0.58 IS above 0.5; the "not advisable" call
+  comes from weighting the bear sub-period more heavily than the
+  bull for go/no-go purposes (adverse-regime weight > favorable for
+  paper-trading deployment decisions). A multi-cycle Kraken
+  deployment would spend roughly half its time at pre-ETF-like
+  Sharpe levels.
+* **Conditional re-entry path:** Kraken maker-priced or lower-tier
+  taker (≤ 0.20%) would close most of the marginal-tax gap and
   warrants a separate evaluation if and when it materializes.
 
 ## What this test does NOT settle
@@ -192,10 +209,13 @@ firm fail territory.
   validation prompt: MIN_NOTIONAL / LOT_SIZE / partial fills are
   confirmed-irrelevant at the project's $10k size budget; not
   modeled here.
-* **Does not retest pre-2022 cost-tax.** The full-sample numbers are
-  informative for sanity (the tax ratio compresses to Δ -0.08 on the
-  bull-dominated 2018-2026 window), but the deployment-relevant
-  decision is on the venue-verified post-2022 sample.
+* **Full-sample Kraken Sharpe is reported for completeness, not as a
+  go/no-go input.** The verified window is the dispositive cell;
+  the Kraken tax is regime-independent (Δ −0.13 to −0.14 across
+  every block tested), so the full-sample numbers can be inferred
+  from the verified-window result without re-running. Not recomputed
+  separately to keep the test focused on the deployment-relevant
+  sample.
 * **Does not re-run DSR.** DSR with `PROJECT_NUM_TRIALS = 500` is
   flagged for the final synthesis (`production_config_v1`) as a
   diagnostic on the **venue-verified** sample, not on the
