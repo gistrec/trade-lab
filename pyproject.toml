@@ -33,6 +33,12 @@ monitoring = [
     "streamlit-autorefresh>=1.0",
     "plotly>=5.18",
 ]
+research = [
+    # Cross-sectional ML proxies (CTREND, MVRV, regime switching).
+    # Pin minor version: sklearn ElasticNet/Ridge solver defaults drift,
+    # and research runs must be reproducible.
+    "scikit-learn>=1.5,<1.6",
+]
 
 [project.scripts]
 trade-lab = "trade_lab.cli:main"
