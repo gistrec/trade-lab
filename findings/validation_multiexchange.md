@@ -221,12 +221,113 @@ following the late BNB listing, not by venue-specific pricing.
   finding; the test verdict is about agreement, not about whether
   the strategy made money during this specific window.
 
+## Upstream check A — Binance parquet date hygiene
+
+Before running the cost-tax test, the basket's `closes.notna()` PIT
+proxy needs to be empirically equivalent to `tradable_at(date, meta)`
+on this 7-asset universe. If any binance parquet starts strictly
+**before** the registered Binance listing date, the synthetic index
+was contaminated in the early window — and the DSR-0.770 number that
+justified entering this validation phase was computed on a polluted
+index.
+
+| Asset | parquet min | Binance listing | Δ days | Status |
+|---|---|---|---:|---|
+| BTC  | 2018-01-01 | 2017-08-17 | +137 | CLEAN (truncated, not backfilled) |
+| ETH  | 2018-01-01 | 2017-08-17 | +137 | CLEAN |
+| BNB  | 2018-01-01 | 2017-11-06 | +56  | CLEAN |
+| SOL  | 2020-08-11 | 2020-08-11 | 0    | CLEAN |
+| ADA  | 2018-04-17 | 2018-04-17 | 0    | CLEAN |
+| XRP  | 2018-05-04 | 2018-05-04 | 0    | CLEAN |
+| DOGE | 2019-07-05 | 2019-07-05 | 0    | CLEAN |
+
+**Verdict A: CLEAN.** No pre-listing rows in any parquet. The first
+three lines are truncations (data starts later than the Binance
+listing, not earlier) and not contaminations from a third-party
+source. For this 7-asset universe `closes.notna()` is empirically
+equivalent to `tradable_at(date, meta)`, so the baseline DSR is not
+suspect on that axis.
+
+Structural caveat (does **not** affect this verdict but matters for
+Test 5): the equivalence is coincidental. The basket-index code still
+uses `closes.notna()` as its PIT proxy — if a future data refresh
+ever pulls SOL prices from CoinMetrics/CoinGecko (which start before
+the Binance listing) into a file named `binance_*`, the early index
+would silently re-pollute. Test 5 closes this structurally with an
+explicit `tradable_at` gate.
+
+## Upstream check B — Binance ↔ Bybit Sharpe on the FULL 2-way overlap
+
+The 520-bar 3-way analysis above was post-Kraken-warmup. The
+2-way (Binance + Bybit) overlap is more than three times longer
+(1589 bars, mid-2021 → today) and is the longest fully
+venue-independent comparison the public REST tier permits. On the
+SAME Binance fee/slippage assumption (apples-to-apples, no Kraken
+cost regime here — that's Test 2):
+
+| Block | Window | Bars | Binance SR | Bybit SR | Δ |
+|---|---|---:|---:|---:|---:|
+| **Full** | 2022-01-21 → 2026-05-28 | 1589 | **+0.721** | **+0.719** | +0.002 |
+| Pre-ETF | 2022-01-21 → 2024-01-10 | 720 | +0.459 | +0.459 | 0.000 |
+| Post-ETF | 2024-01-11 → 2026-05-28 | 869 | +0.902 | +0.899 | +0.003 |
+
+Total return numbers track identically (≤ 0.65 pp delta per block).
+
+**Verdict B: PASS.** On 4.4 years of independently-sourced prices the
+strategy issues effectively the same Sharpe and same equity curve.
+Bybit reproduces Binance on every regime block tested.
+
+## RISK FLAG — edge concentration in the venue-unverifiable era
+
+`net_SR` decomposition of the FROZEN config on Binance:
+
+| Window | Years | Net SR | Total return |
+|---|---:|---:|---:|
+| 2018-01-01 → 2022-01-20 (Bybit absent) | ~4.0 | **+1.857** | **+5,667%** |
+| 2022-01-21 → 2026-05-28 (venue-verified vs Bybit) | ~4.4 | +0.721 | +131% |
+| Full Binance (2018-01-01 → 2026-05-28) | ~8.4 | +1.377 | +13,221% |
+
+The Binance full-sample Sharpe 1.38 is roughly **2.5× the
+venue-verified post-2022 Sharpe**. The DSR-0.770 number that put this
+candidate into validation is dominated by the 2018-2022 sub-period,
+which **no independent venue can confirm at the public REST tier**:
+
+* Bybit spot trading did not exist before mid-2021.
+* Kraken's public REST API hard-caps at 720 daily candles and there
+  is no public path back to 2018.
+* Test 1 multi-exchange agreement is therefore a statement about
+  ~mid-2021 onwards, not about the period that contributed most of
+  the historical edge.
+
+This is **not** a refutation of the baseline. The 2018-2022 numbers
+are mathematically real on Binance and that is the venue the original
+study was run on. But it is a deployability risk that the validation
+phase must surface explicitly: deploying paper trading on the
+expectation of the full-sample Sharpe extrapolates from a period
+**larger than the venue-verified period in both years and weight of
+contribution**.
+
+How this lands in the final go/no-go (Tests 2/5 + harness):
+
+* Even if Test 2 (cost-tax) shows the venue-verified SR ≈ 0.72
+  survives Kraken's 4× fees, that becomes the *deployable* Sharpe
+  expectation, not 1.38.
+* Test 5 cannot patch this — it is about PIT mask correctness on
+  Binance's own data, not about cross-venue replication of pre-2022
+  results.
+* The paper-trading fingerprint in Test 4 should be calibrated
+  against the **venue-verified post-2022 distribution**, not the
+  full-sample distribution. Live behavior outside the post-2022 band
+  is what would falsify the strategy on forward data, because the
+  pre-2022 band is the part we cannot independently anchor.
+
 ## Project N_TRIALS bookkeeping
 
 Zero new trials added. This test runs the FROZEN config (hash
 `ac8919...`) — no parameter sweep, no optimization, no selection.
 Per the validation rules, confirmatory tests against a pre-registered
-config do not count against `PROJECT_NUM_TRIALS`.
+config do not count against `PROJECT_NUM_TRIALS`. Checks A and B are
+diagnostics against the same frozen config and do not add trials.
 
 ## Reproducing
 
