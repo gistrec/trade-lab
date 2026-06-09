@@ -29,6 +29,9 @@ module.exports = {
       autorestart: true,
       // Streamlit watches its own files; don't let pm2 also watch.
       watch: false,
+      // Streamlit + pandas/pyarrow sit ~230MB resident at rest; restart
+      // only if it grows well past that (guards against a slow leak).
+      max_memory_restart: "400M",
     },
   ],
 };
