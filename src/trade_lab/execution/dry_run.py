@@ -97,7 +97,9 @@ def run_dry_cycle(
                 ticker_prices[sym] = broker.fetch_ticker_price(f"{sym}/{quote}")
             except BrokerError as exc:
                 logger.warning("Ticker for %s failed: %s — using candle close.", sym, exc)
-                ticker_prices[sym] = snap.asset_closes.get(sym, 0.0)
+                # Direct indexing: a missing basket symbol must raise
+                # here, not become a 0.0 price inside the allocator.
+                ticker_prices[sym] = snap.asset_closes[sym]
 
         allocation = compute_target_allocation(
             signal=snap.signal,
@@ -116,7 +118,7 @@ def run_dry_cycle(
         )
 
         current_holdings_quote = {
-            sym: float(balance.asset_totals.get(sym, 0.0)) * ticker_prices.get(sym, 0.0)
+            sym: float(balance.asset_totals.get(sym, 0.0)) * ticker_prices[sym]
             for sym in broker.config.basket
         }
 

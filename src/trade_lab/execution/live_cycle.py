@@ -147,7 +147,7 @@ def run_live_cycle(
         )
         current_holdings_quote = {
             sym: float(balance.asset_totals.get(sym, 0.0))
-                 * ticker_prices.get(sym, 0.0)
+                 * ticker_prices[sym]
             for sym in broker.config.basket
         }
 
@@ -364,7 +364,10 @@ def _gather_ticker_prices(broker: Broker, snap: SignalSnapshot) -> dict[str, flo
             logger.warning(
                 "Ticker for %s failed: %s — using candle close.", sym, exc,
             )
-            ticker_prices[sym] = snap.asset_closes.get(sym, 0.0)
+            # Direct indexing: a basket symbol missing from the signal's
+            # closes is an invariant violation that must raise HERE, not
+            # surface as a 0.0 price deep inside the allocator.
+            ticker_prices[sym] = snap.asset_closes[sym]
     return ticker_prices
 
 

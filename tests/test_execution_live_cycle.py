@@ -586,3 +586,24 @@ def test_closed_partial_not_rereconstructed_next_cycle(tmp_path):
     )
     new_cycles = _read_cycles(tmp_path)[n_first:]
     assert all(c["outcome"] != "reconstructed" for c in new_cycles)
+
+
+def test_ticker_fallback_raises_on_missing_close():
+    """If a ticker fails AND the signal snapshot somehow lacks that
+    asset's close (invariant violation), the fallback must raise at the
+    cause — not feed a 0.0 price into the allocator."""
+    from trade_lab.execution.live_cycle import _gather_ticker_prices
+    from trade_lab.execution.signal import SignalSnapshot
+
+    class _NoTickerStub(_LiveStub):
+        def fetch_ticker(self, symbol):
+            return {}  # no last/close → BrokerError in fetch_ticker_price
+
+    broker = _broker(_NoTickerStub(basket=("BTC", "ETH")))
+    snap = SignalSnapshot(
+        asof=pd.Timestamp("2026-06-11", tz="UTC"), signal=1.0,
+        basket_close=150.0, asset_closes={"BTC": 50_000.0},  # ETH missing
+        sma_gate_open=True, n_assets_in_basket=2,
+    )
+    with pytest.raises(KeyError, match="ETH"):
+        _gather_ticker_prices(broker, snap)
