@@ -214,6 +214,12 @@ def _reconstruct_open_orders(
     or lost_track) for the reconstruction-cycle journal entry. Orders
     that the exchange still reports as open are left in state for the
     next cycle to retry — we do not block here waiting for them.
+
+    ``lost_track`` is journaled only on the *transition* into that
+    state. Entries already marked lost_track are still re-checked
+    against the exchange every cycle (recovery stays possible if the
+    record appears later), but a still-missing order is not the same
+    incident again — re-journaling it daily would bury real events.
     """
     open_entries = state.open_entries()
     if not open_entries:
@@ -224,6 +230,12 @@ def _reconstruct_open_orders(
         order = reconstruct_status(broker, coid, entry.symbol)
 
         if order is None:
+            if entry.status == "lost_track":
+                logger.info(
+                    "Order %s still lost_track — exchange has no record; "
+                    "will re-check next cycle.", coid,
+                )
+                continue
             logger.warning(
                 "LOST TRACK: order %s (intended %s %s %s) not found on "
                 "exchange. Marking lost_track for manual review.",

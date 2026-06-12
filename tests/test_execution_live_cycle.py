@@ -494,3 +494,62 @@ def test_journal_schema_v2_fields_present(tmp_path):
     assert cycle["schema_version"] == 2
     assert "orders_executed" in cycle
     assert isinstance(cycle["orders_executed"], list)
+
+
+def test_lost_track_not_rejournaled_every_cycle(tmp_path):
+    """An entry already marked lost_track and still missing from the
+    exchange must NOT produce a new reconstruction journal entry on
+    every subsequent cycle — only the transition into lost_track is an
+    incident. The exchange is still queried (recovery stays possible)."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="lost_track",
+        exchange_order_id="exch-vanished",
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-21T00:05:00+00:00",
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[coid] = [ccxt.OrderNotFound("still gone")]
+    stub.my_trades = []
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.reconstructed_count == 0
+    cycles = _read_cycles(tmp_path)
+    assert all(c["outcome"] != "reconstructed" for c in cycles)
+    assert state.get(coid).status == "lost_track"
+
+
+def test_lost_track_recovers_when_exchange_record_appears(tmp_path):
+    """If the exchange record shows up later (lag, restored history),
+    a lost_track entry transitions out normally and IS journaled."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="lost_track",
+        exchange_order_id=None,
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-21T00:05:00+00:00",
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[coid] = [_closed_order(coid, "BTC/USDT")]
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.reconstructed_count == 1
+    cycles = _read_cycles(tmp_path)
+    assert cycles[0]["outcome"] == "reconstructed"
+    assert state.get(coid).status == "closed"
