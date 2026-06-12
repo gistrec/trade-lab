@@ -125,6 +125,18 @@ def load_paper_config() -> PaperConfig:
             "explicitly to leave the testnet."
         )
 
+    # Kraken has no CCXT sandbox. Whether set_sandbox_mode crashes or
+    # is silently ignored is a CCXT implementation detail per version;
+    # a silently ignored sandbox flag would send live mainnet requests
+    # from a config that claims to be paper-safe. Refuse explicitly
+    # (CLAUDE.md hard rule).
+    if exchange_id == "kraken" and sandbox:
+        raise PaperConfigError(
+            "TRADE_LAB_PAPER_EXCHANGE=kraken with TRADE_LAB_PAPER_SANDBOX="
+            "true is invalid: Kraken has no CCXT sandbox, so the sandbox "
+            "flag cannot be honored. Use binance for testnet paper trading."
+        )
+
     return PaperConfig(
         exchange_id=exchange_id,
         sandbox=sandbox,

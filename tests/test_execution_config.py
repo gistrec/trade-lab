@@ -114,6 +114,23 @@ def test_mainnet_allowed_with_both_flags_true(monkeypatch):
     assert cfg.allow_mainnet is True
 
 
+def test_kraken_with_sandbox_true_raises(monkeypatch):
+    """Kraken has no CCXT sandbox — sandbox=true must refuse explicitly
+    (CLAUDE.md hard rule), never rely on CCXT to crash or ignore it."""
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_EXCHANGE": "kraken"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="[Kk]raken"):
+        load_paper_config()
+
+
+def test_kraken_case_insensitive_sandbox_raise(monkeypatch):
+    """Exchange id is lowercased before the guard — 'Kraken' counts."""
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_EXCHANGE": "Kraken"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="[Kk]raken"):
+        load_paper_config()
+
+
 def test_ambiguous_bool_raises(monkeypatch):
     env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_SANDBOX": "maybe"}
     _apply_env(monkeypatch, env)
