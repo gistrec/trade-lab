@@ -333,19 +333,36 @@ def _series_return(values: list, n_days_ago: int) -> str:
 
 
 def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
-    """Count cycles back to the most recent OPEN gate. None if never seen.
+    """Distinct signal *days* since the most recent OPEN gate.
 
-    Walks the journal newest-first across up to 500 cycles — enough for
-    a year of daily cron at hourly dry-run cadence without scanning the
-    whole file every refresh.
+    Counts dates (signal ``asof``), not cycles: with the hourly
+    dry-run sharing the journal, one closed day produces ~24 cycles
+    and a per-cycle count overstates by that factor. Cycles without a
+    signal (failed, reconstruction) say nothing about the gate and are
+    skipped. Walks newest-first across up to 500 cycles; returns None
+    if no OPEN gate is visible in that window.
     """
     cycles = reader.cycles(n=500)
-    days = 0
-    for c in reversed(cycles):
+    closed_dates: set = set()
+    for c in reversed(cycles):  # newest-first
         sig = c.get("signal") or {}
-        if sig.get("sma_gate_open") is True:
-            return days
-        days += 1
+        gate = sig.get("sma_gate_open")
+        if gate is None:
+            continue
+        asof = sig.get("asof")
+        date = None
+        if isinstance(asof, str):
+            try:
+                date = parse_iso(asof).date()
+            except ValueError:
+                date = None
+        if gate is True:
+            # An intraday flip means the same date sits on both sides;
+            # it has seen an OPEN gate, so don't count it as closed.
+            closed_dates.discard(date)
+            return len(closed_dates)
+        if date is not None:
+            closed_dates.add(date)
     return None
 
 

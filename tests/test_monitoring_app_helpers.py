@@ -127,3 +127,61 @@ def test_render_tab_safely_passes_through_on_success(monkeypatch):
 
     assert rendered == [True]
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Days since gate OPEN — counts distinct days, not cycles
+# ---------------------------------------------------------------------------
+
+
+class _FakeReader:
+    def __init__(self, cycles):
+        self._cycles = cycles
+
+    def cycles(self, n=20):
+        return self._cycles[-n:]
+
+
+def _sig_cycle(asof: str, gate_open: bool) -> dict:
+    return {"signal": {"asof": asof, "sma_gate_open": gate_open}}
+
+
+def test_days_since_gate_counts_days_not_cycles():
+    """With the hourly dry-run sharing the journal, one closed day is
+    ~24 cycles. The metric says 'Days' — it must dedupe by asof date."""
+    from trade_lab.monitoring.app import _days_since_gate_last_open
+
+    cycles = [_sig_cycle("2026-06-10T00:00:00+00:00", True)]
+    for hour in range(24):  # one full closed day of hourly dry-runs
+        cycles.append(_sig_cycle(f"2026-06-11T{hour:02d}:00:00+00:00", False))
+    assert _days_since_gate_last_open(_FakeReader(cycles)) == 1
+
+
+def test_days_since_gate_zero_when_latest_open():
+    from trade_lab.monitoring.app import _days_since_gate_last_open
+
+    cycles = [
+        _sig_cycle("2026-06-10T00:00:00+00:00", False),
+        _sig_cycle("2026-06-11T00:00:00+00:00", True),
+    ]
+    assert _days_since_gate_last_open(_FakeReader(cycles)) == 0
+
+
+def test_days_since_gate_none_when_never_open():
+    from trade_lab.monitoring.app import _days_since_gate_last_open
+
+    cycles = [_sig_cycle("2026-06-11T00:00:00+00:00", False)]
+    assert _days_since_gate_last_open(_FakeReader(cycles)) is None
+
+
+def test_days_since_gate_skips_cycles_without_signal():
+    """Failed and reconstruction cycles say nothing about the gate."""
+    from trade_lab.monitoring.app import _days_since_gate_last_open
+
+    cycles = [
+        _sig_cycle("2026-06-09T00:00:00+00:00", True),
+        {"signal": None, "outcome": "failed"},
+        {"outcome": "reconstructed"},
+        _sig_cycle("2026-06-11T00:00:00+00:00", False),
+    ]
+    assert _days_since_gate_last_open(_FakeReader(cycles)) == 1
