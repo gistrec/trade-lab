@@ -990,6 +990,12 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"({r.filled_notional_quote:.2f} {config.quote_currency})"
         )
 
+    if result.outcome != "success":
+        # Non-zero exit so cron/alerting catches stuck (unknown_orders)
+        # or partially-executed cycles; the journal entry has the detail.
+        # Exceptions inside run_live_cycle already propagate → exit 1.
+        raise SystemExit(2)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
