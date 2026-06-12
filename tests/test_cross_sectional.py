@@ -350,3 +350,16 @@ def test_align_closes_warns_on_skipped_and_stale_assets(caplog):
     assert "EMPTY/USDT" in messages          # skipped: no candles
     assert "DEAD/USDT" in messages           # stale: ffilled frozen price
     assert panel["DEAD/USDT"].iloc[-1] == 6  # behavior unchanged
+
+
+def test_max_drawdown_positive_magnitude_convention():
+    """Sign convention must match metrics.py/ensemble.py (positive
+    magnitude) — the old negative return value silently flipped any
+    cross-module comparison."""
+    import pandas as pd
+
+    from trade_lab.backtest.cross_sectional import _max_drawdown
+
+    equity = pd.Series([100.0, 120.0, 84.0, 130.0])  # -30% off the 120 peak
+    assert _max_drawdown(equity) == pytest.approx(0.30)
+    assert _max_drawdown(pd.Series(dtype=float)) == 0.0

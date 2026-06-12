@@ -501,11 +501,17 @@ def _rebalance(
 
 
 def _max_drawdown(equity: pd.Series) -> float:
+    """Maximum drawdown as a POSITIVE magnitude (0.35 = -35% dip).
+
+    Sign convention matches ``metrics.py`` and ``ensemble.py``; this
+    helper used to return a negative number, which silently flipped
+    any cross-module comparison or Calmar-style ratio mixing the two.
+    """
     if equity.empty:
         return 0.0
     running_max = equity.cummax()
     drawdown = equity / running_max - 1.0
-    return float(drawdown.min())
+    return float(abs(drawdown.min()))
 
 
 def _sharpe(returns: pd.Series, annualization_factor: int) -> float:
