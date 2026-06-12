@@ -915,8 +915,11 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
     print(f"  notional filled:   {result.filled_notional_quote:,.4f} "
           f"{config.quote_currency}")
     print(f"  avg price:         {result.average_price}")
-    print(f"  fees:              {result.fees_paid_quote:.4f} "
-          f"{config.quote_currency}")
+    fees = (
+        f"{result.fees_paid_quote:.4f} {config.quote_currency}"
+        if result.fees_paid_quote is not None else "not reported"
+    )
+    print(f"  fees:              {fees}")
     if result.error:
         print(f"  ERROR:             {result.error['type']}: "
               f"{result.error['message']}")

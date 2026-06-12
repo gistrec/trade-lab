@@ -69,10 +69,17 @@ class OrderResult:
     filled_amount: float
     filled_notional_quote: float
     average_price: Optional[float]
-    fees_paid_quote: float
+    fees_paid_quote: Optional[float]
+    # None = the exchange reported no fee info (Binance spot
+    # fetch_order never does — fees only surface via trades). 0.0 is
+    # reserved for "reported and actually zero".
     placed_at: str
     terminal_at: Optional[str]
     error: Optional[dict]
+    fees_reported: Optional[list] = None
+    # Verbatim [{cost, currency}, ...] as reported. A market BUY pays
+    # its fee in the BASE asset, which must not be summed into a
+    # quote-denominated number.
 
     def to_dict(self) -> dict:
         """JSON-serializable form for the journal."""
@@ -90,6 +97,7 @@ class OrderResult:
             "placed_at": self.placed_at,
             "terminal_at": self.terminal_at,
             "error": self.error,
+            "fees_reported": self.fees_reported,
         }
 
 
@@ -305,6 +313,41 @@ def reconstruct_status(
     }
 
 
+def fees_from_order(order: dict, quote_currency: str) -> tuple[Optional[float], Optional[list]]:
+    """Extract reported fees from a ccxt order dict.
+
+    Returns ``(fees_paid_quote, fees_reported)``:
+
+    * ``fees_reported`` — verbatim ``[{cost, currency}, ...]``, or
+      ``None`` when the exchange reported nothing. Binance spot
+      ``fetch_order`` reports no fee at all; fee info only arrives via
+      trade-based reconstruction.
+    * ``fees_paid_quote`` — sum of the entries denominated in
+      ``quote_currency``, or ``None`` when nothing was reported.
+      0.0 means "reported and zero", never "unknown". A market BUY's
+      fee is charged in the BASE asset and stays out of this sum —
+      it is visible in ``fees_reported``.
+
+    ccxt populates ``fees`` (list) from ``fee`` (dict) when both exist,
+    so the list is preferred to avoid double counting.
+    """
+    raw = order.get("fees")
+    if not raw:
+        fee = order.get("fee")
+        raw = [fee] if isinstance(fee, dict) else []
+    reported = [
+        {"cost": float(f["cost"]), "currency": f.get("currency")}
+        for f in raw
+        if isinstance(f, dict) and f.get("cost") is not None
+    ]
+    if not reported:
+        return None, None
+    quote_sum = sum(
+        f["cost"] for f in reported if f["currency"] == quote_currency
+    )
+    return float(quote_sum), reported
+
+
 def sort_orders_for_placement(intents: list[OrderIntent]) -> list[OrderIntent]:
     """Sells first, buys second.
 
@@ -369,8 +412,8 @@ def _result_from_order(
     filled = float(order.get("filled") or 0.0)
     cost = float(order.get("cost") or 0.0)
     avg_price_raw = order.get("average")
-    fee = order.get("fee") or {}
-    fee_cost = float(fee.get("cost") or 0.0)
+    quote = intent.symbol.split("/")[1]
+    fees_quote, fees_reported = fees_from_order(order, quote)
     exchange_id = order.get("id")
 
     intended = float(intent.base_amount)
@@ -397,10 +440,11 @@ def _result_from_order(
         filled_amount=filled,
         filled_notional_quote=cost,
         average_price=float(avg_price_raw) if avg_price_raw is not None else None,
-        fees_paid_quote=fee_cost,
+        fees_paid_quote=fees_quote,
         placed_at=placed_at,
         terminal_at=terminal_at,
         error=None,
+        fees_reported=fees_reported,
     )
 
 
@@ -421,7 +465,7 @@ def _result_from_cached(cached: OrderStateEntry) -> OrderResult:
         filled_amount=0.0,
         filled_notional_quote=0.0,
         average_price=None,
-        fees_paid_quote=0.0,
+        fees_paid_quote=None,
         placed_at=cached.placed_at,
         terminal_at=cached.last_seen_at,
         error=None,

@@ -557,3 +557,57 @@ def test_state_persisted_after_rejection(tmp_path):
     entry = store.get(coid)
     assert entry is not None
     assert entry.status == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# Fee extraction semantics
+# ---------------------------------------------------------------------------
+
+
+def test_fees_none_when_exchange_reports_nothing():
+    """Binance spot fetch_order carries no fee info. 0.0 would claim
+    'zero fees paid'; None says 'not reported'."""
+    from trade_lab.execution.orders import fees_from_order
+
+    quote_sum, reported = fees_from_order(
+        {"id": "1", "status": "closed", "filled": 1.0, "fee": None}, "USDT",
+    )
+    assert quote_sum is None
+    assert reported is None
+
+
+def test_fees_quote_currency_summed():
+    from trade_lab.execution.orders import fees_from_order
+
+    quote_sum, reported = fees_from_order(
+        {"fee": {"cost": 0.05, "currency": "USDT"}}, "USDT",
+    )
+    assert quote_sum == pytest.approx(0.05)
+    assert reported == [{"cost": 0.05, "currency": "USDT"}]
+
+
+def test_fees_base_currency_not_summed_into_quote():
+    """A market BUY pays its fee in BASE units — shoving 0.00001 BTC
+    into a USDT-denominated field corrupts the audit. It must stay
+    visible verbatim instead."""
+    from trade_lab.execution.orders import fees_from_order
+
+    quote_sum, reported = fees_from_order(
+        {"fee": {"cost": 0.00001, "currency": "BTC"}}, "USDT",
+    )
+    assert quote_sum == 0.0
+    assert reported == [{"cost": 0.00001, "currency": "BTC"}]
+
+
+def test_fees_list_preferred_over_fee_to_avoid_double_count():
+    """ccxt mirrors fee into fees; counting both doubles the number."""
+    from trade_lab.execution.orders import fees_from_order
+
+    quote_sum, _ = fees_from_order(
+        {
+            "fee": {"cost": 0.05, "currency": "USDT"},
+            "fees": [{"cost": 0.05, "currency": "USDT"}],
+        },
+        "USDT",
+    )
+    assert quote_sum == pytest.approx(0.05)

@@ -52,6 +52,7 @@ from .order_state import OrderStateEntry, OrderStateStore, utcnow_iso
 from .orders import (
     TOTAL_TIMEOUT_S,
     OrderResult,
+    fees_from_order,
     place_order,
     reconstruct_status,
     sort_orders_for_placement,
@@ -255,7 +256,7 @@ def _reconstruct_open_orders(
                 "filled_amount": 0.0,
                 "filled_notional_quote": 0.0,
                 "average_price": None,
-                "fees_paid_quote": 0.0,
+                "fees_paid_quote": None,
                 "placed_at": entry.placed_at,
                 "terminal_at": utcnow_iso(),
                 "error": {
@@ -271,7 +272,8 @@ def _reconstruct_open_orders(
         filled = float(order.get("filled") or 0.0)
         cost = float(order.get("cost") or 0.0)
         avg = order.get("average")
-        fee_cost = float((order.get("fee") or {}).get("cost") or 0.0)
+        quote = entry.symbol.split("/")[1] if "/" in entry.symbol else ""
+        fees_quote, fees_reported = fees_from_order(order, quote)
         exchange_id = order.get("id")
 
         if status_str == "closed":
@@ -307,10 +309,11 @@ def _reconstruct_open_orders(
             "filled_amount": filled,
             "filled_notional_quote": cost,
             "average_price": float(avg) if avg is not None else None,
-            "fees_paid_quote": fee_cost,
+            "fees_paid_quote": fees_quote,
             "placed_at": entry.placed_at,
             "terminal_at": utcnow_iso(),
             "error": None,
+            "fees_reported": fees_reported,
         })
 
     return resolved
