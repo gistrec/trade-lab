@@ -221,9 +221,11 @@ What it does:
 5. Writes one Cycle entry (schema v2) with `outcome` ∈ {success,
    partial, unknown_orders, failed} and `orders_executed` populated.
 
-Refuses to start when SANDBOX=false unless ALLOW_MAINNET=true is
-also set (CLAUDE.md two-flag gate). Even when both flags pass,
-prints a loud last-chance warning before connecting.
+Hard-refuses to start when SANDBOX=false — even when
+ALLOW_MAINNET=true is also set. The two-flag gate (CLAUDE.md) only
+permits *connecting* to mainnet for read paths; production order
+placement on mainnet requires a dedicated code path and review and
+is refused unconditionally.
 
 ### Daily cron
 

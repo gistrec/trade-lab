@@ -938,10 +938,12 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
 def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     """Production daily cycle: reconstruct, plan, place real orders, journal.
 
-    Refuses to start at the config level if mainnet is not explicitly
-    enabled. When mainnet IS enabled, prints a loud last-chance warning
-    before the broker is even constructed — the operator can still
-    Ctrl-C.
+    Hard-refuses to run when ``sandbox=false`` — even with
+    ``TRADE_LAB_PAPER_ALLOW_MAINNET=true``. Mainnet migration is a
+    deliberate engineering step (Kraken account, market-constraint
+    validation, dedicated review — see CLAUDE.md), not a flag flip;
+    this command runs under cron where a printed warning protects
+    nobody.
     """
     from .execution import (
         Broker, BrokerError, JournalWriter, load_paper_config,
@@ -953,14 +955,13 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
 
-    if not config.sandbox and config.allow_mainnet:
-        print()
-        print("=" * 60)
-        print("WARNING: about to place REAL ORDERS on MAINNET")
-        print(f"  Exchange: {config.exchange_id}")
-        print("  This is your last chance to abort with Ctrl-C.")
-        print("=" * 60)
-        print()
+    if not config.sandbox:
+        raise SystemExit(
+            "REFUSED: paper-place-orders does not support mainnet order "
+            "placement, even with TRADE_LAB_PAPER_ALLOW_MAINNET=true. "
+            "Mainnet migration requires a dedicated code path and review "
+            "(see CLAUDE.md). Set TRADE_LAB_PAPER_SANDBOX=true."
+        )
 
     try:
         broker = Broker.connect(config)
