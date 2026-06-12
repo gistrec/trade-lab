@@ -1,7 +1,9 @@
 """Configuration for the paper-trading / live execution layer.
 
-All values come from environment variables (with ``.env`` support via
-``python-dotenv`` — the same mechanism the backtest config uses).
+All values come from environment variables. ``.env`` support lives at
+the CLI entrypoint (``trade_lab.cli.main``), NOT at module import:
+importing this module from a credential-free process (monitoring)
+must not pull API keys from ``.env`` into its environment.
 
 **No secrets in code. Ever.** The :class:`PaperConfig` dataclass holds
 API key + secret as Python strings only after the runtime has read
@@ -13,12 +15,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from typing import Tuple
-
-from dotenv import load_dotenv
-
-
-# Loaded once at import time — same convention as `trade_lab.config`.
-load_dotenv()
 
 
 class PaperConfigError(RuntimeError):

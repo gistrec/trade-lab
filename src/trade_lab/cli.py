@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from .backtest.engine import run_backtest
 from .backtest.metrics import benchmark_verdict, compute_metrics
@@ -1321,6 +1322,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # .env support lives here, at the process entrypoint — importing
+    # trade_lab.* modules (e.g. from the credential-free monitoring
+    # dashboard) must never pull API keys into the process env.
+    load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)

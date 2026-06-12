@@ -185,3 +185,37 @@ def test_repr_masks_api_key_and_secret(monkeypatch):
     assert "2345" in r
     # Secret is fully masked.
     assert "api_secret='***'" in r
+
+
+# ---------------------------------------------------------------------------
+# Credential isolation: importing config modules must not load .env
+# ---------------------------------------------------------------------------
+
+
+def test_importing_config_modules_does_not_inject_env():
+    """The monitoring dashboard imports trade_lab.config (and research
+    modules import this package); a module-level load_dotenv() used to
+    pull API keys from .env into any importing process. .env loading
+    now happens only in the CLI entrypoint. Trivially green on machines
+    without a .env; the regression shows up wherever one exists."""
+    import subprocess
+    import sys
+
+    code = (
+        "import os; before = set(os.environ); "
+        "import trade_lab.config, trade_lab.execution.config; "
+        "leaked = [k for k in set(os.environ) - before "
+        "if k.startswith('TRADE_LAB')]; "
+        "print(','.join(sorted(leaked)))"
+    )
+    clean_env = {
+        k: v for k, v in os.environ.items() if not k.startswith("TRADE_LAB")
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, env=clean_env, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "", (
+        f"importing config modules injected env vars: {out.stdout.strip()}"
+    )
