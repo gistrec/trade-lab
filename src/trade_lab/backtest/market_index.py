@@ -72,6 +72,27 @@ def build_crypto_market_index(
     if closes.empty:
         return _empty_index()
 
+    # Fail loud on data gaps. Leading NaN = asset not yet listed
+    # (dynamic universe entry, by design). NaN *after* an asset's first
+    # valid close — an interior gap, or a series that ends before the
+    # others — would silently shrink N_active, force an unscheduled
+    # rebalance, re-grant the first-active cost credit on reappearance,
+    # and zero the price move across the gap. Hard rule: missing
+    # candles raise, the basket never shrinks silently.
+    seen = closes.notna().cummax()
+    gaps = closes.isna() & seen
+    if gaps.to_numpy().any():
+        details = []
+        for col in closes.columns[gaps.any(axis=0)]:
+            ts = closes.index[gaps[col]]
+            details.append(
+                f"{col}: {len(ts)} missing bar(s) between {ts[0]} and {ts[-1]}"
+            )
+        raise ValueError(
+            "Missing candles after listing — refusing to build the index "
+            "on a silently shrunken basket: " + "; ".join(details)
+        )
+
     asset_returns = closes.pct_change()
     active_panel = closes.notna()
     n_active = active_panel.sum(axis=1)

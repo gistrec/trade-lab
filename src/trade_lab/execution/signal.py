@@ -112,11 +112,16 @@ def compute_live_signal(
             )
         asset_candles[sym] = df
 
-    basket = build_crypto_market_index(
-        asset_candles,
-        fee_rate=fee_rate,
-        slippage_rate=slippage_rate,
-    )
+    try:
+        basket = build_crypto_market_index(
+            asset_candles,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+        )
+    except ValueError as exc:
+        # Data gaps (missing candles after listing) — same category as
+        # a failed fetch: the basket is not whole, refuse loudly.
+        raise SignalComputationError(str(exc)) from exc
     if basket.empty:
         raise SignalComputationError("Basket construction returned empty frame.")
 

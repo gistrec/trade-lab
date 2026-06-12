@@ -74,10 +74,12 @@ def test_new_asset_listing_triggers_rebalance_cost():
     """A second asset listing mid-window forces a rebalance event
     even off the monthly schedule — confirmed by a non-zero cost
     impact at the listing bar relative to a zero-cost run."""
-    # Asset A: 100 bars from 2020-01-01.
+    # Asset A: 100 bars from 2020-01-01 (ends 2020-04-09).
     a = np.linspace(100, 200, 100).tolist()
-    # Asset B: 50 bars from 2020-02-15 (mid-window listing).
-    b = np.linspace(100, 110, 50).tolist()
+    # Asset B: lists mid-window on 2020-02-15 and runs through the end
+    # of A's window (55 bars to 2020-04-09) — ending earlier would be a
+    # trailing data gap, which now correctly raises.
+    b = np.linspace(100, 110, 55).tolist()
     a_df = _candles(a)
     b_df = _candles(b, start="2020-02-15")
     candles = {"A/USDT": a_df, "B/USDT": b_df}
@@ -113,3 +115,45 @@ def test_index_format_ohlcv_compatible_with_strategies():
     assert (idx["open"] == idx["close"]).all()
     assert (idx["high"] == idx["close"]).all()
     assert (idx["low"] == idx["close"]).all()
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud on data gaps (hard rule: the basket never shrinks silently)
+# ---------------------------------------------------------------------------
+
+
+def test_interior_nan_gap_raises():
+    """A missing candle after an asset's first valid close must raise —
+    silently treating it as 'not active' shrinks the basket, forces an
+    unscheduled rebalance, and zeroes the price move across the gap."""
+    a = np.linspace(100, 200, 100)
+    b = np.linspace(50, 80, 100).astype(float)
+    b[40:43] = np.nan
+    candles = {"BTC/USDT": _candles(a.tolist()), "ETH/USDT": _candles(b.tolist())}
+    with pytest.raises(ValueError, match="ETH/USDT.*3 missing bar"):
+        build_crypto_market_index(candles)
+
+
+def test_trailing_mismatch_raises():
+    """One asset's series ending before the others (stale or partial
+    fetch) must raise — the last bars are exactly where the live signal
+    reads the index."""
+    a = np.linspace(100, 200, 100).tolist()
+    b = np.linspace(50, 80, 98).tolist()  # ends 2 bars early
+    candles = {"BTC/USDT": _candles(a), "ETH/USDT": _candles(b)}
+    with pytest.raises(ValueError, match="ETH/USDT.*2 missing bar"):
+        build_crypto_market_index(candles)
+
+
+def test_leading_nan_late_listing_still_allowed():
+    """Pre-listing leading NaN is the designed dynamic-universe entry
+    path and must NOT raise."""
+    a = np.linspace(100, 200, 100).tolist()
+    b = np.linspace(50, 80, 60).tolist()  # lists 40 bars later
+    candles = {
+        "BTC/USDT": _candles(a),
+        "ETH/USDT": _candles(b, start="2020-02-10"),
+    }
+    idx = build_crypto_market_index(candles)
+    assert len(idx) == 100
+    assert (idx["close"] > 0).all()
