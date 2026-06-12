@@ -95,6 +95,13 @@ def compute_live_signal(
     fetch = fetch_candles or _fetch_recent_candles
     asset_candles: dict[str, pd.DataFrame] = {}
     quote = broker.config.quote_currency
+    # Exchanges return the currently-forming daily candle as the last
+    # row (open timestamp = today's UTC midnight). The backtest decides
+    # on the *completed* close of day t and trades on t+1
+    # (signals.shift(1) in the engine); including the partial bar
+    # shifts every lookback window by one bar and lets intraday noise
+    # into the SMA gate. Drop it.
+    cutoff = pd.Timestamp.now(tz="UTC").normalize()
     for sym in broker.config.basket:
         pair = f"{sym}/{quote}"
         try:
@@ -106,6 +113,7 @@ def compute_live_signal(
             raise SignalComputationError(
                 f"Could not fetch candles for {pair}: {exc}"
             ) from exc
+        df = df[df.index < cutoff]
         if df.empty:
             raise SignalComputationError(
                 f"Empty candles returned for {pair}."

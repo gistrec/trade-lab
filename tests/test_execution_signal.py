@@ -158,3 +158,42 @@ def test_signal_empty_candles_raises():
     broker = Broker(_config(), _ExchangeStub())
     with pytest.raises(SignalComputationError, match="Empty candles"):
         compute_live_signal(broker, fetch_candles=empty_fetch)
+
+
+# ---------------------------------------------------------------------------
+# In-progress candle exclusion (backtest replication)
+# ---------------------------------------------------------------------------
+
+
+def _ohlcv_ending_today(closes):
+    """Frame whose last bar opens at the current UTC midnight — i.e.
+    the in-progress daily candle a live fetch_ohlcv returns."""
+    end = pd.Timestamp.now(tz="UTC").normalize()
+    idx = pd.date_range(end=end, periods=len(closes), freq="1D", tz="UTC")
+    return pd.DataFrame(
+        {"open": closes, "high": closes, "low": closes, "close": closes,
+         "volume": 1.0},
+        index=idx,
+    )
+
+
+def test_in_progress_candle_is_excluded_from_signal():
+    """The backtest decides on the completed close of day t
+    (signals.shift(1)); the live cron fires minutes after UTC midnight
+    while day t+1's candle is still forming. That partial bar must not
+    enter the signal: here a fake intraday -50% crash on the forming
+    bar would flip the ladder to 0 if included."""
+    n = 320
+    up = (100 + np.linspace(0, 200, n - 1)).tolist()
+    closes = up + [up[-1] * 0.5]   # last bar = today's partial crash
+    fetch = lambda broker, pair, limit: _ohlcv_ending_today(closes).iloc[-limit:]
+    broker = Broker(_config(), _ExchangeStub())
+
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+
+    yesterday = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1)
+    assert pd.Timestamp(snap.asof) == yesterday
+    assert snap.signal == 1.0          # crash bar ignored
+    assert snap.basket_close == pytest.approx(
+        100.0 * (up[-1] / up[0]), rel=1e-6
+    )
