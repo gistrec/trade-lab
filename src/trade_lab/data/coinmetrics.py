@@ -117,7 +117,9 @@ def fetch_asset_metrics(
     # carrying both), the second rename would create duplicate columns —
     # collapse them by taking the first non-NaN.
     if df.columns.duplicated().any():
-        df = df.groupby(df.columns, axis=1).first()
+        # groupby(axis=1) was removed in pandas 3.0; transpose-groupby
+        # is the portable spelling of "first non-NaN per column name".
+        df = df.T.groupby(level=0).first().T
     # Keep only the three expected columns where present.
     keep = [c for c in ("price", "market_cap", "volume_usd") if c in df.columns]
     df = df[keep].sort_index()

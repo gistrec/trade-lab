@@ -72,14 +72,16 @@ def fetch_ohlcv(
             break
         rows.extend(batch)
         last_ts = batch[-1][0]
-        # Stop when the page didn't advance, when we passed ``until``, or when
-        # the exchange returned a short page (no more data).
+        # Stop when the page didn't advance or when we passed ``until``.
+        # A short page is NOT a stop condition: exchanges cap the page
+        # size server-side, so every page can be shorter than ``limit``
+        # — breaking on it silently truncated history to one page. End
+        # of data shows up as an empty next page instead (one extra
+        # request, never missing candles).
         if since_ms is not None and last_ts <= since_ms:
             break
         since_ms = last_ts + 1
         if until_ms is not None and last_ts >= until_ms:
-            break
-        if len(batch) < limit:
             break
         time.sleep(getattr(exchange, "rateLimit", 1000) / 1000.0)
 
