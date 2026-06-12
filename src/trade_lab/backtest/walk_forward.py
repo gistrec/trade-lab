@@ -1,13 +1,25 @@
-"""Walk-forward validation for SMA strategies.
+"""Walk-forward validation for SMA strategies (LEGACY — biased, see below).
 
 Splits a candles DataFrame into rolling train / test windows, runs a
 parameter sweep on each train slice, picks the best parameters from
 *train only*, and evaluates that exact pair on the immediately following
 test slice. This gives a much more honest picture of generalization than
 optimizing on the full window.
+
+.. warning::
+   **Known bias — superseded by** :mod:`walk_forward_v2`. Both runners
+   here evaluate train and test slices *cold*, with no indicator warmup
+   fed from before the slice. A picked SMA(200) variant sits forcibly
+   flat for ~200 of 365 test bars (measured: 199/365) while the
+   buy-and-hold benchmark spans the full slice, so ``test_return_pct``
+   and ``test_verdict`` systematically understate the strategy.
+   ``walk_forward_v2`` feeds warmup to both train and test evaluation;
+   use it for any new result. Numbers produced by this module remain
+   reproducible as history but must not be quoted as evidence.
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
@@ -25,6 +37,18 @@ from .sweep import run_regime_sma_sweep, run_sma_sweep
 OBJECTIVE_TOTAL_RETURN = "total_return"
 OBJECTIVE_RETURN_DIV_DRAWDOWN = "return_div_drawdown"
 _VALID_OBJECTIVES = (OBJECTIVE_TOTAL_RETURN, OBJECTIVE_RETURN_DIV_DRAWDOWN)
+
+_NO_WARMUP_WARNING = (
+    "walk_forward (v1) evaluates train/test slices cold — an SMA(200) "
+    "pick is forcibly flat for ~200 bars of each test year, biasing "
+    "test_return_pct and test_verdict downward vs the full-slice "
+    "buy-and-hold benchmark. Use walk_forward_v2 (warmup-fed) for any "
+    "new result; v1 numbers are reproducible history, not evidence."
+)
+
+
+def _warn_no_warmup() -> None:
+    warnings.warn(_NO_WARMUP_WARNING, UserWarning, stacklevel=3)
 
 
 MULTI_WALK_FORWARD_COLUMNS = [
@@ -141,7 +165,11 @@ def run_sma_walk_forward(
     The function never sees train and test mixed: parameter selection
     only touches train candles, and the test backtest only touches test
     candles. The full-history sweep is therefore *not* run.
+
+    .. warning:: No warmup feeding — see the module docstring; prefer
+       :mod:`walk_forward_v2`.
     """
+    _warn_no_warmup()
     fast_periods = list(fast_periods)
     slow_periods = list(slow_periods)
     windows = generate_windows(
@@ -258,11 +286,15 @@ def run_multi_walk_forward(
 
     Returns one row per window. The chosen strategy is recorded so a
     later analysis can see which family generalized best in each regime.
+
+    .. warning:: No warmup feeding — see the module docstring; prefer
+       :mod:`walk_forward_v2`.
     """
     if objective not in _VALID_OBJECTIVES:
         raise ValueError(
             f"objective must be one of {_VALID_OBJECTIVES}, got {objective!r}"
         )
+    _warn_no_warmup()
 
     fast_periods = list(fast_periods)
     slow_periods = list(slow_periods)

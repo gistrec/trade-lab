@@ -400,3 +400,26 @@ def test_walk_forward_csv_round_trips(tmp_path):
     loaded = pd.read_csv(out)
     assert list(loaded.columns) == WALK_FORWARD_COLUMNS
     assert len(loaded) == len(df)
+
+
+# ---------------------------------------------------------------------------
+# Legacy-bias warning (no warmup feeding — superseded by walk_forward_v2)
+# ---------------------------------------------------------------------------
+
+
+def test_v1_runners_warn_about_missing_warmup():
+    """v1 evaluates slices cold: an SMA(200) pick is forcibly flat for
+    ~200 of 365 test bars while the benchmark spans the full slice.
+    Anyone still calling v1 must see the bias warning."""
+    from trade_lab.backtest.walk_forward import run_multi_walk_forward
+
+    candles = _daily_candles("2018-01-01", 365 * 4 + 1)
+    with pytest.warns(UserWarning, match="walk_forward_v2"):
+        run_sma_walk_forward(
+            candles, fast_periods=[5], slow_periods=[20],
+        )
+    with pytest.warns(UserWarning, match="walk_forward_v2"):
+        run_multi_walk_forward(
+            candles, fast_periods=[5], slow_periods=[20],
+            strategies=("sma_cross",),
+        )
