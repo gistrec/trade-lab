@@ -89,3 +89,41 @@ def test_iso_unchanged_by_helpers():
     caption (not displaced by the relative form)."""
     iso = "2026-05-29T09:30:15+00:00"
     assert _humanize_iso(iso) == "2026-05-29 09:30:15 UTC"
+
+
+# ---------------------------------------------------------------------------
+# Tab failure containment
+# ---------------------------------------------------------------------------
+
+
+def test_render_tab_safely_contains_exception(monkeypatch):
+    """A tab whose renderer raises (ImportError on a renamed research
+    module, TypeError from a schema-drifted journal row) must surface
+    a visible error instead of killing the whole Streamlit run."""
+    import trade_lab.monitoring.app as app
+
+    errors: list[str] = []
+    monkeypatch.setattr(app.st, "error", lambda msg: errors.append(msg))
+    monkeypatch.setattr(app.st, "caption", lambda msg: None)
+
+    def broken_tab():
+        raise TypeError("unexpected keyword argument 'new_field_from_v2'")
+
+    app._render_tab_safely("Validation", broken_tab)  # must not raise
+
+    assert len(errors) == 1
+    assert "Validation" in errors[0]
+    assert "TypeError" in errors[0]
+
+
+def test_render_tab_safely_passes_through_on_success(monkeypatch):
+    import trade_lab.monitoring.app as app
+
+    errors: list[str] = []
+    monkeypatch.setattr(app.st, "error", lambda msg: errors.append(msg))
+    rendered = []
+
+    app._render_tab_safely("Status", lambda: rendered.append(True))
+
+    assert rendered == [True]
+    assert errors == []

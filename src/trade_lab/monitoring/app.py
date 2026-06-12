@@ -578,9 +578,12 @@ def _render_validation() -> None:
     without exchange credentials, so the API-separation rationale that
     prevents the regular tabs from importing ``trade_lab.execution``
     does not apply here.
+
+    Research-side modules and the harness journal drift faster than
+    this dashboard; any failure here (ImportError on a renamed module,
+    TypeError from a schema-drifted journal row) is contained to this
+    tab by ``_render_tab_safely`` in :func:`main`.
     """
-    # Lazy import to keep the regular tabs loading even if these
-    # modules are renamed during research.
     from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG, production_config_hash
     from trade_lab.paper_trading.fingerprint_monitor import (
         check_journal_against_reference,
@@ -773,6 +776,26 @@ def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _render_tab_safely(tab_name: str, render_fn) -> None:
+    """Contain a tab's failure to that tab.
+
+    Streamlit aborts the whole script run on an uncaught exception, so
+    a single drifted research-side module or journal row would
+    otherwise blank every tab at once. The error stays loud — rendered
+    red inside the failing tab — without taking down the safety
+    banner and the other tabs.
+    """
+    try:
+        render_fn()
+    except Exception as exc:
+        st.error(f"{tab_name} tab failed: {type(exc).__name__}: {exc}")
+        st.caption(
+            "Other tabs are unaffected. The tab will render again on "
+            "the next auto-refresh once the underlying data or module "
+            "is fixed."
+        )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="trade-lab monitoring",
@@ -799,15 +822,15 @@ def main() -> None:
         ["Status", "Signal", "Portfolio", "Cycles", "Validation"]
     )
     with tab_status:
-        _render_status(reader)
+        _render_tab_safely("Status", lambda: _render_status(reader))
     with tab_signal:
-        _render_signal(reader)
+        _render_tab_safely("Signal", lambda: _render_signal(reader))
     with tab_portfolio:
-        _render_portfolio(reader)
+        _render_tab_safely("Portfolio", lambda: _render_portfolio(reader))
     with tab_cycles:
-        _render_cycles(reader)
+        _render_tab_safely("Cycles", lambda: _render_cycles(reader))
     with tab_validation:
-        _render_validation()
+        _render_tab_safely("Validation", _render_validation)
 
 
 if __name__ == "__main__":
