@@ -411,21 +411,18 @@ class Broker:
         Uses the snapshot's quote balance plus a live ticker call for
         each non-zero asset. Cheap enough to run every cycle on a
         7-asset basket; for larger universes consider batching.
+
+        A ticker failure propagates (``BrokerError`` / ccxt error) —
+        marking a held position at zero would understate equity and
+        shrink every target downstream, turning one missing price into
+        spurious sells across the whole basket. Hard rule: missing
+        prices raise; the cycle fails loud and is journaled as failed.
         """
         snap = snapshot if snapshot is not None else self.fetch_balance_snapshot()
         equity = snap.quote_total
         for sym, total in snap.asset_totals.items():
             if total <= 0.0:
                 continue
-            try:
-                price = self.fetch_ticker_price(f"{sym}/{snap.quote_currency}")
-            except Exception as exc:
-                # If a single ticker fails, mark the position at zero
-                # rather than blowing up the equity number. Log loudly.
-                logger.warning(
-                    "Could not mark %s for equity calc: %s — counting as 0",
-                    sym, exc,
-                )
-                continue
+            price = self.fetch_ticker_price(f"{sym}/{snap.quote_currency}")
             equity += total * price
         return equity

@@ -244,16 +244,16 @@ def test_estimate_total_equity_marks_assets_to_market():
     assert equity == pytest.approx(1050.0 + 5000.0)
 
 
-def test_estimate_total_equity_skips_failing_ticker_with_warning(caplog):
+def test_estimate_total_equity_raises_on_failing_ticker():
+    """A held position that cannot be marked must raise, not count as
+    zero — understated equity shrinks every target and turns one
+    missing price into spurious sells across the whole basket."""
     exch = _MockExchange()
-    # Remove the BTC ticker so its mark fails.
-    del exch.tickers["BTC/USDT"]
+    # Empty the BTC ticker so its mark fails (BTC total is non-zero).
+    exch.tickers["BTC/USDT"] = {}
     broker = Broker(_config(), exch)
-    with caplog.at_level("WARNING"):
-        equity = broker.estimate_total_equity_usd()
-    # USDT 1050 only — BTC contribution dropped due to ticker failure.
-    assert equity == pytest.approx(1050.0)
-    assert any("BTC" in r.message for r in caplog.records)
+    with pytest.raises(BrokerError, match="no last/close"):
+        broker.estimate_total_equity_usd()
 
 
 def test_fetch_market_constraints_normalizes_limits():
