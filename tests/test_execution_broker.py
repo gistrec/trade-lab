@@ -301,3 +301,42 @@ def test_estimate_total_equity_accepts_explicit_snapshot():
     equity = broker.estimate_total_equity_usd(snapshot=snap)
     # We computed from the OLD snapshot, not the new exchange state.
     assert equity == pytest.approx(1050.0 + 5000.0)
+
+
+# ---------------------------------------------------------------------------
+# Precision normalization — TICK_SIZE vs DECIMAL_PLACES
+# ---------------------------------------------------------------------------
+
+
+def test_constraints_tick_size_step_converted_to_decimals():
+    """Binance (ccxt default) reports precision as a step: 1e-05 means
+    5 decimals. int(1e-05) used to store 0 — "whole units only"."""
+    exch = _MockExchange()
+    exch.precisionMode = ccxt.TICK_SIZE
+    exch.load_markets = lambda reload=False: {
+        "BTC/USDT": {"limits": {}, "precision": {"amount": 1e-05}},
+    }
+    c = Broker(_config(), exch).fetch_market_constraints("BTC/USDT")
+    assert c.amount_precision == 5
+
+
+def test_constraints_tick_size_whole_units():
+    exch = _MockExchange()
+    exch.precisionMode = ccxt.TICK_SIZE
+    exch.load_markets = lambda reload=False: {
+        "DOGE/USDT": {"limits": {}, "precision": {"amount": 1.0}},
+    }
+    c = Broker(_config(), exch).fetch_market_constraints("DOGE/USDT")
+    assert c.amount_precision == 0
+
+
+def test_constraints_non_power_of_ten_step_maps_to_none():
+    """A 0.5 step has no decimal-count equivalent; raw dict keeps it."""
+    exch = _MockExchange()
+    exch.precisionMode = ccxt.TICK_SIZE
+    exch.load_markets = lambda reload=False: {
+        "X/USDT": {"limits": {}, "precision": {"amount": 0.5}},
+    }
+    c = Broker(_config(), exch).fetch_market_constraints("X/USDT")
+    assert c.amount_precision is None
+    assert c.raw["precision"]["amount"] == 0.5

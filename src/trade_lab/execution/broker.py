@@ -22,6 +22,7 @@ honest.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -88,13 +89,31 @@ def _coerce_float_or_none(value) -> Optional[float]:
         return None
 
 
-def _coerce_int_or_none(value) -> Optional[int]:
+def _precision_to_decimals(value, *, tick_size: bool) -> Optional[int]:
+    """Normalize a ccxt ``precision.amount`` to a decimal-place count.
+
+    ccxt reports precision either as a decimal count (DECIMAL_PLACES
+    mode, e.g. ``8``) or as a step size (TICK_SIZE mode — the Binance
+    default, e.g. ``1e-05``). ``int()`` on a step silently yields 0,
+    which would claim "whole units only". Steps that are not a power
+    of ten (``0.5``, ``10``) have no decimal-count equivalent and map
+    to ``None``; the raw market dict keeps the original value.
+    """
     if value is None or value == "":
         return None
     try:
-        return int(value)
+        v = float(value)
     except (TypeError, ValueError):
         return None
+    if v <= 0:
+        return None
+    if not tick_size:
+        return int(v) if v.is_integer() else None
+    decimals = -math.log10(v)
+    rounded = round(decimals)
+    if abs(decimals - rounded) > 1e-9 or rounded < 0:
+        return None
+    return int(rounded)
 
 
 @dataclass
@@ -316,11 +335,14 @@ class Broker:
         amount = (limits.get("amount") or {})
         cost = (limits.get("cost") or {})
         precision = (m.get("precision") or {})
+        is_tick_size = getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE
         return MarketConstraints(
             symbol=symbol,
             min_amount=_coerce_float_or_none(amount.get("min")),
             min_cost=_coerce_float_or_none(cost.get("min")),
-            amount_precision=_coerce_int_or_none(precision.get("amount")),
+            amount_precision=_precision_to_decimals(
+                precision.get("amount"), tick_size=is_tick_size,
+            ),
             raw=m,
         )
 
