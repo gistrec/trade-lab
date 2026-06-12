@@ -427,3 +427,43 @@ def test_cycle_orders_executed_v2_populated_returns_list():
     out = cycle_orders_executed(cycle)
     assert len(out) == 1
     assert out[0]["terminal_status"] == "closed"
+
+
+def test_parse_iso_returns_none_on_null_and_garbage():
+    """parse_iso is total: journal fields are external input, a JSON
+    null or malformed string degrades one value instead of raising
+    AttributeError through the dashboard."""
+    assert parse_iso(None) is None
+    assert parse_iso(123) is None
+    assert parse_iso("not a timestamp") is None
+    assert parse_iso("") is None
+
+
+def test_staleness_no_data_on_null_ended_at(tmp_path):
+    """A cycle with ended_at: null must bucket as NO_DATA, not crash."""
+    import json as _json
+
+    path = tmp_path / "j.jsonl"
+    path.write_text(_json.dumps({
+        "schema_version": 2, "cycle_id": "x", "ended_at": None,
+    }) + "\n")
+    reader = JournalReader(path)
+    assert reader.staleness(3600) is Staleness.NO_DATA
+
+
+def test_signal_history_skips_null_asof(tmp_path):
+    import json as _json
+
+    rows = [
+        {"schema_version": 2, "signal": {"asof": None, "ladder_value": 1.0,
+                                          "sma_gate_open": True}},
+        {"schema_version": 2, "signal": {
+            "asof": "2099-01-01T00:00:00+00:00", "ladder_value": 0.5,
+            "sma_gate_open": False}},
+    ]
+    path = tmp_path / "j.jsonl"
+    path.write_text("\n".join(_json.dumps(r) for r in rows) + "\n")
+    reader = JournalReader(path)
+    hist = reader.signal_history(days=10**6)
+    assert len(hist) == 1
+    assert hist[0][1] == 0.5

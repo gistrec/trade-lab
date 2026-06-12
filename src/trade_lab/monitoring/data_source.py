@@ -64,14 +64,23 @@ def cycle_orders_executed(cycle: dict) -> list:
     return cycle.get("orders_executed") or []
 
 
-def parse_iso(s: str) -> datetime:
-    """Parse an ISO-8601 timestamp written by the journal.
+def parse_iso(s) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp written by the journal; total function.
 
-    Naive timestamps are treated as UTC: the writer always emits an
-    offset, but defensive coding keeps a future writer regression from
-    silently producing wrong wall-clock comparisons.
+    Returns ``None`` for anything unparseable — JSON ``null``, non-string
+    values, malformed strings. The journal is external input to this
+    process; a single bad field must degrade one value, not raise an
+    AttributeError that takes the dashboard down. Naive timestamps are
+    treated as UTC: the writer always emits an offset, but defensive
+    coding keeps a future writer regression from silently producing
+    wrong wall-clock comparisons.
     """
-    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if not isinstance(s, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
@@ -122,12 +131,8 @@ class JournalReader:
             sig = c.get("signal")
             if sig is None:
                 continue
-            asof_str = sig.get("asof")
-            if not asof_str:
-                continue
-            try:
-                asof = parse_iso(asof_str)
-            except ValueError:
+            asof = parse_iso(sig.get("asof"))
+            if asof is None:
                 continue
             if asof.timestamp() < cutoff:
                 continue
@@ -144,12 +149,8 @@ class JournalReader:
         if not self._cache:
             return Staleness.NO_DATA
         last = self._cache[-1]
-        ended_str = last.get("ended_at")
-        if not ended_str:
-            return Staleness.NO_DATA
-        try:
-            ended = parse_iso(ended_str)
-        except ValueError:
+        ended = parse_iso(last.get("ended_at"))
+        if ended is None:
             return Staleness.NO_DATA
         elapsed = datetime.now(timezone.utc).timestamp() - ended.timestamp()
         if elapsed < expected_interval_s * 1.5:

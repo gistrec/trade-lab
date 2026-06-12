@@ -27,7 +27,7 @@ multi-tab dashboard that is operationally annoying every refresh.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -282,13 +282,25 @@ def _render_signal(reader: JournalReader) -> None:
     plb_states = sig.get("per_lookback_states") or {}
     plb_returns = sig.get("per_lookback_returns") or {}
     if plb_states:
+        def _lb(key):
+            try:
+                return int(key)
+            except (TypeError, ValueError):
+                return None
+
         rows = []
-        for k in sorted(plb_states.keys(), key=lambda x: int(x)):
+        # Unparseable keys sort last and display verbatim — journal
+        # data is external input, one odd key must not blank the tab.
+        for k in sorted(plb_states.keys(),
+                        key=lambda x: (_lb(x) is None, _lb(x) or 0, str(x))):
             ret = plb_returns.get(k)
             rows.append({
-                "lookback": int(k),
-                "state": int(plb_states[k]),
-                "return %": f"{ret * 100:+.2f}" if ret is not None else "—",
+                "lookback": _lb(k) if _lb(k) is not None else str(k),
+                "state": plb_states[k],
+                "return %": (
+                    f"{ret * 100:+.2f}"
+                    if isinstance(ret, (int, float)) else "—"
+                ),
             })
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
         st.caption(
@@ -361,13 +373,8 @@ def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
         gate = sig.get("sma_gate_open")
         if gate is None:
             continue
-        asof = sig.get("asof")
-        date = None
-        if isinstance(asof, str):
-            try:
-                date = parse_iso(asof).date()
-            except ValueError:
-                date = None
+        dt = parse_iso(sig.get("asof"))
+        date = dt.date() if dt is not None else None
         if gate is True:
             # An intraday flip means the same date sits on both sides;
             # it has seen an OPEN gate, so don't count it as closed.
@@ -384,13 +391,9 @@ def _basket_close_figure(
     sma_value: Optional[float],
 ) -> go.Figure:
     """Basket close line with horizontal SMA(200) reference."""
-    if start_iso:
-        try:
-            from datetime import timedelta
-            start = parse_iso(start_iso)
-            x = [start + timedelta(days=i) for i in range(len(values))]
-        except (ValueError, ImportError):
-            x = list(range(len(values)))
+    start = parse_iso(start_iso)
+    if start is not None:
+        x = [start + timedelta(days=i) for i in range(len(values))]
     else:
         x = list(range(len(values)))
 
@@ -528,7 +531,9 @@ def _render_cycles(reader: JournalReader) -> None:
     )
 
     st.subheader("Cycle detail")
-    cycle_ids = [c.get("cycle_id", "?") for c in reversed(cycles)]
+    # str() + or-fallback: a JSON-null cycle_id must not feed None into
+    # the selectbox format_func (len(None) → TypeError).
+    cycle_ids = [str(c.get("cycle_id") or "?") for c in reversed(cycles)]
     selected = st.selectbox(
         "Pick a cycle to expand",
         options=cycle_ids,
@@ -689,8 +694,12 @@ def _render_validation() -> None:
                 log_path=VALIDATION_LOG_PATH,
                 reference_path=VALIDATION_REFERENCE_PATH,
             )
-        except (FileNotFoundError, ValueError) as exc:
-            st.error(f"Fingerprint monitor error: {exc}")
+        except Exception as exc:
+            # Broad on purpose (matches the look-ahead detector below):
+            # a malformed reference file raises KeyError/TypeError just
+            # as easily as ValueError, and any of them is a render-an-
+            # error case, not a take-down-the-tab case.
+            st.error(f"Fingerprint monitor error: {type(exc).__name__}: {exc}")
         else:
             cols = st.columns(3)
             cols[0].metric(
