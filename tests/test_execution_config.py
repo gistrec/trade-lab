@@ -219,3 +219,20 @@ def test_importing_config_modules_does_not_inject_env():
     assert out.stdout.strip() == "", (
         f"importing config modules injected env vars: {out.stdout.strip()}"
     )
+
+
+def test_garbage_timeout_raises_config_error(monkeypatch):
+    """Every other config mistake reports as PaperConfigError with the
+    offending env var named — a bare ValueError traceback from int()
+    broke that contract."""
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_TIMEOUT_MS": "twenty seconds"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="TRADE_LAB_PAPER_TIMEOUT_MS"):
+        load_paper_config()
+
+
+def test_non_positive_timeout_raises_config_error(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_PAPER_TIMEOUT_MS": "0"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="positive"):
+        load_paper_config()

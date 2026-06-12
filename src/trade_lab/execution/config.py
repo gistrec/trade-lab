@@ -111,7 +111,18 @@ def load_paper_config() -> PaperConfig:
     )
     quote_currency = os.getenv("TRADE_LAB_PAPER_QUOTE", "USDT").strip().upper()
     basket = _parse_basket(os.getenv("TRADE_LAB_PAPER_BASKET"))
-    timeout_ms = int(os.getenv("TRADE_LAB_PAPER_TIMEOUT_MS", "20000"))
+    timeout_raw = os.getenv("TRADE_LAB_PAPER_TIMEOUT_MS", "20000")
+    try:
+        timeout_ms = int(timeout_raw)
+    except ValueError:
+        raise PaperConfigError(
+            f"TRADE_LAB_PAPER_TIMEOUT_MS must be an integer (milliseconds), "
+            f"got {timeout_raw!r}."
+        ) from None
+    if timeout_ms <= 0:
+        raise PaperConfigError(
+            f"TRADE_LAB_PAPER_TIMEOUT_MS must be positive, got {timeout_ms}."
+        )
 
     # Refuse-by-default to mainnet. Two flags must agree.
     if not sandbox and not allow_mainnet:
