@@ -272,6 +272,7 @@ def run_strategy_walk_forward(
         # annualized — DSR's formula wants per-period Sharpes).
         train_dsr = _per_fold_train_dsr(
             [m for _, m in scored],
+            best_train,
             annualization_factor=annualization_factor,
         )
 
@@ -337,17 +338,22 @@ def run_strategy_walk_forward(
 
 def _per_fold_train_dsr(
     metrics_list: Sequence[dict],
+    selected_metrics: dict,
     *,
     annualization_factor: int = 365,
 ) -> float:
-    """DSR on the train slice with selection over the same-fold grid.
+    """DSR of the *selected* variant, deflated over the same-fold grid.
 
-    Pass the list of metric-dicts (one per variant evaluated on train
-    in this fold). The function uses each variant's per-period returns
-    to compute a non-annualized Sharpe, picks the best, and applies
-    Bailey-LdP DSR with ``num_trials = len(metrics_list)`` and the
-    cross-trial standard deviation of those Sharpes as
-    ``sharpe_std_dev``.
+    ``selected_metrics`` must be the metrics-dict of the variant the
+    walk-forward actually picked per its ``objective``. Computing the
+    DSR for the best-by-Sharpe variant instead (the old behavior)
+    described a different strategy than ``selected_label`` whenever the
+    objective was ``total_return`` or ``return_div_drawdown``.
+
+    ``num_trials = len(metrics_list)`` and the cross-trial standard
+    deviation of per-period (non-annualized) Sharpes still come from
+    the whole fold grid — the selection pressure is the same no matter
+    which scalar ranked the candidates.
     """
     # Lazy import to avoid circular module loading at package import time.
     from .dsr import deflated_sharpe_ratio, sharpe_ratio_per_period
@@ -356,22 +362,21 @@ def _per_fold_train_dsr(
         return 0.0
     # Per-period (non-annualized) Sharpes — the DSR formula expects them.
     per_period_sharpes = []
-    return_series_for_best: pd.Series = pd.Series(dtype=float)
-    best_idx = -1
-    for i, m in enumerate(metrics_list):
+    for m in metrics_list:
         r = m.get("returns")
         if r is None or len(r) < 4:
             sr = 0.0
         else:
             sr = sharpe_ratio_per_period(r)
         per_period_sharpes.append(sr)
-        if i == 0 or sr > per_period_sharpes[best_idx]:
-            best_idx = i
-            return_series_for_best = m.get("returns", pd.Series(dtype=float))
+
+    selected_returns = selected_metrics.get("returns")
+    if selected_returns is None:
+        selected_returns = pd.Series(dtype=float)
 
     sharpe_std_dev = float(np.std(per_period_sharpes, ddof=1)) if len(per_period_sharpes) > 1 else 0.0
     return deflated_sharpe_ratio(
-        returns=return_series_for_best,
+        returns=selected_returns,
         num_trials=len(metrics_list),
         sharpe_std_dev=sharpe_std_dev,
     )

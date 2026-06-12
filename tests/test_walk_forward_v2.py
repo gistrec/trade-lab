@@ -343,3 +343,38 @@ def test_purge_days_does_not_change_train_metrics():
         res_purge["train_sharpe"].iloc[:common],
         check_names=False,
     )
+
+
+def test_per_fold_train_dsr_describes_selected_variant():
+    """The reported train_dsr must describe the variant the fold
+    actually selected per `objective` — not silently re-pick the
+    best-by-Sharpe variant (they differ when the objective is
+    total_return / return_div_drawdown)."""
+    import numpy as np
+
+    from trade_lab.backtest.dsr import (
+        deflated_sharpe_ratio, sharpe_ratio_per_period,
+    )
+    from trade_lab.backtest.walk_forward_v2 import _per_fold_train_dsr
+
+    rng = np.random.default_rng(11)
+    idx = pd.date_range("2021-01-01", periods=300, freq="D", tz="UTC")
+    smooth = pd.Series(rng.normal(0.001, 0.002, 300), index=idx)   # high Sharpe
+    lumpy = pd.Series(rng.normal(0.003, 0.05, 300), index=idx)     # high return
+    metrics_list = [{"returns": smooth}, {"returns": lumpy}]
+    selected = metrics_list[1]  # objective=total_return picked the lumpy one
+
+    got = _per_fold_train_dsr(metrics_list, selected)
+
+    sharpes = [sharpe_ratio_per_period(smooth), sharpe_ratio_per_period(lumpy)]
+    expected = deflated_sharpe_ratio(
+        returns=lumpy, num_trials=2,
+        sharpe_std_dev=float(np.std(sharpes, ddof=1)),
+    )
+    assert got == pytest.approx(expected)
+    # And it must differ from the best-by-Sharpe variant's DSR.
+    by_sharpe = deflated_sharpe_ratio(
+        returns=smooth, num_trials=2,
+        sharpe_std_dev=float(np.std(sharpes, ddof=1)),
+    )
+    assert got != pytest.approx(by_sharpe)
