@@ -96,13 +96,25 @@ def _render_top_banner(latest: Optional[dict]) -> None:
         )
         return
     ctx = latest.get("context") or {}
-    sandbox = bool(ctx.get("sandbox", True))
+    # Safety banner fails loud: only an explicit True is "safe". A
+    # missing or non-bool flag (schema drift, truncated context) must
+    # NOT render the reassuring green testnet banner.
+    sandbox = ctx.get("sandbox")
     exchange = str(ctx.get("exchange") or "unknown").upper()
-    if sandbox:
+    if sandbox is True:
         st.markdown(
             f"<div style='background:#1b5e20;color:white;padding:0.8rem;"
             f"border-radius:0.5rem;text-align:center;font-size:1.4rem;'>"
             f"TESTNET — {exchange}</div>",
+            unsafe_allow_html=True,
+        )
+    elif sandbox is not False:
+        st.markdown(
+            f"<div style='background:#bf360c;color:white;padding:1.2rem;"
+            f"border-radius:0.5rem;text-align:center;font-size:1.6rem;"
+            f"font-weight:bold;'>"
+            f"SANDBOX FLAG UNKNOWN — {exchange} — verify config before "
+            f"trusting this dashboard</div>",
             unsafe_allow_html=True,
         )
     else:

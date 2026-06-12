@@ -185,3 +185,50 @@ def test_days_since_gate_skips_cycles_without_signal():
         _sig_cycle("2026-06-11T00:00:00+00:00", False),
     ]
     assert _days_since_gate_last_open(_FakeReader(cycles)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Safety banner — fail loud on missing/garbage sandbox flag
+# ---------------------------------------------------------------------------
+
+
+def _captured_banner(monkeypatch, latest):
+    import trade_lab.monitoring.app as app
+
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        app.st, "markdown", lambda html, unsafe_allow_html=False: rendered.append(html)
+    )
+    app._render_top_banner(latest)
+    assert len(rendered) == 1
+    return rendered[0]
+
+
+def test_banner_green_only_on_explicit_sandbox_true(monkeypatch):
+    html = _captured_banner(
+        monkeypatch, {"context": {"sandbox": True, "exchange": "binance"}}
+    )
+    assert "TESTNET" in html
+
+
+def test_banner_red_on_mainnet(monkeypatch):
+    html = _captured_banner(
+        monkeypatch, {"context": {"sandbox": False, "exchange": "kraken"}}
+    )
+    assert "MAINNET" in html and "REAL MONEY" in html
+
+
+def test_banner_unknown_when_sandbox_missing(monkeypatch):
+    """A cycle whose context lacks the flag must NOT look safe."""
+    html = _captured_banner(monkeypatch, {"context": {"exchange": "binance"}})
+    assert "UNKNOWN" in html
+    assert "TESTNET" not in html
+
+
+def test_banner_unknown_on_non_bool_garbage(monkeypatch):
+    """bool('false') is True — a string flag must not render green."""
+    html = _captured_banner(
+        monkeypatch, {"context": {"sandbox": "false", "exchange": "binance"}}
+    )
+    assert "UNKNOWN" in html
+    assert "TESTNET" not in html
