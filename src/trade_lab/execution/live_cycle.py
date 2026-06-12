@@ -379,9 +379,11 @@ def _ts_iso(ts) -> str:
 def _basket_close_series_dict(tail) -> Optional[dict]:
     if tail is None or len(tail) == 0:
         return None
+    # 6 decimals on an index normalized to start at 100 — full-precision
+    # floats here roughly double the serialized cycle size for nothing.
     return {
         "start_ts": _ts_iso(tail.index[0]),
-        "values": [float(v) for v in tail.tolist()],
+        "values": [round(float(v), 6) for v in tail.tolist()],
     }
 
 

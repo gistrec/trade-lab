@@ -4,8 +4,9 @@ Coverage focus:
 
 * Per-line atomicity: each ``append`` writes exactly one complete line
   ending in ``\\n``.
-* ≤4KB size cap: oversized cycles raise :class:`JournalEntryTooLarge`
-  before any bytes touch the file.
+* Size cap (``MAX_LINE_BYTES``): oversized cycles raise
+  :class:`JournalEntryTooLarge` before any bytes touch the file, and a
+  worst-realistic full-rebalance cycle fits under the cap.
 * Crash recovery: a partial trailing line left by a previous writer
   does NOT eat the next valid entry. The writer prepends a newline
   when the file does not end with one.
@@ -146,7 +147,64 @@ def test_oversized_cycle_raises_before_any_bytes_on_disk(tmp_path):
     assert not journal_path.exists() or journal_path.stat().st_size == 0
 
 
-def test_cycle_just_under_4kb_passes(tmp_path):
+def test_full_rebalance_cycle_fits_under_cap(tmp_path):
+    """Worst realistic case: a 7-asset full rebalance with 7 planned +
+    7 executed orders and a 100-value basket series. This used to
+    exceed the old 4KB cap and the entry was silently dropped by the
+    cycle writers — the cap must accommodate it with headroom."""
+    import random
+
+    rng = random.Random(7)
+    basket = ["BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE"]
+    asset_closes = {s: rng.uniform(0.05, 90_000.0) for s in basket}
+    planned = [
+        {"symbol": f"{s}/USDT", "side": "buy",
+         "base_amount": rng.random(), "notional_quote": rng.uniform(100, 500),
+         "price_used": asset_closes[s]}
+        for s in basket
+    ]
+    executed = [
+        {"client_order_id": f"tsmom_20260612_{s}USDT_buy",
+         "exchange_order_id": "123456789", "symbol": f"{s}/USDT",
+         "side": "buy", "intended_amount": rng.random(),
+         "terminal_status": "closed", "filled_amount": rng.random(),
+         "filled_notional_quote": rng.uniform(100, 500),
+         "average_price": asset_closes[s], "fees_paid_quote": 0.123456,
+         "placed_at": "2026-06-12T00:05:03.123456+00:00",
+         "terminal_at": "2026-06-12T00:05:04.123456+00:00", "error": None}
+        for s in basket
+    ]
+    cycle = _make_cycle("full-rebalance")
+    cycle.context["basket"] = basket
+    cycle.signal = {
+        "asof": "2026-06-12T00:00:00+00:00", "ladder_value": 1.0,
+        "sma_gate_open": True, "sma_value": 1.234567890123,
+        "per_lookback_states": {"28": 1, "60": 1},
+        "per_lookback_returns": {"28": 0.123456789, "60": 0.23456789},
+        "basket_close": 1.3456789012, "asset_closes": asset_closes,
+    }
+    cycle.basket_close_series = {
+        "start_ts": "2026-03-04T00:00:00+00:00",
+        "values": [rng.uniform(80.0, 160.0) for _ in range(100)],
+    }
+    cycle.balance = {
+        "quote_currency": "USDT", "quote_total": 10000.12345678,
+        "quote_free": 5000.12345678, "quote_used": 0.0,
+        "asset_totals": {s: rng.random() for s in basket},
+    }
+    cycle.target_allocation = {s: rng.uniform(1000, 1500) for s in basket}
+    cycle.current_holdings_quote = {s: rng.uniform(900, 1500) for s in basket}
+    cycle.orders_planned = planned
+    cycle.orders_executed = executed
+
+    writer = JournalWriter(tmp_path / "j.jsonl")
+    writer.append(cycle)  # must not raise JournalEntryTooLarge
+
+    entry = json.loads((tmp_path / "j.jsonl").read_text())
+    assert len(entry["orders_executed"]) == 7
+
+
+def test_cycle_just_under_cap_passes(tmp_path):
     """A cycle whose encoded size is just under MAX_LINE_BYTES should
     pass without raising. This is the regression test against a too-
     aggressive cap."""

@@ -18,11 +18,15 @@ must accept all known versions and skip unknown ones with a warning
 Atomicity
 =========
 Each line is written by a single ``write()`` syscall on an O_APPEND
-file, followed by ``fsync``. POSIX guarantees writes of up to
-``PIPE_BUF`` bytes are atomic on append; on Linux and macOS that's
-4096. The :data:`MAX_LINE_BYTES` cap enforces this. A crash mid-write
-can still leave a truncated final line: the reader handles this case
-by skipping any line that fails to parse as JSON.
+file, followed by ``fsync``. Note: the PIPE_BUF atomicity guarantee
+applies to pipes/FIFOs, not regular files — for regular files a
+single buffered append is atomic in practice on local filesystems,
+and the reader tolerates the residual risk by skipping any line that
+fails to parse as JSON (same path as a crash mid-write). The
+:data:`MAX_LINE_BYTES` cap is therefore a sanity bound against
+runaway payloads, sized so the worst realistic cycle (7-asset full
+rebalance with planned + executed orders and the basket-close series,
+~8KB) fits with headroom.
 """
 from __future__ import annotations
 
@@ -38,15 +42,16 @@ from typing import Optional
 
 
 JOURNAL_SCHEMA_VERSION = 2
-MAX_LINE_BYTES = 4096
+MAX_LINE_BYTES = 16384
 
 
 class JournalEntryTooLarge(RuntimeError):
     """Raised when a serialized cycle exceeds :data:`MAX_LINE_BYTES`.
 
-    Past the 4KB cap a single ``write`` may be split by the kernel,
-    breaking the per-line atomicity guarantee. The caller must trim
-    the payload (most commonly: shorten ``basket_close_series.values``).
+    The cap is a sanity bound: every legitimate cycle (including a
+    full 7-asset rebalance) fits well under it, so exceeding it means
+    a payload bug, not a big day. The caller must trim the payload
+    (most commonly: shorten ``basket_close_series.values``).
     """
 
 
