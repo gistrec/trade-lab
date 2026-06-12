@@ -107,7 +107,7 @@ def run_backtest(
     positions = signals.shift(1).fillna(0).astype(float) * float(position_size)
 
     close = candles["close"].astype(float)
-    bar_returns = close.pct_change().fillna(0.0)
+    bar_returns = close.pct_change(fill_method=None).fillna(0.0)
     gross_returns = positions * bar_returns                    # before costs
 
     turnover = positions.diff().abs()

@@ -288,7 +288,7 @@ def _cagr(equity: pd.Series, bars: int, annualization_factor: int) -> float:
 def _sharpe(equity: pd.Series, annualization_factor: int) -> float:
     if equity.empty:
         return 0.0
-    returns = equity.pct_change().dropna()
+    returns = equity.pct_change(fill_method=None).dropna()
     if returns.empty:
         return 0.0
     std = float(returns.std())

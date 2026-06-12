@@ -93,7 +93,7 @@ def build_crypto_market_index(
             "on a silently shrunken basket: " + "; ".join(details)
         )
 
-    asset_returns = closes.pct_change()
+    asset_returns = closes.pct_change(fill_method=None)
     active_panel = closes.notna()
     n_active = active_panel.sum(axis=1)
 

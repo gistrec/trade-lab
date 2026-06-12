@@ -160,7 +160,7 @@ def compute_live_signal(
     per_lookback_returns: dict[int, float] = {}
     close_series = basket["close"]
     for L in lookbacks:
-        past = close_series.pct_change(int(L)).iloc[-1]
+        past = close_series.pct_change(int(L), fill_method=None).iloc[-1]
         ok = pd.notna(past)
         per_lookback_states[int(L)] = 1 if (ok and past > 0) else 0
         per_lookback_returns[int(L)] = float(past) if ok else 0.0

@@ -200,7 +200,7 @@ def run_hmm_regime_overlay(
             rebalance_dates.append(closes.index[i])
         realized.iloc[i] = current
 
-    daily_returns = closes.pct_change().fillna(0.0)
+    daily_returns = closes.pct_change(fill_method=None).fillna(0.0)
     eq = pd.Series(0.0, index=closes.index)
     eq.iloc[0] = initial_capital
     total_fees = 0.0
@@ -218,7 +218,7 @@ def run_hmm_regime_overlay(
             total_slippage += slip
         eq.iloc[i] = new_eq
 
-    ret = eq.pct_change().fillna(0.0)
+    ret = eq.pct_change(fill_method=None).fillna(0.0)
     return HmmRegimeOverlayResult(
         equity=eq,
         returns=ret,

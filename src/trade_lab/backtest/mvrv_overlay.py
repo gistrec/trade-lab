@@ -162,7 +162,7 @@ def run_mvrv_overlay(
         realized.iloc[i] = current
 
     # Simulate equity with symmetric costs on |Δposition|.
-    daily_returns = closes.pct_change().fillna(0.0)
+    daily_returns = closes.pct_change(fill_method=None).fillna(0.0)
     eq = pd.Series(0.0, index=closes.index)
     eq.iloc[0] = initial_capital
     total_fees = 0.0
@@ -180,7 +180,7 @@ def run_mvrv_overlay(
             total_slippage += slip
         eq.iloc[i] = new_eq
 
-    ret = eq.pct_change().fillna(0.0)
+    ret = eq.pct_change(fill_method=None).fillna(0.0)
     return MvrvOverlayResult(
         equity=eq,
         returns=ret,

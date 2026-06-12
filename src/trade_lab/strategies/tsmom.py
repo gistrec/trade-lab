@@ -116,9 +116,9 @@ class TimeSeriesMomentumStrategy(Strategy):
         """Average ``{0,1}`` per-lookback sign-of-return states."""
         components: list[pd.Series] = []
         for lookback in self.lookbacks:
-            # close.pct_change(lookback) at bar N uses close[N] and
+            # close.pct_change(lookback, fill_method=None) at bar N uses close[N] and
             # close[N-lookback] — both known at the close of bar N.
-            past_return = close.pct_change(lookback)
+            past_return = close.pct_change(lookback, fill_method=None)
             state = (past_return > 0).astype(float)
             # Warm-up bars (NaN trailing return) are treated as "flat",
             # never as "long" by default.
@@ -137,7 +137,7 @@ class TimeSeriesMomentumStrategy(Strategy):
         return ok
 
     def _vol_weight(self, close: pd.Series) -> pd.Series:
-        daily_returns = close.pct_change()
+        daily_returns = close.pct_change(fill_method=None)
         realized_vol_daily = daily_returns.rolling(self.vol_lookback).std()
         realized_vol_annual = realized_vol_daily * np.sqrt(self.annualization_factor)
         with np.errstate(divide="ignore", invalid="ignore"):

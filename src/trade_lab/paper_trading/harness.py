@@ -145,7 +145,7 @@ def run_paper_trading_cycle(
     per_lookback_states: dict[str, int] = {}
     per_lookback_returns: dict[str, float] = {}
     for L in cfg.lookbacks:
-        pr = close.pct_change(L).iloc[-1]
+        pr = close.pct_change(L, fill_method=None).iloc[-1]
         per_lookback_returns[str(L)] = float(pr) if pd.notna(pr) else 0.0
         per_lookback_states[str(L)] = int(pr > 0) if pd.notna(pr) else 0
 

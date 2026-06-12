@@ -86,7 +86,7 @@ class VolatilityTargetWrapper(Strategy):
 
     def _vol_weight(self, close: pd.Series) -> pd.Series:
         """``target_vol / realized_vol``, NaN/inf → 0 (never lever up)."""
-        daily_returns = close.pct_change()
+        daily_returns = close.pct_change(fill_method=None)
         realized_vol_daily = daily_returns.rolling(self.vol_lookback).std()
         realized_vol_annual = realized_vol_daily * np.sqrt(self.annualization_factor)
         with np.errstate(divide="ignore", invalid="ignore"):

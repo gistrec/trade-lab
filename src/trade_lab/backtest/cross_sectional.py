@@ -135,7 +135,7 @@ def run_cross_sectional_momentum(
         and not np.allclose(positions.iloc[i].to_numpy(), positions.iloc[i - 1].to_numpy())
     ]
 
-    asset_returns = closes.pct_change().fillna(0.0)
+    asset_returns = closes.pct_change(fill_method=None).fillna(0.0)
     gross_returns = (positions * asset_returns).sum(axis=1)
 
     turnover = positions.diff().abs().sum(axis=1)
@@ -267,8 +267,8 @@ def run_cross_sectional_reversal(
         )
 
     aligned_eligibility = _align_eligibility(eligibility, closes)
-    trailing_return = closes.pct_change(lookback_days)
-    realized_vol = closes.pct_change().rolling(vol_lookback).std()
+    trailing_return = closes.pct_change(lookback_days, fill_method=None)
+    realized_vol = closes.pct_change(fill_method=None).rolling(vol_lookback).std()
 
     weights = pd.DataFrame(0.0, index=closes.index, columns=closes.columns)
     last_weights = pd.Series(0.0, index=closes.columns)
@@ -294,7 +294,7 @@ def run_cross_sectional_reversal(
         if i > 0 and not np.allclose(positions.iloc[i].to_numpy(),
                                      positions.iloc[i - 1].to_numpy())
     ]
-    asset_returns = closes.pct_change().fillna(0.0)
+    asset_returns = closes.pct_change(fill_method=None).fillna(0.0)
     gross_returns = (positions * asset_returns).sum(axis=1)
     turnover = positions.diff().abs().sum(axis=1)
     turnover.iloc[0] = positions.iloc[0].abs().sum()
@@ -402,8 +402,8 @@ def _build_target_weights(
 
     # Trailing-return lookback. ``shift(0)`` is intentional — we want
     # ``close[t] / close[t - lookback]`` available at the close of t.
-    trailing_return = closes.pct_change(lookback_days)
-    realized_vol = closes.pct_change().rolling(vol_lookback).std()
+    trailing_return = closes.pct_change(lookback_days, fill_method=None)
+    realized_vol = closes.pct_change(fill_method=None).rolling(vol_lookback).std()
 
     last_weights = pd.Series(0.0, index=closes.columns)
     for i, date in enumerate(closes.index):

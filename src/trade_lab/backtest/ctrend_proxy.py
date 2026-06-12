@@ -142,7 +142,7 @@ def run_ctrend_proxy(
 
     feature_dict = compute_price_features(closes, windows)
     fwd_returns = closes.shift(-rebalance_days) / closes - 1.0
-    daily_returns = closes.pct_change().fillna(0.0)
+    daily_returns = closes.pct_change(fill_method=None).fillna(0.0)
 
     earliest = int(max(windows)) + train_lookback_days + purge_days
     dates = list(closes.index)
@@ -196,7 +196,7 @@ def run_ctrend_proxy(
         initial_capital=initial_capital,
         fee_rate=fee_rate, slippage_rate=slippage_rate,
     )
-    returns = equity.pct_change().fillna(0.0)
+    returns = equity.pct_change(fill_method=None).fillna(0.0)
 
     return CtrendProxyResult(
         equity=equity,
