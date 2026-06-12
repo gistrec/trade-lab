@@ -441,13 +441,28 @@ def _persist(
     client_order_id: str,
     result: OrderResult,
 ) -> None:
-    """Update the state store after a placement attempt."""
+    """Update the state store after a placement attempt.
+
+    The stored status answers one question for future cycles: "is any
+    further reconciliation needed?" — it is NOT fill accounting; the
+    journal carries the fill detail. An exchange-CLOSED partial fill
+    (``terminal_status='partial'`` with a ``terminal_at``) is stored
+    as ``closed``: the exchange will never fill more, so there is
+    nothing left to reconstruct. This mirrors the mapping in
+    ``live_cycle._reconstruct_open_orders``; storing ``partial`` here
+    made the next cycle reconstruct and re-journal the same incident.
+    A timeout-with-partial-fill (``terminal_at is None``) stays
+    ``partial`` — that one is still live on the exchange.
+    """
+    status = result.terminal_status
+    if status == "partial" and result.terminal_at is not None:
+        status = "closed"
     entry = OrderStateEntry(
         client_order_id=client_order_id,
         symbol=intent.symbol,
         side=intent.side,
         intended_amount=intent.base_amount,
-        status=result.terminal_status,
+        status=status,
         exchange_order_id=result.exchange_order_id,
         placed_at=result.placed_at,
         last_seen_at=utcnow_iso(),

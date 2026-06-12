@@ -275,6 +275,9 @@ def test_partial_fill_eventually_closed(tmp_path):
     assert result.terminal_status == "partial"
     assert result.filled_amount == 0.0007
     assert result.terminal_at is not None
+    # Exchange-terminal → state stores "closed" (nothing left to
+    # reconstruct); the partial fill detail lives in the journal.
+    assert store.get("tsmom_20260530_BTCUSDT_buy").status == "closed"
 
 
 def test_query_before_place_finds_existing(tmp_path):

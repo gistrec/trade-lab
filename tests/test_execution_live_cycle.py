@@ -553,3 +553,36 @@ def test_lost_track_recovers_when_exchange_record_appears(tmp_path):
     cycles = _read_cycles(tmp_path)
     assert cycles[0]["outcome"] == "reconstructed"
     assert state.get(coid).status == "closed"
+
+
+def test_closed_partial_not_rereconstructed_next_cycle(tmp_path):
+    """An order the exchange CLOSED with a partial fill is terminal on
+    the exchange — nothing more will fill. The main cycle already
+    journaled the partial result; the next cycle must not reconstruct
+    and re-journal the same incident."""
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    coid = f"tsmom_{today}_BTCUSDT_buy"
+    closed_partial = {
+        "id": "exch-1", "status": "closed",
+        "filled": 0.00005, "cost": 2.5, "average": 50000.0,
+        "fee": {"cost": 0.002}, "timestamp": 0,
+    }
+    stub.fetch_order_responses[coid] = [dict(closed_partial), dict(closed_partial)]
+    broker = _broker(stub)
+    clock = _MockClock()
+    state = _state(tmp_path)
+
+    run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    n_first = len(_read_cycles(tmp_path))
+    assert state.get(coid).status == "closed"   # exchange-terminal
+
+    run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    new_cycles = _read_cycles(tmp_path)[n_first:]
+    assert all(c["outcome"] != "reconstructed" for c in new_cycles)
