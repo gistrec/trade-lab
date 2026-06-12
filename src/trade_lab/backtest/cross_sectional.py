@@ -26,11 +26,16 @@ all weights are >= 0 and sum to <= 1.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
 
 
 @dataclass
@@ -185,14 +190,30 @@ def _align_closes(asset_candles: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
     predate listing.
     """
     series = {}
+    skipped = []
     for asset, candles in asset_candles.items():
         if candles is None or candles.empty:
+            skipped.append(asset)
             continue
         close = candles["close"].astype(float)
         series[asset] = close
+    if skipped:
+        logger.warning(
+            "cross-sectional panel: skipped %d asset(s) with no candles: %s",
+            len(skipped), sorted(skipped),
+        )
     if not series:
         return pd.DataFrame()
     closes = pd.concat(series, axis=1).sort_index()
+    stale = [c for c in closes.columns if pd.isna(closes[c].iloc[-1])]
+    if stale:
+        logger.warning(
+            "cross-sectional panel: %d asset(s) end before the panel does "
+            "(%s); ffill carries their last price forward — a delisted "
+            "asset keeps trading at a frozen price unless the eligibility "
+            "mask forces an exit.",
+            len(stale), sorted(stale),
+        )
     return closes.ffill()
 
 

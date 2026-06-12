@@ -26,6 +26,8 @@ the global proxy and flag this in ``docs/results/pit_universe.md``.
 """
 from __future__ import annotations
 
+import logging
+
 from datetime import date as _date
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
@@ -39,6 +41,9 @@ from .coinmetrics import CoinMetricsError, fetch_asset_metrics_cached
 # ---------------------------------------------------------------------------
 # Universe construction
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
+
 
 
 def load_panel(
@@ -56,7 +61,7 @@ def load_panel(
     the caller is expected to align on a common index.
 
     Set ``fetch=False`` to only use the on-disk cache; missing coins
-    are silently dropped. This is the safe option for tests and CI.
+    are dropped with a warning. This is the safe option for tests and CI.
     """
     pool = candidates or COIN_REGISTRY
     price_frames: list[pd.Series] = []
@@ -71,11 +76,20 @@ def load_panel(
             else:
                 cache_path = Path(cache_dir) / f"coinmetrics_{meta.cm_id}.parquet"
                 if not cache_path.exists():
+                    logger.warning(
+                        "universe: dropping %s — no cached Coin Metrics "
+                        "file at %s (fetch=False). The PIT universe is "
+                        "smaller than the candidate pool.",
+                        symbol, cache_path,
+                    )
                     continue
                 df = pd.read_parquet(cache_path)
-        except CoinMetricsError:
-            # Asset id not in Coin Metrics community catalog. Skip — the
-            # caller will see the missing column.
+        except CoinMetricsError as exc:
+            logger.warning(
+                "universe: dropping %s — Coin Metrics error: %s. The PIT "
+                "universe is smaller than the candidate pool.",
+                symbol, exc,
+            )
             continue
         # Some assets miss a metric (e.g. brand-new listings have no
         # 90-day volume yet); fill with NaN columns so the concat shapes

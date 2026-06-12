@@ -327,3 +327,26 @@ def test_eligibility_no_lookahead():
         res_base.weights.iloc[:200],
         res_flip.weights.iloc[:200],
     )
+
+
+def test_align_closes_warns_on_skipped_and_stale_assets(caplog):
+    """Silent shrinkage is forbidden by CLAUDE.md: empty assets and
+    assets whose data ends early (frozen-price ffill) must emit a
+    structured warning."""
+    import logging
+
+    import pandas as pd
+
+    from trade_lab.backtest.cross_sectional import _align_closes
+
+    idx = pd.date_range("2021-01-01", periods=10, freq="D", tz="UTC")
+    full = pd.DataFrame({"close": range(10)}, index=idx, dtype=float)
+    short = pd.DataFrame({"close": range(7)}, index=idx[:7], dtype=float)
+    with caplog.at_level(logging.WARNING):
+        panel = _align_closes({
+            "BTC/USDT": full, "DEAD/USDT": short, "EMPTY/USDT": full.iloc[:0],
+        })
+    messages = " ".join(r.message for r in caplog.records)
+    assert "EMPTY/USDT" in messages          # skipped: no candles
+    assert "DEAD/USDT" in messages           # stale: ffilled frozen price
+    assert panel["DEAD/USDT"].iloc[-1] == 6  # behavior unchanged

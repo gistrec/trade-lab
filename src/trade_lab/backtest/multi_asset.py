@@ -7,6 +7,8 @@ symbol generalizes to others.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import Mapping, Sequence
 
 import pandas as pd
@@ -44,6 +46,9 @@ MULTI_ASSET_SUMMARY_COLUMNS = [
     "avg_exposure_across_assets",
 ]
 
+logger = logging.getLogger(__name__)
+
+
 
 def run_multi_asset_yearly_validation(
     asset_candles: Mapping[str, pd.DataFrame],
@@ -58,11 +63,15 @@ def run_multi_asset_yearly_validation(
     ``asset_candles`` maps a symbol label (e.g. ``"BTC/USDT"``) to a
     candles DataFrame. Each asset is evaluated independently; the result
     is a single long-format DataFrame with an ``asset`` column prepended.
-    Assets with empty candle frames are silently skipped.
+    Assets with empty candle frames are skipped with a warning.
     """
     frames: list[pd.DataFrame] = []
     for asset, candles in asset_candles.items():
         if candles.empty:
+            logger.warning(
+                "multi-asset validation: skipping %r — empty candle frame; "
+                "results cover fewer assets than requested.", asset,
+            )
             continue
         per_asset = run_yearly_validation(
             candles,

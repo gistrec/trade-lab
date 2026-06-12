@@ -177,3 +177,22 @@ def test_csv_round_trip(tmp_path):
     loaded = pd.read_csv(out)
     assert list(loaded.columns) == MULTI_ASSET_DETAIL_COLUMNS
     assert len(loaded) == len(detail)
+
+
+def test_empty_asset_skip_emits_warning(caplog):
+    import logging
+
+    import pandas as pd
+
+    idx = pd.date_range("2021-01-01", periods=400, freq="D", tz="UTC")
+    close = pd.Series(range(400), index=idx, dtype=float) + 100
+    candles = pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close,
+         "volume": 1.0},
+        index=idx,
+    )
+    with caplog.at_level(logging.WARNING):
+        run_multi_asset_yearly_validation(
+            {"BTC/USDT": candles, "GHOST/USDT": candles.iloc[:0]},
+        )
+    assert any("GHOST/USDT" in r.message for r in caplog.records)

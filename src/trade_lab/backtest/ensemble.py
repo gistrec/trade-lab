@@ -28,6 +28,8 @@ sleeves.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Sequence
 
@@ -41,6 +43,9 @@ from .walk_forward_v2 import (
     aggregate_walk_forward,
     run_strategy_walk_forward,
 )
+
+logger = logging.getLogger(__name__)
+
 
 
 @dataclass(frozen=True)
@@ -100,7 +105,11 @@ def run_ensemble_walk_forward(
     for sleeve in sleeves:
         candles = asset_candles.get(sleeve.asset)
         if candles is None or candles.empty:
-            # Asset not in input — skip silently (records the gap below).
+            logger.warning(
+                "ensemble: sleeve %r skipped — no candles for asset %r; "
+                "the portfolio runs on fewer sleeves than configured.",
+                sleeve.label, sleeve.asset,
+            )
             continue
         grid = [ParamGridSpec(
             label=sleeve.label,
@@ -171,6 +180,17 @@ def run_ensemble_walk_forward(
     # t-1, applied to sleeve returns over [t-1, t]. The shift mirrors
     # the engine's one-bar execution lag and prevents look-ahead.
     shifted_weights = target_weights.shift(1).fillna(0.0)
+    interior_nan = int(
+        (sleeve_returns_panel.isna() & sleeve_returns_panel.notna().cummax())
+        .to_numpy().sum()
+    )
+    if interior_nan:
+        logger.warning(
+            "ensemble: zero-filling %d sleeve-return value(s) missing "
+            "after sleeve start — gaps are treated as flat days, which "
+            "understates that sleeve's variance.",
+            interior_nan,
+        )
     sleeve_returns_filled = sleeve_returns_panel.fillna(0.0)
     portfolio_returns_gross = (shifted_weights * sleeve_returns_filled).sum(axis=1)
     portfolio_returns_net = portfolio_returns_gross - rebalance_cost
