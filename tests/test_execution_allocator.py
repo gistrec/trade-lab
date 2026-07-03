@@ -203,6 +203,42 @@ def test_weights_summing_over_one_raise():
         )
 
 
+def test_weights_just_over_one_within_tolerance_pass():
+    """A renormalised drifted-weight snapshot can overshoot 1.0 by float
+    noise; the 1e-6 tolerance must let it through, not raise."""
+    weights = {sym: 1.0 / len(_BASKET) for sym in _BASKET}
+    weights["BTC"] += 5e-7   # total ~1.0000005, inside 1.0 + 1e-6
+    assert sum(weights.values()) > 1.0
+    alloc = compute_target_allocation(
+        signal=1.0, total_equity=70_000.0,
+        prices=_PRICES, basket=_BASKET, weights=weights,
+    )
+    assert alloc.total_equity == 70_000.0
+
+
+def test_weights_over_one_beyond_tolerance_raise():
+    weights = {sym: 1.0 / len(_BASKET) for sym in _BASKET}
+    weights["BTC"] += 1e-3   # total well past 1.0 + 1e-6
+    with pytest.raises(ValueError, match="sum"):
+        compute_target_allocation(
+            signal=1.0, total_equity=70_000.0,
+            prices=_PRICES, basket=_BASKET, weights=weights,
+        )
+
+
+def test_weights_just_under_one_within_tolerance_pass():
+    """Symmetric lower-bound tolerance: a hair under 1.0 is float noise, not
+    an under-invested basket — it must pass, not trip the sum<1 guard."""
+    weights = {sym: 1.0 / len(_BASKET) for sym in _BASKET}
+    weights["BTC"] -= 5e-7   # total ~0.9999995, inside 1.0 - 1e-6
+    assert sum(weights.values()) < 1.0
+    alloc = compute_target_allocation(
+        signal=1.0, total_equity=70_000.0,
+        prices=_PRICES, basket=_BASKET, weights=weights,
+    )
+    assert alloc.total_equity == 70_000.0
+
+
 def test_zero_price_raises():
     bad_prices = {**_PRICES, "BTC": 0.0}
     with pytest.raises(ValueError, match="BTC"):
