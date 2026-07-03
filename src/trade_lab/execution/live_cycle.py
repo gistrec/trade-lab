@@ -242,7 +242,11 @@ def _reconstruct_open_orders(
 
     resolved: list[dict] = []
     for coid, entry in open_entries.items():
-        order = reconstruct_status(broker, coid, entry.symbol)
+        order = reconstruct_status(
+            broker, coid, entry.symbol,
+            exchange_order_id=entry.exchange_order_id,
+            since_ms=_placed_at_ms(entry.placed_at),
+        )
 
         if order is None:
             if entry.status == "lost_track":
@@ -359,6 +363,23 @@ def _determine_outcome(order_results: list[OrderResult]) -> str:
 # Lifted helpers (duplicated from dry_run.py — refactor if a third
 # cycle implementation appears)
 # ---------------------------------------------------------------------------
+
+
+def _placed_at_ms(placed_at: str) -> Optional[int]:
+    """Epoch-ms of an ISO-8601 ``placed_at``, or ``None`` if unparseable.
+
+    Bounds the reconstruction trade query to the order's age so Binance's
+    default ~24h ``fetch_my_trades`` window does not hide an older fill.
+    An unparseable stamp falls back to ``None`` (exchange default window)
+    rather than raising — reconstruction is a recovery path.
+    """
+    try:
+        dt = datetime.fromisoformat(placed_at)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 
 def _build_context(broker: Broker) -> dict:

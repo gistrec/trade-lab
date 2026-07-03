@@ -460,6 +460,40 @@ def test_reconstruct_falls_back_to_trades_when_order_unknown():
     assert result["clientOrderId"] == coid
 
 
+def test_reconstruct_matches_binance_trade_by_exchange_order_id():
+    """Binance myTrades carry no clientOrderId — only the exchange order
+    id (ccxt 'order'). Reconstruction must match on the exchange order id
+    threaded from state, or the trade-based fallback is dead code and a
+    filled-but-record-expired order is wrongly flagged lost_track
+    (regression: C13)."""
+    coid = "tsmom_20260530_BTCUSDT_buy"
+    exch = _MockExchange(
+        fetch_order_sequence=[ccxt.OrderNotFound("record expired")],
+        my_trades=[
+            {   # Realistic ccxt Binance trade: 'order' = exchange orderId,
+                # NO clientOrderId anywhere (not in info, not top-level).
+                "order": "exch-77",
+                "info": {"orderId": "exch-77", "symbol": "BTCUSDT"},
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "amount": 0.0008,
+                "cost": 39.95,
+                "price": 49937.5,
+                "fee": {"cost": 0.04, "currency": "USDT"},
+                "timestamp": 1717000000000,
+            },
+        ],
+    )
+    broker = _broker(exch)
+    result = reconstruct_status(
+        broker, coid, "BTC/USDT", exchange_order_id="exch-77",
+    )
+    assert result is not None, "trade fallback must match by exchange order id"
+    assert result["status"] == "closed"
+    assert result["filled"] == 0.0008
+    assert result["id"] == "exch-77"
+
+
 def test_reconstruct_returns_none_when_truly_lost():
     """OrderNotFound and no matching trades → None.
 

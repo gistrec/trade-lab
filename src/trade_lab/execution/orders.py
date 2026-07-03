@@ -256,6 +256,7 @@ def reconstruct_status(
     client_order_id: str,
     symbol: str,
     *,
+    exchange_order_id: Optional[str] = None,
     since_ms: Optional[int] = None,
 ) -> Optional[dict]:
     """Recover the terminal state of an order we may have lost track of.
@@ -265,8 +266,12 @@ def reconstruct_status(
     1. ``fetch_order_by_coid`` — if Binance still has the order record
        (90+ day retention), we get the canonical state.
     2. Fallback: ``fetch_my_trades`` filtered by symbol since
-       ``since_ms``. We look for trades whose ``clientOrderId`` matches
-       and synthesize an order-like dict from the trade aggregate.
+       ``since_ms``. We match trades by the exchange order id
+       (``exchange_order_id``) primarily — Binance ``myTrades`` carry the
+       exchange orderId (ccxt ``order``) but NOT a clientOrderId, so a
+       clientOrderId-only match never fires there — falling back to
+       clientOrderId for exchanges that do populate it. Matching trades
+       are aggregated into an order-like dict.
 
     Returns ``None`` only when the exchange has no record of the ID at
     all — the caller marks the state ``lost_track`` and surfaces it
@@ -280,7 +285,12 @@ def reconstruct_status(
     trades = broker.fetch_my_trades_since(symbol, since_ms)
     matching = [
         t for t in trades
-        if (t.get("info") or {}).get("clientOrderId") == client_order_id
+        if (
+            exchange_order_id is not None
+            and t.get("order") is not None
+            and str(t.get("order")) == str(exchange_order_id)
+        )
+        or (t.get("info") or {}).get("clientOrderId") == client_order_id
         or t.get("clientOrderId") == client_order_id
     ]
     if not matching:

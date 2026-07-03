@@ -472,6 +472,46 @@ def test_persistent_lost_track_still_escalates_result(tmp_path):
     assert result.lost_track_count == 1
 
 
+def test_reconstruction_recovers_via_trade_by_exchange_order_id(tmp_path):
+    """Order record expired (OrderNotFound) but the fill's trade is still
+    queryable: reconstruction recovers it by matching the exchange order
+    id threaded from state, instead of flagging lost_track (regression:
+    C13). Binance trades carry no clientOrderId, so the old
+    clientOrderId-only match made this fallback dead code."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="open",
+        exchange_order_id="exch-recover",
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-20T00:05:00+00:00",
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[coid] = [ccxt.OrderNotFound("record expired")]
+    stub.my_trades = [{
+        "order": "exch-recover",
+        "info": {"orderId": "exch-recover"},
+        "symbol": "BTC/USDT", "side": "buy",
+        "amount": 0.001, "cost": 50.0, "price": 50000.0,
+        "fee": {"cost": 0.05, "currency": "USDT"},
+        "timestamp": 1717000000000,
+    }]
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    # Recovered, not lost.
+    assert state.get(coid).status == "closed"
+    assert result.lost_track_count == 0
+    recon = _read_cycles(tmp_path)[0]
+    assert recon["outcome"] == "reconstructed"
+    assert recon["orders_executed"][0]["terminal_status"] in ("closed", "partial")
+
+
 def test_no_reconstruction_when_state_empty(tmp_path):
     """Fresh start (no open state entries) → no reconstruction cycle entry."""
     stub = _LiveStub(basket=("BTC", "ETH"))
