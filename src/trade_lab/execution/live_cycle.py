@@ -76,6 +76,7 @@ class LiveCycleResult:
     order_results: list                  # list[OrderResult]
     reconstructed_count: int
     error: Optional[dict]
+    lost_track_count: int = 0            # orders in lost_track state (any age)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,18 @@ def run_live_cycle(
             context=context,
             reconstructed=reconstructed,
         )
+
+    # A lost_track order is an unresolved incident flagged for manual
+    # review. Count every lost_track entry still in state — newly
+    # transitioned this cycle OR persisting from a prior one — so the CLI
+    # can escalate the exit code for cron alerting even when the main
+    # cycle places no orders and returns 'success'. Persistent entries are
+    # deliberately NOT re-journaled (see _reconstruct_open_orders); this
+    # counter only feeds the exit code, keeping alerting red until an
+    # operator resolves the order.
+    lost_track_count = sum(
+        1 for e in state.open_entries().values() if e.status == "lost_track"
+    )
 
     # Phase 2-5: Main cycle. Wrapped so any exception still gets
     # journaled, then re-raised so the cron stderr sees the traceback.
@@ -187,6 +200,7 @@ def run_live_cycle(
             order_results=order_results,
             reconstructed_count=len(reconstructed),
             error=None,
+            lost_track_count=lost_track_count,
         )
 
     except Exception as exc:

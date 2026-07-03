@@ -985,6 +985,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")
+    print(f"  lost_track:       {result.lost_track_count}")
     print(f"  orders placed:    {len(result.order_results)}")
     for r in result.order_results:
         print(
@@ -994,10 +995,13 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"({r.filled_notional_quote:.2f} {config.quote_currency})"
         )
 
-    if result.outcome != "success":
+    if result.outcome != "success" or result.lost_track_count > 0:
         # Non-zero exit so cron/alerting catches stuck (unknown_orders)
         # or partially-executed cycles; the journal entry has the detail.
-        # Exceptions inside run_live_cycle already propagate → exit 1.
+        # A lost_track order (surfaced by reconstruction) is an unresolved
+        # incident even when the main cycle outcome is 'success', so it
+        # escalates too. Exceptions inside run_live_cycle already
+        # propagate → exit 1.
         raise SystemExit(2)
 
 

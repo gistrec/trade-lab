@@ -99,3 +99,29 @@ def test_bad_outcome_exits_nonzero(monkeypatch, tmp_path, outcome):
     with pytest.raises(SystemExit) as exc_info:
         cmd_paper_place_orders(_args(tmp_path))
     assert exc_info.value.code not in (0, None)
+
+
+def test_lost_track_exits_nonzero_even_on_success(monkeypatch, tmp_path):
+    """A lost_track surfaced by reconstruction must exit non-zero even
+    when the MAIN cycle outcome is 'success' — cron alerting keys on the
+    exit code, and a vanished order is an unresolved incident (regression:
+    R1)."""
+    from trade_lab.execution.live_cycle import LiveCycleResult
+
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config", _sandbox_config,
+    )
+    monkeypatch.setattr(
+        Broker, "connect", classmethod(lambda cls, config: object()),
+    )
+    result = LiveCycleResult(
+        cycle_id="0" * 32, outcome="success", order_results=[],
+        reconstructed_count=1, error=None, lost_track_count=1,
+    )
+    monkeypatch.setattr(
+        "trade_lab.execution.run_live_cycle",
+        lambda broker, **kwargs: result,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code not in (0, None)

@@ -403,6 +403,75 @@ def test_reconstruction_lost_track(tmp_path):
     assert recon["orders_executed"][0]["terminal_status"] == "lost_track"
 
 
+def test_new_lost_track_escalates_result(tmp_path):
+    """A lost_track discovered during reconstruction must be surfaced on
+    the result even when the MAIN cycle is a clean success, so the CLI can
+    escalate the exit code for cron alerting (regression: R1). Without
+    this, a vanished order was journaled but the process still exited 0."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="open",
+        exchange_order_id="exch-vanished",
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-20T00:05:00+00:00",
+    ))
+    # Main cycle places nothing: downtrend → signal=0, no holdings.
+    stub = _LiveStub(
+        basket=("BTC", "ETH"),
+        closes=np.linspace(200, 100, 500).tolist(),
+    )
+    stub.fetch_order_responses[coid] = [ccxt.OrderNotFound("gone")]
+    stub.my_trades = []
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    # The main cycle itself is a clean success (no orders to place)...
+    assert result.outcome == "success"
+    assert result.order_results == []
+    # ...but a lost_track WAS discovered and must be surfaced for alerting.
+    assert result.lost_track_count == 1
+    assert state.get(coid).status == "lost_track"
+
+
+def test_persistent_lost_track_still_escalates_result(tmp_path):
+    """A lost_track that was already recorded and is STILL missing keeps
+    the result's lost_track_count > 0 (unresolved incident), even though
+    it is not re-journaled — so exit-code alerting stays red until an
+    operator resolves it (regression: R1)."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="lost_track",
+        exchange_order_id="exch-vanished",
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-21T00:05:00+00:00",
+    ))
+    stub = _LiveStub(
+        basket=("BTC", "ETH"),
+        closes=np.linspace(200, 100, 500).tolist(),
+    )
+    stub.fetch_order_responses[coid] = [ccxt.OrderNotFound("still gone")]
+    stub.my_trades = []
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    # Not re-journaled (that decision is preserved)...
+    assert result.reconstructed_count == 0
+    # ...but the exit code must still escalate: the incident is unresolved.
+    assert result.lost_track_count == 1
+
+
 def test_no_reconstruction_when_state_empty(tmp_path):
     """Fresh start (no open state entries) → no reconstruction cycle entry."""
     stub = _LiveStub(basket=("BTC", "ETH"))
