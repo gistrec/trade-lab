@@ -17,6 +17,18 @@ class _SignalStrategy(Strategy):
         return pd.Series(self._signals, index=candles.index, dtype=int)
 
 
+class _FloatSignalStrategy(Strategy):
+    """Test helper: emit a float (laddered) signal series verbatim."""
+
+    name = "float_signal"
+
+    def __init__(self, signals):
+        self._signals = list(signals)
+
+    def generate_signals(self, candles):
+        return pd.Series(self._signals, index=candles.index, dtype=float)
+
+
 def _candles(closes):
     idx = pd.date_range("2024-01-01", periods=len(closes), freq="1h")
     return pd.DataFrame(
@@ -312,6 +324,25 @@ def test_position_size_scales_exposure():
     full_return = full.equity.iloc[-1] / 10_000 - 1
     half_return = half.equity.iloc[-1] / 10_000 - 1
     assert 0 < half_return < full_return
+
+
+def test_gross_return_equals_net_at_zero_cost_for_ladder():
+    """Documented invariant: at zero cost gross_return_pct == net_return_pct.
+    For a pro-rata ladder the exposure varies within one trade, so the raw
+    close-to-close ratio (which assumes 100% exposure every bar) overstates
+    gross and breaks the invariant (regression: C5)."""
+    closes = [100, 110, 121, 133.1, 146.41, 161.05, 177.155]  # +10%/bar
+    candles = _candles(closes)
+    result = run_backtest(
+        candles, _FloatSignalStrategy([0, 0.5, 1.0, 1.0, 0.5, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+        position_size=1.0,
+    )
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.gross_return_pct == pytest.approx(trade.net_return_pct)
+    # And it is the exposure-weighted return, not the full price move.
+    assert trade.gross_return_pct == pytest.approx(0.334021, abs=1e-5)
 
 
 def test_invalid_position_size_raises():

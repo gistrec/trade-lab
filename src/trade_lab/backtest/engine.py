@@ -137,6 +137,7 @@ def run_backtest(
         close=close,
         equity=equity,
         turnover=turnover,
+        gross_returns=gross_returns,
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
         initial_capital=initial_capital,
@@ -217,6 +218,7 @@ def _extract_trades(
     close: pd.Series,
     equity: pd.Series,
     turnover: pd.Series,
+    gross_returns: pd.Series,
     fee_rate: float,
     slippage_rate: float,
     initial_capital: float,
@@ -236,6 +238,7 @@ def _extract_trades(
                 close=close,
                 equity=equity,
                 turnover=turnover,
+                gross_returns=gross_returns,
                 fee_rate=fee_rate,
                 slippage_rate=slippage_rate,
                 initial_capital=initial_capital,
@@ -253,6 +256,7 @@ def _build_trade(
     close: pd.Series,
     equity: pd.Series,
     turnover: pd.Series,
+    gross_returns: pd.Series,
     fee_rate: float,
     slippage_rate: float,
     initial_capital: float,
@@ -273,16 +277,15 @@ def _build_trade(
     entry_execution_price = raw_entry_close * (1 + slippage_rate)
     exit_execution_price = raw_exit_close * (1 - slippage_rate)
 
-    # gross_return uses the close at the *signal* bars — that's the price
-    # ratio between when the position became active and when it became
-    # inactive in the engine's accounting. At zero costs it equals
-    # net_return; the displayed entry / exit execution prices live on
-    # different bars on purpose (they're what we transacted at).
-    gross_entry_close = float(close.iloc[entry_idx - 1])
-    gross_exit_close = (
-        float(close.iloc[-1]) if open_at_end else float(close.iloc[exit_idx - 1])
-    )
-    gross_return_pct = gross_exit_close / gross_entry_close - 1
+    # gross_return is the exposure-weighted return the engine actually
+    # accrued over the trade — the product of (1 + position × bar_return)
+    # across the held bars. A raw close-to-close ratio would assume 100%
+    # exposure every bar and overstate any trade whose exposure varies
+    # within it (the pro-rata ladder {0, 0.5, 1.0}, the vol-target
+    # wrapper). Slicing [entry_idx : exit_idx + 1] mirrors net_return's
+    # window, so at zero costs gross_return_pct == net_return_pct exactly.
+    gross_slice = gross_returns.iloc[entry_idx : exit_idx + 1]
+    gross_return_pct = float((1.0 + gross_slice).prod() - 1.0)
 
     entry_capital = float(equity.iloc[entry_idx - 1])
     final_equity = float(equity.iloc[exit_idx])
