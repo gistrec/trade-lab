@@ -66,13 +66,30 @@ STRATEGIES: dict[str, type[Strategy]] = {
 }
 
 
+_TRUE_LITERALS = frozenset({"true", "yes", "on"})
+_FALSE_LITERALS = frozenset({"false", "no", "off"})
+
+
 def _coerce(value: str) -> Any:
-    """Best-effort cast of a CLI value to int/float, falling back to str."""
+    """Best-effort cast of a CLI value to int/float/bool, falling back to str.
+
+    Boolean word literals (true/false/yes/no/on/off, case-insensitive) map
+    to real bools: a strategy stores flags via ``bool(value)``, and
+    ``bool("false")`` is True, so an un-coerced string flag would silently
+    invert ``--param use_vol_target=false``. Numeric ``0``/``1`` stay int
+    (a strategy may want, e.g., an integer lookback of 1) — only word
+    literals become bool.
+    """
     for cast in (int, float):
         try:
             return cast(value)
         except ValueError:
             continue
+    lowered = value.strip().lower()
+    if lowered in _TRUE_LITERALS:
+        return True
+    if lowered in _FALSE_LITERALS:
+        return False
     return value
 
 
