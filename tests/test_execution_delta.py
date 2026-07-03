@@ -169,6 +169,47 @@ def test_drifted_weight_target_produces_no_orders_when_holdings_track_index():
     assert plan.skipped == []
 
 
+def test_drifted_weight_target_gated_by_min_cost_between_rebalances():
+    """Production reality: holdings never bit-match the target (ticker !=
+    bar close, amount precision, fees), so on the in-between days self-
+    gating rests on the min_cost GATE, not the exact-zero fast path. A ~$3
+    residual (< $10 min_cost) must be suppressed and recorded as sub-min
+    drift, not sent — this is the path the deployed executor actually
+    walks between monthly rebalances."""
+    alloc = _allocation(signal=1.0, weights=_DRIFTED)
+    current = dict(_holdings_tracking(_DRIFTED))
+    current["BTC"] += 3.0 / _PRICES["BTC"]   # $3 residual, below min_cost $10
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+    )
+    assert plan.orders == []                               # gated, not sent
+    assert [s.symbol for s in plan.skipped] == ["BTC/USDT"]
+    assert "min_cost" in plan.skipped[0].reason
+    assert total_skipped_quote_drift(plan) == pytest.approx(3.0)
+
+
+def test_kraken_like_no_min_cost_fires_tiny_residual_order():
+    """Documents the known gap: an exchange reporting no min_cost/min_amount
+    (Kraken via CCXT) has nothing to suppress the tiny residual, so the
+    SAME $3 delta becomes a live order. Pinned so a change here is noticed,
+    not silently assumed safe."""
+    cons = {
+        "BTC/USDT": MarketConstraints(symbol="BTC/USDT", min_amount=None,
+                                      min_cost=None, amount_precision=8, raw={}),
+        "ETH/USDT": MarketConstraints(symbol="ETH/USDT", min_amount=None,
+                                      min_cost=None, amount_precision=8, raw={}),
+    }
+    alloc = _allocation(signal=1.0, weights=_DRIFTED)
+    current = dict(_holdings_tracking(_DRIFTED))
+    current["BTC"] += 3.0 / _PRICES["BTC"]
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints=cons, quote_currency="USDT",
+    )
+    assert any(o.symbol == "BTC/USDT" for o in plan.orders)
+
+
 def test_flat_weight_target_churns_the_same_drifted_holdings():
     """Contrast + regression witness: the SAME drifted holdings sized to
     FLAT 1/N force a full rebalance (BTC sell, ETH buy). This is both the
