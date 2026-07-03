@@ -79,6 +79,18 @@ def _get_reader() -> JournalReader:
     return JournalReader(JOURNAL_PATH)
 
 
+def _cycle_context(cycle: Optional[dict]) -> dict:
+    """Return a cycle's ``context`` dict, or ``{}`` for missing/non-dict.
+
+    Journal rows are external input; a truthy non-dict context (schema
+    drift, corruption) makes ``.get(...)`` raise AttributeError. Both the
+    safety banner and the Portfolio tab read context — route both through
+    here so a malformed context degrades instead of crashing.
+    """
+    ctx = (cycle or {}).get("context")
+    return ctx if isinstance(ctx, dict) else {}
+
+
 # ---------------------------------------------------------------------------
 # Top banner: testnet vs mainnet
 # ---------------------------------------------------------------------------
@@ -95,13 +107,7 @@ def _render_top_banner(latest: Optional[dict]) -> None:
             unsafe_allow_html=True,
         )
         return
-    ctx = latest.get("context")
-    # `or {}` alone only guards None/falsy — a truthy non-dict context
-    # (schema drift, corruption) would make ctx.get() raise AttributeError
-    # and blank the whole page, since the banner is the one renderer
-    # outside _render_tab_safely. Coerce anything non-dict to {}.
-    if not isinstance(ctx, dict):
-        ctx = {}
+    ctx = _cycle_context(latest)
     # Safety banner fails loud: only an explicit True is "safe". A
     # missing or non-bool flag (schema drift, truncated context) must
     # NOT render the reassuring green testnet banner.
@@ -478,7 +484,7 @@ def _render_portfolio(reader: JournalReader) -> None:
     target = latest.get("target_allocation") or {}
     current = latest.get("current_holdings_quote") or {}
     equity = float(latest.get("equity_usd") or 0.0)
-    quote = (latest.get("context") or {}).get("quote_currency") or "USD"
+    quote = _cycle_context(latest).get("quote_currency") or "USD"
 
     rows = []
     total_target = 0.0

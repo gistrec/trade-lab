@@ -290,3 +290,54 @@ def test_banner_unknown_on_non_dict_context(monkeypatch):
     html = _captured_banner(monkeypatch, {"context": "binance-sandbox"})
     assert "UNKNOWN" in html
     assert "TESTNET" not in html
+
+
+def test_cycle_context_coerces_non_dict_to_empty():
+    """_cycle_context returns {} for a missing/non-dict context so callers
+    can .get() safely."""
+    from trade_lab.monitoring.app import _cycle_context
+
+    assert _cycle_context({"context": {"quote_currency": "USDT"}}) == {
+        "quote_currency": "USDT"
+    }
+    assert _cycle_context({"context": "corrupt"}) == {}
+    assert _cycle_context({"context": None}) == {}
+    assert _cycle_context({}) == {}
+    assert _cycle_context(None) == {}
+
+
+def test_render_portfolio_survives_non_dict_context(monkeypatch):
+    """The Portfolio tab reads latest["context"] too. A truthy non-dict
+    context must NOT crash it — `(latest.get("context") or {}).get(...)`
+    raised AttributeError on a string context, the same class of bug the
+    banner fix (R6) addressed but only in the banner (verify finding)."""
+    import trade_lab.monitoring.app as app
+
+    class _Col:
+        def metric(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(app.st, "info", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "dataframe", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "columns", lambda n: [_Col() for _ in range(n)])
+    monkeypatch.setattr(app.st, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "caption", lambda *a, **k: None)
+
+    cycle = {
+        "outcome": "success",
+        "context": "corrupt-non-dict-context",   # truthy non-dict
+        "target_allocation": {"BTC": 7500.0},
+        "current_holdings_quote": {"BTC": 5000.0},
+        "equity_usd": 15000.0,
+        "orders_planned": [],
+        "orders_executed": [],
+    }
+
+    class _Reader:
+        def latest_cycle(self):
+            return cycle
+
+        def cumulative_skipped_drift(self):
+            return 0.0
+
+    app._render_portfolio(_Reader())   # must not raise
