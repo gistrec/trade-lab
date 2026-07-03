@@ -338,6 +338,38 @@ def test_incidents_warns_on_failed_cycle(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Ladder chart: gate-closed shading (Theme 2)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_closed_spans_finds_closed_runs():
+    from trade_lab.monitoring.app import _gate_closed_spans
+
+    def t(day):
+        return datetime(2026, 6, day, tzinfo=timezone.utc)
+
+    history = [
+        (t(1), 1.0, True),    # open
+        (t(2), 0.0, False),   # closed run starts
+        (t(3), 0.0, False),
+        (t(4), 1.0, True),    # opens again → run [t2, t3]
+        (t(5), 0.0, False),   # trailing closed run to the end
+    ]
+    spans = _gate_closed_spans(history)
+    assert spans == [(t(2), t(3)), (t(5), t(5))]
+
+
+def test_gate_closed_spans_all_open_is_empty():
+    from trade_lab.monitoring.app import _gate_closed_spans
+
+    history = [
+        (datetime(2026, 6, d, tzinfo=timezone.utc), 1.0, True)
+        for d in range(1, 4)
+    ]
+    assert _gate_closed_spans(history) == []
+
+
+# ---------------------------------------------------------------------------
 # Safety banner — fail loud on missing/garbage sandbox flag
 # ---------------------------------------------------------------------------
 
@@ -424,6 +456,8 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
     monkeypatch.setattr(app.st, "columns", lambda n: [_Col() for _ in range(n)])
     monkeypatch.setattr(app.st, "warning", lambda *a, **k: None)
     monkeypatch.setattr(app.st, "caption", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "subheader", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "plotly_chart", lambda *a, **k: None)
 
     cycle = {
         "outcome": "success",
@@ -441,5 +475,8 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
 
         def cumulative_skipped_drift(self):
             return 0.0
+
+        def cycles(self, n=20):
+            return [cycle]
 
     app._render_portfolio(_Reader())   # must not raise

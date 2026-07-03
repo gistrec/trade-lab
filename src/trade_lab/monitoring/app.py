@@ -37,7 +37,8 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness, cycle_orders_executed, is_live_cycle,
+    JournalReader, ReadStats, Staleness, cycle_orders_executed, drift_series,
+    duration_series, duration_stats, equity_series, is_live_cycle,
     max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
     recent_incidents,
 )
@@ -561,20 +562,85 @@ def _basket_close_figure(
     return fig
 
 
+def _gate_closed_spans(
+    history: list[tuple[datetime, float, bool]],
+) -> list[tuple[datetime, datetime]]:
+    """Contiguous time ranges where the SMA(200) gate was CLOSED.
+
+    Used to shade the ladder chart so a signal zeroed by the regime gate is
+    visibly distinct from a genuine 0 ladder — the gate bool is otherwise
+    read from the journal and discarded.
+    """
+    spans: list[tuple[datetime, datetime]] = []
+    start: Optional[datetime] = None
+    prev_t: Optional[datetime] = None
+    for t, _v, gate_open in history:
+        if not gate_open and start is None:
+            start = t
+        elif gate_open and start is not None:
+            spans.append((start, prev_t if prev_t is not None else t))
+            start = None
+        prev_t = t
+    if start is not None and prev_t is not None:
+        spans.append((start, prev_t))
+    return spans
+
+
 def _signal_history_figure(
     history: list[tuple[datetime, float, bool]],
 ) -> go.Figure:
     times = [h[0] for h in history]
     values = [h[1] for h in history]
     fig = go.Figure()
+    # Shade gate-CLOSED regions first so the ladder line draws on top.
+    for x0, x1 in _gate_closed_spans(history):
+        fig.add_vrect(
+            x0=x0, x1=x1, fillcolor="#d62728", opacity=0.08, line_width=0,
+        )
     fig.add_trace(go.Scatter(
         x=times, y=values, mode="lines+markers",
-        name="Ladder", line=dict(color="#1f77b4", width=2),
+        name="Ladder",
+        # The ladder is a discrete {0, 0.5, 1.0} state that HOLDS until it
+        # flips — a step line ("hv") tells the truth; straight segments imply
+        # continuous transitions that never happened.
+        line=dict(color="#1f77b4", width=2, shape="hv"),
     ))
     fig.update_layout(
         height=360, margin=dict(t=10, b=10, l=10, r=10),
-        yaxis=dict(range=[-0.05, 1.05], tickvals=[0.0, 0.5, 1.0]),
+        yaxis=dict(range=[-0.05, 1.05], tickvals=[0.0, 0.5, 1.0],
+                   title="ladder value"),
+        xaxis_title="date (UTC)",
         hovermode="x unified",
+    )
+    return fig
+
+
+def _timeseries_figure(
+    points: list[tuple[datetime, float]],
+    *,
+    y_title: str,
+    color: str = "#1f77b4",
+    fill: Optional[str] = None,
+    hline: Optional[float] = None,
+    hline_label: Optional[str] = None,
+) -> go.Figure:
+    """Generic (time, value) line chart with UTC x-axis and titled axes."""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="lines+markers",
+        line=dict(color=color, width=2), fill=fill,
+    ))
+    if hline is not None:
+        fig.add_hline(
+            y=hline, line_dash="dot", line_color="gray",
+            annotation_text=hline_label or "",
+        )
+    fig.update_layout(
+        height=320, margin=dict(t=10, b=10, l=10, r=10),
+        hovermode="x unified",
+        yaxis_title=y_title, xaxis_title="date (UTC)",
     )
     return fig
 
@@ -663,6 +729,36 @@ def _render_portfolio(reader: JournalReader) -> None:
         f"{cumulative:,.2f} {quote}."
     )
 
+    window = reader.cycles(n=500)
+
+    st.subheader("Paper equity over time")
+    eq = equity_series(window)
+    if len(eq) >= 2:
+        st.plotly_chart(
+            _timeseries_figure(eq, y_title=f"equity ({quote})", color="#1f77b4"),
+            width="stretch",
+        )
+    else:
+        st.info("Not enough successful cycles yet to chart equity.")
+
+    st.subheader("Index-vs-holdings drift over time")
+    dr = drift_series(window)
+    if len(dr) >= 2:
+        st.plotly_chart(
+            _timeseries_figure(
+                dr, y_title=f"total drift ({quote})",
+                color="#9467bd", fill="tozeroy",
+            ),
+            width="stretch",
+        )
+        st.caption(
+            "Sum of |target − current| per cycle. By design a sawtooth that "
+            "resets on the monthly rebalance (the drifted-weight profile from "
+            "C3); a steady monotonic climb would flag a problem."
+        )
+    else:
+        st.info("Not enough successful cycles yet to chart drift.")
+
 
 # ---------------------------------------------------------------------------
 # Cycles tab
@@ -695,6 +791,29 @@ def _render_cycles(reader: JournalReader) -> None:
     st.dataframe(
         pd.DataFrame(summary_rows), width="stretch", hide_index=True,
     )
+
+    stats = duration_stats(cycles)
+    durs = duration_series(cycles)
+    if stats is not None:
+        dcols = st.columns(3)
+        dcols[0].metric("Duration p50", f"{stats['p50']:.0f} ms")
+        dcols[1].metric("Duration p95", f"{stats['p95']:.0f} ms")
+        dcols[2].metric("Duration max", f"{stats['max']:.0f} ms")
+    if len(durs) >= 2:
+        st.plotly_chart(
+            _timeseries_figure(
+                durs, y_title="duration (ms)", color="#2ca02c",
+                hline=stats["p95"] if stats else None,
+                hline_label=f"p95 = {stats['p95']:.0f} ms" if stats else None,
+            ),
+            width="stretch",
+        )
+        st.caption(
+            "Per-cycle duration is the retry/latency proxy — the wait-for-ack "
+            "backoff records no attempt count, so a rising p95 is the visible "
+            "signal of network trouble. LIVE cycles poll for ack and run "
+            "longer than dry-runs."
+        )
 
     st.subheader("Cycle detail")
     # str() + or-fallback: a JSON-null cycle_id must not feed None into

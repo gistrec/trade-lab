@@ -159,6 +159,119 @@ def max_inter_cycle_gap_seconds(cycles: list[dict]) -> Optional[float]:
     return max((b - a).total_seconds() for a, b in zip(times, times[1:]))
 
 
+# ---------------------------------------------------------------------------
+# Time-series extraction for charts (Theme 2). Each is a total function over
+# external journal input: a null/garbage field drops that point, never raises.
+# Cycles arrive chronological (cache order), so the output is chronological.
+# ---------------------------------------------------------------------------
+
+
+def equity_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
+    """(ended_at, equity_usd) for successful cycles with a numeric equity.
+
+    Only the latest ``equity_usd`` is shown as a scalar today; this is the
+    whole history so paper equity can be charted over the observation window.
+    """
+    out: list[tuple[datetime, float]] = []
+    for c in cycles:
+        if c.get("outcome") != "success":
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        eq = c.get("equity_usd")
+        if dt is None or eq is None:
+            continue
+        try:
+            out.append((dt, float(eq)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def duration_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
+    """(ended_at, duration_ms) for every cycle with a numeric duration.
+
+    A trend of slowing cycles (wait-for-ack backoff, degrading network) is a
+    leading indicator the single latest scalar cannot show.
+    """
+    out: list[tuple[datetime, float]] = []
+    for c in cycles:
+        dt = parse_iso(c.get("ended_at"))
+        dur = c.get("duration_ms")
+        if dt is None:
+            continue
+        try:
+            out.append((dt, float(dur)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def cycle_total_drift(cycle: dict) -> Optional[float]:
+    """Sum of |target - current| across assets, or None if unavailable.
+
+    The strategy deliberately lets weights drift between monthly rebalances
+    (the C3 profile), so a per-cycle total-drift trend should be a sawtooth
+    that resets on rebalance days — a monotonic climb would flag a problem.
+    """
+    target = cycle.get("target_allocation")
+    current = cycle.get("current_holdings_quote")
+    if not isinstance(target, dict) or not isinstance(current, dict):
+        return None
+    total = 0.0
+    for asset in set(target) | set(current):
+        total += abs(_as_float(target.get(asset)) - _as_float(current.get(asset)))
+    return total
+
+
+def drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
+    """(ended_at, total_drift) for successful cycles where drift is defined."""
+    out: list[tuple[datetime, float]] = []
+    for c in cycles:
+        if c.get("outcome") != "success":
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        if dt is None:
+            continue
+        drift = cycle_total_drift(c)
+        if drift is None:
+            continue
+        out.append((dt, drift))
+    return out
+
+
+def _percentile(values: list[float], q: float) -> float:
+    """Linear-interpolated percentile (q in [0, 100]) over a non-empty list.
+
+    Small and dependency-free (numpy is not imported in the monitoring
+    process); exactness is not operationally critical here.
+    """
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    idx = (len(s) - 1) * q / 100.0
+    lo = int(idx)
+    hi = min(lo + 1, len(s) - 1)
+    frac = idx - lo
+    return s[lo] * (1.0 - frac) + s[hi] * frac
+
+
+def duration_stats(cycles: list[dict]) -> Optional[dict]:
+    """p50 / p95 / max of cycle ``duration_ms`` over the window, or None.
+
+    A latency summary the single latest scalar cannot give; live cycles poll
+    for ack and run longer than dry-runs, so a rising p95 is a leading
+    network-trouble indicator.
+    """
+    vals = [v for _, v in duration_series(cycles)]
+    if not vals:
+        return None
+    return {
+        "p50": _percentile(vals, 50),
+        "p95": _percentile(vals, 95),
+        "max": max(vals),
+    }
+
+
 def parse_iso(s) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp written by the journal; total function.
 

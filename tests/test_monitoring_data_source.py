@@ -20,7 +20,8 @@ import pytest
 
 from trade_lab.monitoring.data_source import (
     JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness,
-    cycle_orders_executed, is_live_cycle, max_inter_cycle_gap_seconds,
+    cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
+    duration_stats, equity_series, is_live_cycle, max_inter_cycle_gap_seconds,
     open_order_incidents, parse_iso, recent_incidents,
 )
 
@@ -593,6 +594,81 @@ def test_max_inter_cycle_gap_detects_mid_window_pause():
 def test_max_inter_cycle_gap_none_with_under_two_timestamps():
     assert max_inter_cycle_gap_seconds([]) is None
     assert max_inter_cycle_gap_seconds([_cycle_entry("c1")]) is None
+
+
+# ---------------------------------------------------------------------------
+# Time-series extraction for charts (Theme 2)
+# ---------------------------------------------------------------------------
+
+
+def test_equity_series_only_successful_numeric(tmp_path):
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    cycles = [
+        _cycle_entry("a", ended_at=base.isoformat()),                 # eq 15000
+        _cycle_entry("f", ended_at=(base + timedelta(hours=1)).isoformat(),
+                     outcome="failed"),                               # eq None
+    ]
+    cycles[0]["equity_usd"] = 15000.0
+    series = equity_series(cycles)
+    assert [round(v) for _, v in series] == [15000]   # failed cycle dropped
+
+
+def test_equity_series_tolerates_null_equity():
+    c = _cycle_entry("x")
+    c["equity_usd"] = None
+    assert equity_series([c]) == []                    # null dropped, no raise
+
+
+def test_duration_series_and_stats():
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    cycles = []
+    for i, d in enumerate([100, 200, 300, 400, 500]):
+        c = _cycle_entry(f"c{i}", ended_at=(base + timedelta(hours=i)).isoformat())
+        c["duration_ms"] = d
+        cycles.append(c)
+    series = duration_series(cycles)
+    assert [v for _, v in series] == [100, 200, 300, 400, 500]
+    stats = duration_stats(cycles)
+    assert stats["p50"] == 300
+    assert stats["max"] == 500
+    assert 400 <= stats["p95"] <= 500
+
+
+def test_duration_stats_none_when_empty():
+    assert duration_stats([]) is None
+
+
+def test_cycle_total_drift_sums_abs_gaps():
+    cycle = {
+        "target_allocation": {"BTC": 6000.0, "ETH": 4000.0},
+        "current_holdings_quote": {"BTC": 6300.0, "ETH": 3800.0},
+    }
+    # |6000-6300| + |4000-3800| = 300 + 200 = 500
+    assert cycle_total_drift(cycle) == 500.0
+
+
+def test_cycle_total_drift_none_when_missing_dicts():
+    assert cycle_total_drift({"target_allocation": None,
+                              "current_holdings_quote": {}}) is None
+
+
+def test_cycle_total_drift_tolerates_null_values():
+    cycle = {
+        "target_allocation": {"BTC": None},
+        "current_holdings_quote": {"BTC": 100.0},
+    }
+    assert cycle_total_drift(cycle) == 100.0   # null coerced to 0.0, no raise
+
+
+def test_drift_series_only_successful():
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    ok = _cycle_entry("ok", ended_at=base.isoformat())
+    ok["target_allocation"] = {"BTC": 100.0}
+    ok["current_holdings_quote"] = {"BTC": 90.0}
+    failed = _cycle_entry("f", ended_at=(base + timedelta(hours=1)).isoformat(),
+                          outcome="failed")
+    series = drift_series([ok, failed])
+    assert [round(v) for _, v in series] == [10]
 
 
 def test_signal_history_skips_null_asof(tmp_path):
