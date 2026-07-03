@@ -75,6 +75,46 @@ def test_buy_and_hold_fees_paid_is_fees_only_not_plus_slippage():
         assert row["fees_paid"] == pytest.approx(10_000 * 0.001)
 
 
+def test_strategy_year_return_uses_within_year_window_like_bh():
+    """The strategy's per-year return must span the same bars as its B&H
+    reference (entry at the first bar's close). Basing it on the prior
+    year's last-bar equity pulled the first-bar-of-year move into the
+    strategy return while B&H excluded it, so the two sides of the verdict
+    were measured over windows differing by one bar at the boundary
+    (regression: C10)."""
+    from trade_lab.backtest.engine import run_backtest
+    from trade_lab.backtest.yearly import _yearly_row_for_strategy
+    from trade_lab.strategies.base import Strategy
+
+    class _AlwaysLong(Strategy):
+        name = "always_long"
+
+        def generate_signals(self, candles):
+            return pd.Series(1.0, index=candles.index)
+
+    idx = pd.date_range(
+        "2020-12-20", periods=30, freq="1D", tz="UTC", name="timestamp"
+    )
+    close = np.linspace(100.0, 110.0, 30)
+    close[idx.year == 2021] *= 1.20   # a big jump on the first bar of 2021
+    candles = pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close, "volume": 1.0},
+        index=idx,
+    )
+    result = run_backtest(
+        candles, _AlwaysLong(), initial_capital=10_000,
+        fee_rate=0.0, slippage_rate=0.0,
+    )
+    row = _yearly_row_for_strategy("always_long", result, candles, 2021, 10_000.0)
+    assert row is not None
+
+    year_equity = result.equity.loc[candles.index[candles.index.year == 2021]]
+    within_year_return = float(year_equity.iloc[-1] / year_equity.iloc[0] - 1.0)
+    # return_pct must be the within-year window (first-bar close to last),
+    # matching buy_and_hold_return_pct — NOT include the boundary jump.
+    assert row["return_pct"] == pytest.approx(within_year_return, abs=1e-9)
+
+
 def test_buy_and_hold_verdict_is_baseline_label():
     candles = _daily_candles_multi_year()
     df = run_yearly_validation(candles)

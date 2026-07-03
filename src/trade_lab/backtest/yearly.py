@@ -234,14 +234,14 @@ def _yearly_row_for_strategy(
     if year_equity.empty:
         return None
 
-    # Return for the year: from equity at end of previous year (or initial
-    # capital if this is the first year present) to end of this year.
-    first_year_pos = candles.index.get_loc(year_index[0])
-    start_equity = (
-        float(result.equity.iloc[first_year_pos - 1])
-        if first_year_pos > 0
-        else float(initial_capital)
-    )
+    # Return for the year over the WITHIN-year window: from equity at the
+    # first bar of the year to the last. This mirrors the B&H reference
+    # below (buy_and_hold_with_costs enters at the year's first-bar close),
+    # so both sides of the verdict span the same bars. Basing it on the
+    # prior year's last-bar equity pulled the first-bar-of-year move into
+    # the strategy return while B&H excluded it — a one-bar window mismatch
+    # at the year boundary that could flip a borderline verdict.
+    start_equity = float(year_equity.iloc[0])
     end_equity = float(year_equity.iloc[-1])
     year_return = (end_equity / start_equity) - 1 if start_equity > 0 else 0.0
 
