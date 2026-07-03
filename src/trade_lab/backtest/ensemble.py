@@ -82,6 +82,61 @@ class EnsembleResult:
     portfolio_dsr: float                          # DSR @ num_trials on portfolio OOS
 
 
+def _target_weights_and_turnover(
+    sleeve_returns_panel: pd.DataFrame,
+    *,
+    fee_rate: float,
+    slippage_rate: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """Dynamic equal-weight target weights + rebalance turnover/cost.
+
+    Returns ``(sleeve_active_panel, target_weights, rebalance_turnover,
+    rebalance_cost)``.
+    """
+    # A sleeve is "in the universe" from its first observed return to its
+    # last, INCLUSIVE of interior gaps. Per-bar notna() would drop a sleeve
+    # on a single missing bar (e.g. one asset missing a daily candle its
+    # peers have), spuriously reweighting every other sleeve from 1/N_old
+    # to 1/N_new and billing a round-trip rebalance for what is really a
+    # flat day. `started & not_ended` keeps it in N_active with its weight
+    # carried across the gap; only the RETURN is zero-filled by the caller.
+    observed = sleeve_returns_panel.notna()
+    started = observed.cummax()
+    not_ended = observed[::-1].cummax()[::-1]
+    sleeve_active_panel = started & not_ended
+
+    # Dynamic equal-weight target weights over the in-universe sleeves.
+    n_active = sleeve_active_panel.sum(axis=1)
+    target_weights = sleeve_active_panel.div(
+        n_active.where(n_active > 0, 1.0), axis=0
+    )
+    # Cells where no sleeve is active → keep target weight at 0.
+    target_weights = target_weights.where(sleeve_active_panel, 0.0)
+
+    # Rebalance-on-universe-change turnover. Naively ``diff().abs().sum(axis=1)``
+    # picks up both new-sleeve entries (weight 0 → 1/N) and existing-
+    # sleeve trims (1/N_old → 1/N_new) at the same bar. But the
+    # per-sleeve OOS returns are ALREADY net of one entry's worth of
+    # cost (the sleeve's internal engine charges it). So if we also
+    # bill the entry to the portfolio allocator, we double-count.
+    #
+    # The fix: subtract each sleeve's first-positive-weight contribution
+    # from the portfolio-level turnover at that bar. What remains is
+    # the trim cost on EXISTING sleeves (which the sleeves' internals
+    # didn't bill — those sleeves assumed they were running on 100%
+    # capital, not getting silently trimmed by an allocator) plus exit
+    # costs when a sleeve leaves the universe.
+    naive_diff = target_weights.diff().abs()
+    naive_diff.iloc[0] = target_weights.iloc[0].abs()
+    # Mask first-positive-weight cell per sleeve and zero it out.
+    first_active = target_weights.gt(0).cumsum().eq(1) & target_weights.gt(0)
+    entry_credit = target_weights.where(first_active, 0.0)
+    portfolio_turnover_panel = (naive_diff - entry_credit).clip(lower=0.0)
+    rebalance_turnover = portfolio_turnover_panel.sum(axis=1)
+    rebalance_cost = rebalance_turnover * (fee_rate + slippage_rate)
+    return sleeve_active_panel, target_weights, rebalance_turnover, rebalance_cost
+
+
 def run_ensemble_walk_forward(
     sleeves: Sequence[SleeveSpec],
     asset_candles: Mapping[str, pd.DataFrame],
@@ -142,39 +197,11 @@ def run_ensemble_walk_forward(
         per_sleeve_oos[sleeve.label] = stitched
 
     sleeve_returns_panel = pd.concat(per_sleeve_oos, axis=1).sort_index()
-    sleeve_active_panel = sleeve_returns_panel.notna()
-
-    # Dynamic equal-weight target weights. NaN return at a bar means
-    # the sleeve was not in the universe yet (asset unlisted on the
-    # date that fold's WF covers).
-    n_active = sleeve_active_panel.sum(axis=1)
-    target_weights = sleeve_active_panel.div(
-        n_active.where(n_active > 0, 1.0), axis=0
+    sleeve_active_panel, target_weights, rebalance_turnover, rebalance_cost = (
+        _target_weights_and_turnover(
+            sleeve_returns_panel, fee_rate=fee_rate, slippage_rate=slippage_rate,
+        )
     )
-    # Cells where no sleeve is active → keep target weight at 0.
-    target_weights = target_weights.where(sleeve_active_panel, 0.0)
-
-    # Rebalance-on-universe-change turnover. Naively ``diff().abs().sum(axis=1)``
-    # picks up both new-sleeve entries (weight 0 → 1/N) and existing-
-    # sleeve trims (1/N_old → 1/N_new) at the same bar. But the
-    # per-sleeve OOS returns are ALREADY net of one entry's worth of
-    # cost (the sleeve's internal engine charges it). So if we also
-    # bill the entry to the portfolio allocator, we double-count.
-    #
-    # The fix: subtract each sleeve's first-positive-weight contribution
-    # from the portfolio-level turnover at that bar. What remains is
-    # the trim cost on EXISTING sleeves (which the sleeves' internals
-    # didn't bill — those sleeves assumed they were running on 100%
-    # capital, not getting silently trimmed by an allocator) plus exit
-    # costs when a sleeve leaves the universe.
-    naive_diff = target_weights.diff().abs()
-    naive_diff.iloc[0] = target_weights.iloc[0].abs()
-    # Mask first-positive-weight cell per sleeve and zero it out.
-    first_active = target_weights.gt(0).cumsum().eq(1) & target_weights.gt(0)
-    entry_credit = target_weights.where(first_active, 0.0)
-    portfolio_turnover_panel = (naive_diff - entry_credit).clip(lower=0.0)
-    rebalance_turnover = portfolio_turnover_panel.sum(axis=1)
-    rebalance_cost = rebalance_turnover * (fee_rate + slippage_rate)
 
     # Portfolio return at bar t uses weights set at the close of bar
     # t-1, applied to sleeve returns over [t-1, t]. The shift mirrors

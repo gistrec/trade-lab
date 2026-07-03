@@ -12,12 +12,39 @@ import pytest
 from trade_lab.backtest.ensemble import (
     EnsembleResult,
     SleeveSpec,
+    _target_weights_and_turnover,
     correlation_summary,
     run_ensemble_walk_forward,
     sortino_ratio,
 )
 from trade_lab.backtest.ensemble_sleeves import default_sleeves
 from trade_lab.strategies.sma_cross import SMACrossStrategy
+
+
+def test_interior_return_gap_is_flat_day_not_universe_change():
+    """A single missing OOS return AFTER a sleeve has started (one asset
+    missing a daily bar its peers have) is a flat day, not a universe
+    change: the sleeve must stay in N_active with its weight carried, and
+    no rebalance turnover billed at the gap or the bar after it
+    (regression: C8)."""
+    idx = pd.date_range("2024-01-01", periods=5, freq="D")
+    panel = pd.DataFrame(
+        {
+            "A": [0.01, 0.02, np.nan, 0.01, 0.0],   # interior gap at idx[2]
+            "B": [0.00, 0.01, 0.02, -0.01, 0.0],
+        },
+        index=idx,
+    )
+    active, weights, turnover, _cost = _target_weights_and_turnover(
+        panel, fee_rate=0.001, slippage_rate=0.0005,
+    )
+    # A stays in-universe through the gap; both sleeves counted.
+    assert bool(active.loc[idx[2], "A"]) is True
+    assert weights.loc[idx[2], "A"] == pytest.approx(0.5)
+    assert weights.loc[idx[2], "B"] == pytest.approx(0.5)
+    # No spurious rebalance turnover at the gap or the bar after it.
+    assert turnover.loc[idx[2]] == pytest.approx(0.0)
+    assert turnover.loc[idx[3]] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
