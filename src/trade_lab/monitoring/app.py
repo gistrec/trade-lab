@@ -1417,12 +1417,6 @@ def main() -> None:
         page_title="trade-lab monitoring",
         layout="wide",
     )
-    # Streamlit rerun every REFRESH_SECONDS. No browser reload, so the
-    # active tab and other session state survive the tick.
-    st_autorefresh(
-        interval=REFRESH_SECONDS * 1000,
-        key="monitoring_autorefresh",
-    )
 
     st.title("trade-lab monitoring")
     st.caption(
@@ -1462,6 +1456,17 @@ def main() -> None:
         _render_tab_safely("Validation", _render_validation)
 
     _render_footer()
+
+    # Rerun every REFRESH_SECONDS. No browser reload, so the active tab and
+    # other session state survive the tick. Placed LAST on purpose: this is a
+    # custom-component iframe whose load handshake flashes a skeleton
+    # placeholder at its slot on every rerun — at the bottom of the page it is
+    # unobtrusive; at the top it visibly 'popped in' above the title. Position
+    # does not affect the timer (it triggers a full rerun regardless).
+    st_autorefresh(
+        interval=REFRESH_SECONDS * 1000,
+        key="monitoring_autorefresh",
+    )
 
 
 if __name__ == "__main__":
