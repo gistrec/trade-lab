@@ -105,6 +105,18 @@ def build_crypto_market_index_with_weights(
        same index value) so any single-asset Strategy can consume it
        unchanged.
 
+    Known cost-model residual (documented, not fixed here): on a rebalance
+    bar the turnover in step 4 is measured as ``|new_target - current|``
+    where ``current`` is the *pre-drift* weight carried from the previous
+    bar — it is not marked to market through the rebalance bar's own
+    return first. Live execution (which sizes to these weights and trades
+    the constituents) marks to market before rebalancing, so its realised
+    rebalance turnover differs from the index's charged turnover by one
+    bar's drift. The gap is tiny and, more importantly, fixing it would
+    alter historical index equity and therefore the published DSR — an
+    ask-first change to the validated backtest, deliberately out of scope
+    for the live-execution weight work.
+
     Returns a :class:`MarketIndex` whose ``index`` is a DataFrame indexed
     by ``timestamp`` with columns ``open, high, low, close, volume`` (all
     open/high/low = close; volume is 1.0 as a placeholder — no real
