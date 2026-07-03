@@ -378,6 +378,129 @@ def test_render_read_stats_silent_when_clean(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# At-a-glance UX: health verdict, ladder day-delta, commit span (Theme 4)
+# ---------------------------------------------------------------------------
+
+
+class _HealthReader:
+    def __init__(self, *, stats, staleness, cycles=None, live=None):
+        self._stats = stats
+        self._staleness = staleness
+        self._cycles = cycles or []
+        self._live = live
+
+    def stats(self):
+        return self._stats
+
+    def staleness(self, s):
+        return self._staleness
+
+    def cycles(self, n=20):
+        return self._cycles[-n:]
+
+    def latest_live_cycle(self):
+        return self._live
+
+
+def _mk_stats(**kw):
+    from trade_lab.monitoring.data_source import ReadStats
+    return ReadStats(**kw)
+
+
+def test_health_verdict_healthy():
+    from datetime import timedelta
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    fresh_live = {"ended_at": (datetime.now(timezone.utc)
+                               - timedelta(hours=2)).isoformat(),
+                  "orders_executed": []}
+    reader = _HealthReader(
+        stats=_mk_stats(valid_cycles=5), staleness=Staleness.FRESH,
+        cycles=[{"outcome": "success", "orders_executed": []}], live=fresh_live,
+    )
+    level, _why = _health_verdict(reader)
+    assert level == "HEALTHY"
+
+
+def test_health_verdict_down_on_read_error():
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    reader = _HealthReader(stats=_mk_stats(read_error="PermissionError: x"),
+                           staleness=Staleness.NO_DATA)
+    level, why = _health_verdict(reader)
+    assert level == "DOWN"
+    assert "unreadable" in why
+
+
+def test_health_verdict_down_on_unresolved_order():
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    cycles = [{"outcome": "success",
+               "orders_executed": [{"terminal_status": "lost_track",
+                                    "client_order_id": "x"}]}]
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.FRESH, cycles=cycles,
+                           live=cycles[0])
+    level, why = _health_verdict(reader)
+    assert level == "DOWN"
+    assert "unresolved" in why
+
+
+def test_health_verdict_degraded_on_stale():
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.STALE,
+                           cycles=[{"outcome": "success",
+                                    "orders_executed": []}])
+    level, _why = _health_verdict(reader)
+    assert level == "DEGRADED"
+
+
+def test_ladder_prev_day_delta_dedups_by_day():
+    from trade_lab.monitoring.app import _ladder_prev_day_delta
+
+    cycles = []
+    # Day 1: 24 hourly cycles all ladder 1.0
+    for h in range(24):
+        cycles.append({"signal": {"asof": f"2026-06-10T{h:02d}:00:00+00:00",
+                                   "ladder_value": 1.0}})
+    # Day 2: flips to 0.5 (last of day)
+    for h in range(24):
+        cycles.append({"signal": {"asof": f"2026-06-11T{h:02d}:00:00+00:00",
+                                   "ladder_value": 0.5}})
+    # 1.0 → 0.5 across the day boundary; intraday repeats do not count.
+    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) == -0.5
+
+
+def test_ladder_prev_day_delta_none_with_one_day():
+    from trade_lab.monitoring.app import _ladder_prev_day_delta
+
+    cycles = [{"signal": {"asof": "2026-06-10T00:00:00+00:00",
+                          "ladder_value": 1.0}}]
+    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) is None
+
+
+def test_distinct_commits_first_seen_order():
+    from trade_lab.monitoring.app import _distinct_commits
+
+    cycles = [{"git_commit": "aaa"}, {"git_commit": "aaa"},
+              {"git_commit": "bbb"}, {"git_commit": None}]
+    assert _distinct_commits(cycles) == ["aaa", "bbb"]
+
+
+def test_banner_is_sticky(monkeypatch):
+    html = _captured_banner(
+        monkeypatch, {"context": {"sandbox": False, "exchange": "kraken"}}
+    )
+    assert "position:sticky" in html and "MAINNET" in html
+
+
+# ---------------------------------------------------------------------------
 # Ladder chart: gate-closed shading (Theme 2)
 # ---------------------------------------------------------------------------
 

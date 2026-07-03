@@ -122,7 +122,7 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     if latest is None:
         st.markdown(
             "<div style='background:#37474f;color:white;padding:0.8rem;"
-            "border-radius:0.5rem;text-align:center;font-size:1.2rem;'>"
+            "border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.2rem;'>"
             "NO JOURNAL DATA — bot has not started</div>",
             unsafe_allow_html=True,
         )
@@ -136,14 +136,14 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     if sandbox is True:
         st.markdown(
             f"<div style='background:#1b5e20;color:white;padding:0.8rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:1.4rem;'>"
+            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.4rem;'>"
             f"TESTNET — {exchange}</div>",
             unsafe_allow_html=True,
         )
     elif sandbox is not False:
         st.markdown(
             f"<div style='background:#bf360c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:1.6rem;"
+            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.6rem;"
             f"font-weight:bold;'>"
             f"SANDBOX FLAG UNKNOWN — {exchange} — verify config before "
             f"trusting this dashboard</div>",
@@ -152,11 +152,76 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     else:
         st.markdown(
             f"<div style='background:#b71c1c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:2rem;"
+            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:2rem;"
             f"font-weight:bold;letter-spacing:0.1rem;'>"
             f"MAINNET — {exchange} — REAL MONEY</div>",
             unsafe_allow_html=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# One-line health verdict (always visible, under the banner)
+# ---------------------------------------------------------------------------
+
+
+def _health_verdict(reader: JournalReader) -> tuple[str, str]:
+    """Collapse the health signals into (level, why).
+
+    'is the bot healthy right now?' otherwise has no single answer above the
+    tabs — the banner only encodes testnet/mainnet, and the real signals live
+    inside the Status tab. Level is HEALTHY / DEGRADED / DOWN.
+    """
+    stats = reader.stats()
+    if stats.read_error is not None:
+        return ("DOWN", f"journal unreadable ({stats.read_error})")
+    staleness = reader.staleness(EXPECTED_INTERVAL_S)
+    if staleness is Staleness.NO_DATA:
+        return ("DOWN", "no valid cycles in the journal")
+
+    cycles = reader.cycles(n=500)
+    open_orders = open_order_incidents(cycles)
+    incidents = recent_incidents(cycles)
+    live = reader.latest_live_cycle()
+    live_overdue = False
+    if live is not None:
+        dt = parse_iso(live.get("ended_at"))
+        if dt is not None:
+            age = (datetime.now(tz=timezone.utc) - dt).total_seconds()
+            live_overdue = age > EXPECTED_LIVE_INTERVAL_S * 1.5
+
+    if staleness is Staleness.DOWN or open_orders or live_overdue:
+        why = []
+        if staleness is Staleness.DOWN:
+            why.append("heartbeat DOWN")
+        if live_overdue:
+            why.append("live order cron overdue")
+        if open_orders:
+            why.append(f"{len(open_orders)} unresolved order(s)")
+        return ("DOWN", "; ".join(why))
+
+    if staleness is Staleness.STALE or incidents:
+        why = []
+        if staleness is Staleness.STALE:
+            why.append("heartbeat stale")
+        if incidents:
+            why.append(f"{len(incidents)} incident cycle(s) in window")
+        return ("DEGRADED", "; ".join(why))
+
+    return ("HEALTHY", "heartbeat fresh · last live cycle OK · no open incidents")
+
+
+def _render_health_line(reader: JournalReader) -> None:
+    level, why = _health_verdict(reader)
+    color = {"HEALTHY": "#1b5e20", "DEGRADED": "#bf360c", "DOWN": "#b71c1c"}[level]
+    # Not sticky (the sandbox/mainnet banner above owns the pinned slot; two
+    # stacked stickies at top:0 would overlap). This sits directly under it,
+    # above the tabs, so it is visible on load and on every tab switch.
+    st.markdown(
+        f"<div style='background:{color};color:white;padding:0.5rem;"
+        f"border-radius:0.4rem;text-align:center;font-size:1.05rem;'>"
+        f"BOT {level} — {why}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +308,15 @@ def _render_status(reader: JournalReader) -> None:
 
     _render_live_cron_health(reader)
     _render_incidents(reader)
+
+    commits = _distinct_commits(reader.cycles(n=500))
+    if len(commits) > 1:
+        st.warning(
+            f"Observation window spans {len(commits)} git commits "
+            f"({', '.join(commits)}). A redeploy mid-window means the "
+            f"signal-stability sample mixes code versions — interpret trends "
+            f"across the boundary with care."
+        )
 
     drift = reader.cumulative_skipped_drift()
     if drift > 0:
@@ -399,7 +473,14 @@ def _render_signal(reader: JournalReader) -> None:
     # as_float, not .get(default): a present JSON-null ladder_value makes
     # .get return None and f"{None:.2f}" raise — the data layer is hardened
     # against this (signal_history), the top metric was the bypass.
-    cols[0].metric("Ladder value", f"{as_float(sig.get('ladder_value')):.2f}")
+    ladder_delta = _ladder_prev_day_delta(reader)
+    cols[0].metric(
+        "Ladder value",
+        f"{as_float(sig.get('ladder_value')):.2f}",
+        delta=(f"{ladder_delta:+.2f} vs prior day"
+               if ladder_delta is not None else None),
+        delta_color="normal" if ladder_delta else "off",
+    )
     cols[1].metric(
         "SMA(200) gate",
         "OPEN" if gate_open else ("CLOSED" if gate_open is False else "—"),
@@ -530,6 +611,48 @@ def _series_return(values: list, n_days_ago: int) -> str:
     return f"{(today / past - 1.0) * 100:+.2f}%"
 
 
+def _latest_ladder_by_day(reader: JournalReader) -> dict:
+    """Map signal-date → that day's LAST ladder value.
+
+    The journal has ~24 dry-run cycles per day; dedup to one point per date so
+    a day-over-day comparison is meaningful (cache is chronological, so the
+    later cycle of a date overwrites).
+    """
+    by_day: dict = {}
+    for c in reader.cycles(n=500):
+        sig = c.get("signal") or {}
+        dt = parse_iso(sig.get("asof"))
+        lv = sig.get("ladder_value")
+        if dt is None or lv is None:
+            continue
+        by_day[dt.date()] = as_float(lv)
+    return by_day
+
+
+def _ladder_prev_day_delta(reader: JournalReader) -> Optional[float]:
+    """Change in the (per-day) ladder vs the previous distinct signal day.
+
+    The key signal-stability event is 'did deployed exposure flip today?';
+    intraday dry-run repeats must not read as a change, so this compares the
+    last-of-day values, not consecutive cycles.
+    """
+    by_day = _latest_ladder_by_day(reader)
+    if len(by_day) < 2:
+        return None
+    days = sorted(by_day)
+    return by_day[days[-1]] - by_day[days[-2]]
+
+
+def _distinct_commits(cycles: list) -> list:
+    """Distinct git_commit values across the window, in first-seen order."""
+    seen: list = []
+    for c in cycles:
+        gc = c.get("git_commit")
+        if gc and gc not in seen:
+            seen.append(gc)
+    return seen
+
+
 def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
     """Distinct signal *days* since the most recent OPEN gate.
 
@@ -588,6 +711,7 @@ def _basket_close_figure(
         height=320, margin=dict(t=10, b=10, l=10, r=10),
         hovermode="x unified",
         yaxis_title="basket close",
+        xaxis_title="date (UTC)" if start is not None else "day index",
     )
     return fig
 
@@ -732,7 +856,15 @@ def _render_portfolio(reader: JournalReader) -> None:
         total_current += c
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, width="stretch", hide_index=True)
+    st.dataframe(
+        df, width="stretch", hide_index=True,
+        column_config={
+            f"target {quote}": st.column_config.NumberColumn(format="%.2f"),
+            f"current {quote}": st.column_config.NumberColumn(format="%.2f"),
+            "drift": st.column_config.NumberColumn(format="%.2f"),
+            "drift %": st.column_config.NumberColumn(format="%.2f%%"),
+        },
+    )
 
     cols = st.columns(3)
     cols[0].metric(f"Equity ({quote})", f"{equity:,.2f}")
@@ -1184,6 +1316,7 @@ def main() -> None:
             f"journal path and permissions (`{JOURNAL_PATH}`)."
         )
     _render_top_banner(latest)
+    _render_tab_safely("Health", lambda: _render_health_line(reader))
 
     tab_status, tab_signal, tab_portfolio, tab_cycles, tab_validation = st.tabs(
         ["Status", "Signal", "Portfolio", "Cycles", "Validation"]
