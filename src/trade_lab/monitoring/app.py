@@ -72,7 +72,9 @@ AUTHOR_NAME = os.environ.get("TRADE_LAB_MONITORING_AUTHOR", "Aleksandr Kovalko")
 TELEGRAM_URL = os.environ.get(
     "TRADE_LAB_MONITORING_TELEGRAM_URL", "https://t.me/gistrec"
 ).rstrip("/")
-LINKEDIN_URL = os.environ.get("TRADE_LAB_MONITORING_LINKEDIN_URL", "").rstrip("/")
+LINKEDIN_URL = os.environ.get(
+    "TRADE_LAB_MONITORING_LINKEDIN_URL", "https://www.linkedin.com/in/gistrec"
+).rstrip("/")
 
 # Validation forward-test paths (see paper_trading/README.md). All
 # read-only; the validation panel never writes.

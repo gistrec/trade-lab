@@ -526,14 +526,21 @@ def _capture_footer(monkeypatch):
     return app, md[0]
 
 
-def test_footer_shows_github_and_telegram_not_linkedin_by_default(monkeypatch):
+def test_footer_hides_linkedin_when_url_empty(monkeypatch):
     import trade_lab.monitoring.app as app
-    monkeypatch.setattr(app, "LINKEDIN_URL", "")   # default: hidden
+    monkeypatch.setattr(app, "LINKEDIN_URL", "")   # force empty → hidden
     app, html = _capture_footer(monkeypatch)
     assert app.REPO_URL in html and "GitHub" in html
     assert app.TELEGRAM_URL in html and "Telegram" in html
     assert "LinkedIn" not in html
     assert app.AUTHOR_NAME in html
+
+
+def test_footer_shows_all_three_links_with_defaults(monkeypatch):
+    """Defaults now include a LinkedIn URL, so all three render."""
+    _app, html = _capture_footer(monkeypatch)
+    assert "GitHub" in html and "Telegram" in html and "LinkedIn" in html
+    assert "linkedin.com/in/gistrec" in html
 
 
 def test_footer_shows_linkedin_when_url_set(monkeypatch):
