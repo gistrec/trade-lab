@@ -98,6 +98,54 @@ def test_writes_one_row_per_day(tmp_path):
     assert rows[0].config_hash == CANONICAL_HASH
 
 
+def _constant_growth_fetcher(end: date, total_bars: int = 500, daily: float = 0.01):
+    """All 7 assets identical, growing a constant `daily` per bar. The
+    equal-weight basket then grows exactly `daily` per bar with no
+    rebalance turnover, so the true one-day basket return is known."""
+    idx = pd.date_range(
+        end=pd.Timestamp(end, tz="UTC"), periods=total_bars, freq="D",
+    )
+    close = 100.0 * (1.0 + daily) ** np.arange(total_bars)
+    frame = pd.DataFrame(
+        {
+            "open": close, "high": close * 1.0001,
+            "low": close * 0.9999, "close": close,
+            "volume": np.full(total_bars, 1.0e6),
+        },
+        index=idx,
+    )
+    panel = {sym: frame.copy() for sym in PRODUCTION_CONFIG.assets}
+
+    def fetch(sym: str, n_bars: int, asof: date) -> pd.DataFrame:
+        df = panel[sym]
+        df = df[df.index <= pd.Timestamp(asof, tz="UTC")]
+        return df.iloc[-n_bars:]
+
+    return fetch
+
+
+def test_daily_return_is_within_window_not_cross_window(tmp_path):
+    """daily_return must be the basket's one-day return within a single
+    normalized window, NOT prior_row.basket_close / current basket_close.
+    build_crypto_market_index renormalizes to 100 at each window's first
+    bar, so consecutive cycles anchor differently and the cross-window
+    ratio collapses a real +1%/day basket to ~0% (regression: C4)."""
+    d1 = date(2024, 6, 1)
+    d2 = date(2024, 6, 2)
+    log = tmp_path / "j.jsonl"
+    fetch = _constant_growth_fetcher(end=d2, daily=0.01)
+
+    row1 = run_paper_trading_cycle(
+        log_path=log, vintage_root=tmp_path / "v", asof=d1, fetch_callable=fetch,
+    )
+    row2 = run_paper_trading_cycle(
+        log_path=log, vintage_root=tmp_path / "v", asof=d2, fetch_callable=fetch,
+    )
+    assert row1.daily_return == 0.0            # first cycle: no prior
+    # True one-day basket return is +1%; the cross-window bug reports ~0%.
+    assert row2.daily_return == pytest.approx(0.01, abs=1e-4)
+
+
 def test_idempotent_when_run_twice_on_same_date(tmp_path):
     """Re-invocation on the same UTC date must NOT write a duplicate
     row — the cron job is allowed to fire multiple times per day."""

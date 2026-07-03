@@ -163,12 +163,24 @@ def run_paper_trading_cycle(
     else:
         prior_ladder = prior_row.ladder_state
         current_weights = dict(prior_row.target_weights)
-        # Compute return since prior cycle by interpolating basket close
-        prior_basket_close = prior_row.basket_close
-        daily_return = (
-            float(basket_close / prior_basket_close - 1.0)
-            if prior_basket_close > 0 else 0.0
-        )
+        # Return since the prior cycle, measured WITHIN this cycle's
+        # normalized window. build_crypto_market_index renormalizes the
+        # index to 100 at the first bar of whatever window it is handed,
+        # so prior_row.basket_close (stored from a differently-anchored
+        # earlier window) is on another scale — ratioing it against
+        # basket_close does NOT yield the basket return. Locate the bar in
+        # THIS window dated prior_row.date and ratio against it, so the
+        # return spans exactly the holding period even across a missed
+        # cron day.
+        prior_close_same_window = _basket_close_on_date(close, prior_row.date)
+        if prior_close_same_window is not None and prior_close_same_window > 0:
+            daily_return = float(basket_close / prior_close_same_window - 1.0)
+        elif len(close) >= 2 and float(close.iloc[-2]) > 0:
+            # Prior date rolled out of the window (or is unparseable):
+            # fall back to the one-bar return within the same window.
+            daily_return = float(basket_close / float(close.iloc[-2]) - 1.0)
+        else:
+            daily_return = 0.0
         # Mark prior equity forward by prior-ladder × period return.
         portfolio_equity = prior_row.portfolio_equity * (
             1.0 + prior_ladder * daily_return
@@ -215,6 +227,22 @@ def _last_row(log_path: Path) -> Optional[HarnessLogRow]:
     from .journal import read_log
     rows = read_log(log_path)
     return rows[-1] if rows else None
+
+
+def _basket_close_on_date(close: pd.Series, date_str: str) -> Optional[float]:
+    """Close of the normalized basket index on the bar dated ``date_str``.
+
+    Returns ``None`` if no bar matches (the date rolled out of the window,
+    or ``date_str`` is unparseable). Used to read the holding-period return
+    within a single normalized window instead of across two differently
+    anchored ones.
+    """
+    try:
+        target = pd.Timestamp(date_str).date()
+    except (TypeError, ValueError):
+        return None
+    matches = [float(v) for ts, v in close.items() if ts.date() == target]
+    return matches[-1] if matches else None
 
 
 def _default_fetch(sym: str, n_bars: int, asof: date) -> pd.DataFrame:
