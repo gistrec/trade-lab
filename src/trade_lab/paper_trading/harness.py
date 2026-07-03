@@ -154,7 +154,7 @@ def run_paper_trading_cycle(
     target_per_asset = ladder_state / n_assets
     target_weights = {sym: target_per_asset for sym in cfg.assets}
 
-    prior_row = _last_row(log_path)
+    prior_row = _prior_row(log_path, asof_str)
     if prior_row is None:
         prior_ladder = 0.0
         current_weights = {sym: 0.0 for sym in cfg.assets}
@@ -223,10 +223,19 @@ def run_paper_trading_cycle(
     return row
 
 
-def _last_row(log_path: Path) -> Optional[HarnessLogRow]:
+def _prior_row(log_path: Path, asof_str: str) -> Optional[HarnessLogRow]:
+    """The most recent row strictly before ``asof_str``.
+
+    NOT the last physically appended row: an ``--asof`` backfill of a
+    missed earlier date leaves later dates already in the journal, so the
+    last line can be a FUTURE row — chaining the return backwards in time
+    and marking equity off the wrong anchor. ISO date strings sort
+    chronologically, so the max row with ``date < asof`` is the correct
+    predecessor.
+    """
     from .journal import read_log
-    rows = read_log(log_path)
-    return rows[-1] if rows else None
+    prior = (r for r in read_log(log_path) if r.date < asof_str)
+    return max(prior, key=lambda r: r.date, default=None)
 
 
 def _basket_close_on_date(close: pd.Series, date_str: str) -> Optional[float]:

@@ -124,6 +124,43 @@ def _constant_growth_fetcher(end: date, total_bars: int = 500, daily: float = 0.
     return fetch
 
 
+def _seed_row(date_str: str, ladder: float):
+    from trade_lab.paper_trading.journal import HarnessLogRow
+    assets = PRODUCTION_CONFIG.assets
+    return HarnessLogRow(
+        date=date_str, config_hash=CANONICAL_HASH, vintage_content_hash="seed",
+        basket_close=100.0, sma_value=90.0, sma_gate_open=True,
+        ladder_state=ladder, prior_ladder_state=0.0,
+        per_lookback_states={"28": 1, "60": 1},
+        per_lookback_returns={"28": 0.1, "60": 0.1},
+        target_weights={s: ladder / len(assets) for s in assets},
+        current_weights={s: 0.0 for s in assets},
+        intended_trades={s: 0.0 for s in assets},
+        portfolio_equity=10_000.0, daily_return=0.0,
+        gross_position_return=0.0, net_position_return=0.0,
+    )
+
+
+def test_backfill_chains_off_earlier_row_not_future_row(tmp_path):
+    """An --asof backfill of a missed earlier date must chain off the most
+    recent row BEFORE it, not the last physically appended (future) row.
+    Selecting by insertion order chained the return backwards in time
+    (regression: C14)."""
+    from trade_lab.paper_trading.journal import append_row
+
+    log = tmp_path / "j.jsonl"
+    append_row(_seed_row("2024-06-01", 0.5), log)
+    append_row(_seed_row("2024-06-03", 1.0), log)  # a LATER date already logged
+
+    row = run_paper_trading_cycle(
+        log_path=log, vintage_root=tmp_path / "v", asof=date(2024, 6, 2),
+        fetch_callable=_stub_fetcher(date(2024, 6, 2)),
+    )
+    assert row.date == "2024-06-02"
+    # Must chain off 2024-06-01 (ladder 0.5), not the future 2024-06-03 (1.0).
+    assert row.prior_ladder_state == 0.5
+
+
 def test_daily_return_is_within_window_not_cross_window(tmp_path):
     """daily_return must be the basket's one-day return within a single
     normalized window, NOT prior_row.basket_close / current basket_close.
