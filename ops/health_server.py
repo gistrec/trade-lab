@@ -45,7 +45,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 from trade_lab.monitoring.data_source import (
-    INCIDENT_OUTCOMES,
     JournalReader,
     is_live_cycle,
     open_order_incidents,
@@ -94,6 +93,28 @@ def _age_seconds(cycle: dict, now: datetime) -> Optional[float]:
     return (now - ended).total_seconds()
 
 
+def _cycle_mode(cycle: dict) -> Optional[str]:
+    """Return the durable ``context.mode`` ('live'/'dry_run'), or None."""
+    ctx = cycle.get("context")
+    return ctx.get("mode") if isinstance(ctx, dict) else None
+
+
+def _is_live_attempt(cycle: dict) -> bool:
+    """True if this cycle was a live order run — even one that failed before
+    placing anything.
+
+    Prefers the durable ``context.mode`` marker (present on every cycle since
+    the mode-marker change, including fail-before-placement failures). Falls
+    back to ``is_live_cycle`` (orders_executed) for pre-marker journal entries,
+    which cannot see a live cycle that died before placing an order — the exact
+    gap the marker closes going forward.
+    """
+    mode = _cycle_mode(cycle)
+    if mode is not None:
+        return mode == "live"
+    return is_live_cycle(cycle)
+
+
 def evaluate_heartbeat(
     reader: JournalReader, now: datetime, max_age_s: float,
 ) -> HealthResult:
@@ -137,13 +158,16 @@ def evaluate_daily(
     if read_error:
         return HealthResult(False, f"journal unreadable: {read_error}",
                             {"read_error": read_error})
-    # "Main" live cycles are real order placement. Reconstruction cycles
-    # (outcome=="reconstructed") are excluded: they prove a PRIOR cycle's open
-    # orders were reconciled, not that today's placement happened, so counting
-    # one as the daily clock would mask a same-day placement failure.
+    # "Main" live cycles are real order runs, identified by the durable
+    # context.mode marker so a live run that FAILED before placing an order is
+    # still counted (and its failure caught below). Reconstruction cycles
+    # (outcome=="reconstructed") are excluded: they only prove a PRIOR cycle's
+    # open orders were reconciled, not that today's placement ran. Dry-run
+    # cycles (mode=='dry_run') are excluded entirely, so a benign hourly
+    # dry-run failure never pages this endpoint.
     main_live = [
         c for c in cycles
-        if is_live_cycle(c) and c.get("outcome") != "reconstructed"
+        if _is_live_attempt(c) and c.get("outcome") != "reconstructed"
     ]
     if not main_live:
         return HealthResult(False, "no live order cycle in journal window", {})
@@ -169,28 +193,9 @@ def evaluate_daily(
             detail,
         )
     if outcome not in HEALTHY_MAIN_LIVE_OUTCOMES:
+        # Covers a live run that placed orders then failed AND one that died
+        # before placing (both carry mode=='live' and a non-success outcome).
         return HealthResult(False, f"last live outcome={outcome}", detail)
-    # Durable fresh-failure catch: any incident cycle newer than the last
-    # successful live run means something failed since — including a live
-    # attempt that died BEFORE placing an order (it writes orders_executed=None
-    # so it is not itself a 'main live' cycle). This scans the window instead
-    # of trusting latest_cycle(), so a later dry-run cannot overwrite the
-    # signal away. NOTE: with no live/dry marker in the journal, this also
-    # fires on a dry-run failure after the last live success — the safe
-    # direction (favour catching a real live failure over staying quiet).
-    for c in cycles:  # scan the whole window, newest included
-        if c.get("outcome") not in INCIDENT_OUTCOMES:
-            continue
-        ce = parse_iso(c.get("ended_at"))
-        if ce is not None and ce > last_ended:
-            return HealthResult(
-                False,
-                f"cycle failed after last live success (outcome={c.get('outcome')})",
-                {**detail,
-                 "incident_cycle_id": c.get("cycle_id"),
-                 "incident_ended_at": c.get("ended_at"),
-                 "incident_outcome": c.get("outcome")},
-            )
     return HealthResult(True, "ok", detail)
 
 

@@ -35,7 +35,7 @@ live** order cycle (see `execution/README.md`). One probe cannot separate
 | Endpoint | Question | 200 when | 503 when |
 |---|---|---|---|
 | `GET /healthz` | heartbeat | a cycle within `HEARTBEAT_MAX_AGE_S` (default 2h) | journal unreadable/empty, or no cycle in ~2h |
-| `GET /healthz/daily` | daily live health | last **main** live cycle (real placement; reconstruction excluded) within `DAILY_MAX_AGE_S` (26h) with outcome `success`, **and** no incident cycle newer than it | no live cycle in window, stale >26h, live outcome not `success`, or any cycle failed after the last live success (see notes below) |
+| `GET /healthz/daily` | daily live health | last **main** live cycle (identified by `context.mode=='live'`; reconstruction excluded) within `DAILY_MAX_AGE_S` (26h) with outcome `success` | no live cycle in window, stale >26h, or live outcome not `success` — including a live run that failed even before placing an order (see note) |
 | `GET /` | human summary | always (informational, not an alarm target) | — |
 
 `partial` is treated as unhealthy on purpose — CLAUDE.md forbids silent
@@ -43,24 +43,23 @@ partial fills. `open_order_incidents` is surfaced in the `/healthz/daily`
 body for humans but does **not** gate 503 in v1 (kept out of the paging
 path to avoid false positives from stale window entries).
 
-**Blind-spot notes (why `/daily` scans a window, not just the latest entry).**
-Two false-negative paths, both rooted in the journal carrying no durable
-live/dry marker:
+**How `/daily` identifies the live run (and two failure modes it closes).**
+Every cycle carries a durable `context.mode` (`'live'` / `'dry_run'`), set in
+`live_cycle.py` / `dry_run.py`. `/healthz/daily` selects the last cycle with
+`mode=='live'`, so:
 
-1. A live run that raises *before* placing any order writes
-   `orders_executed=None` (`live_cycle.py`), so it reads as non-live and an
-   older success would mask it. `/healthz/daily` therefore also 503s on **any
-   incident cycle newer than the last successful live run** — a durable scan,
-   so a later hourly dry-run can't overwrite the signal away.
-2. A **reconstruction** cycle (`outcome=reconstructed`) is live but only
-   proves a *prior* cycle's orders were reconciled, so it is **excluded** from
-   the daily clock — it can't stand in for today's placement.
+1. A live run that raises *before* placing any order still has `mode=='live'`
+   (with `orders_executed=None`), so it is the latest main-live cycle and its
+   `failed` outcome trips 503 — it can no longer hide behind an older success.
+2. A **reconstruction** cycle (`outcome=='reconstructed'`) is `mode=='live'`
+   but only proves a *prior* cycle's orders were reconciled, so it is
+   **excluded** from the daily clock.
 
-Tradeoff: with no live/dry marker, path 1 also fires on a *dry-run* failure
-after the last live success — the safe direction (catch a real live failure
-rather than stay quiet). The clean fix is a small `mode` field on the cycle
-`context` in the execution layer; that is an execution-layer change pending
-owner approval.
+Because the marker is exact, a benign hourly **dry-run** failure
+(`mode=='dry_run'`) never pages `/daily` — no false positive. (Pre-marker
+journal entries fall back to the `orders_executed` heuristic, which cannot see
+a fail-before-placement live cycle; this only affects history written before
+the marker shipped.)
 
 ## Configuration (env)
 
@@ -91,12 +90,18 @@ sudo cp ops/netdata/health.d/trade_lab.conf     /etc/netdata/health.d/trade_lab.
 sudo netdatacli reload-health
 ```
 
-**Before trusting the alarms, read the scoping banner in
-`netdata/health.d/trade_lab.conf`.** A `template: on: httpcheck.status`
-matches *every* httpcheck job, so each alarm must be scoped to its own job
-(via `chart labels`) or it cross-fires with the ClearTranscriptBot alarm —
-scope them the same way that working alarm already is, and verify the label
-key against your `netdata -v`.
+**Prerequisite — re-scope the existing ClearTranscriptBot alarm first.**
+Its `cleartranscript_healthcheck` is a `template: on: httpcheck.status` with
+no chart-labels line, so it matches *every* httpcheck job; the moment the
+trade-lab jobs appear it also fires on them. Add one line to it:
+
+```
+chart labels: _collect_job=cleartranscript
+```
+
+The trade-lab alarms scope by `_collect_job` (verified present on this box's
+go.d httpcheck charts), so each attaches to exactly its own job. Then
+`sudo netdatacli reload-health`.
 
 ## Known limitation (by design)
 

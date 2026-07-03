@@ -29,10 +29,17 @@ def _entry(
     live: bool,
     cycle_id: str = "c1",
     orders_executed=None,
+    mode=None,
 ) -> dict:
-    """Build a minimal schema-v2 journal entry the reader will accept."""
+    """Build a minimal schema-v2 journal entry the reader will accept.
+
+    ``mode`` defaults from ``live`` but can be set explicitly to model a live
+    run that failed before placing an order (mode='live', orders_executed=None).
+    """
     if live and orders_executed is None:
         orders_executed = []  # a list (even empty) marks a live cycle
+    if mode is None:
+        mode = "live" if live else "dry_run"
     return {
         "schema_version": 2,
         "cycle_id": cycle_id,
@@ -40,6 +47,7 @@ def _entry(
         "ended_at": ended_at.isoformat(),
         "duration_ms": 1000,
         "outcome": outcome,
+        "context": {"mode": mode, "exchange": "binance", "sandbox": True},
         "orders_executed": orders_executed,  # None => dry-run, list => live
     }
 
@@ -184,19 +192,33 @@ def test_daily_live_outcome_failure_when_not_latest(tmp_path):
 
 
 def test_daily_catches_fresh_failure_before_placement(tmp_path):
-    # THE blind spot: a live run that failed *before* placing an order writes
-    # orders_executed=None, so it reads as non-live. Without the fresh-failure
-    # catch, latest_live_cycle() would return the still-fresh (<26h) success
-    # and report 200 while today's live attempt actually failed.
+    # THE blind spot, now closed by the mode marker: a live run that failed
+    # *before* placing an order writes orders_executed=None but context
+    # mode=='live', so it IS the latest main-live cycle and its failed outcome
+    # trips 503 — even though a fresh success exists 20h back.
     reader = _journal(tmp_path, [
         _entry(ended_at=NOW - timedelta(hours=20), outcome="success",
                live=True, cycle_id="yesterday_ok"),
         _entry(ended_at=NOW - timedelta(minutes=10), outcome="failed",
-               live=False, cycle_id="today_failed_early"),  # orders_executed=None
+               live=False, mode="live", orders_executed=None,
+               cycle_id="today_failed_early"),
     ])
     r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
     assert not r.ok and r.status_code == 503
-    assert "failed after last live success" in r.reason
+    assert "last live outcome=failed" in r.reason
+
+
+def test_daily_dry_run_failure_does_not_page(tmp_path):
+    # The mode marker's payoff: a benign hourly DRY-RUN failure after a healthy
+    # live run must NOT page /daily (it is not a live-order failure).
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=3), outcome="success",
+               live=True, cycle_id="live_ok"),
+        _entry(ended_at=NOW - timedelta(minutes=10), outcome="failed",
+               live=False, cycle_id="dry_blip"),  # mode='dry_run'
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert r.ok and r.status_code == 200
 
 
 # --------------------------------------------------------------------------

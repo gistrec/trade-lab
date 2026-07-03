@@ -385,6 +385,11 @@ def _placed_at_ms(placed_at: str) -> Optional[int]:
 
 def _build_context(broker: Broker) -> dict:
     return {
+        # Durable live/dry marker for read-only monitoring (the health
+        # server). Present even when a cycle fails before placing an order,
+        # so a failed live attempt is never misread as a dry-run. Metadata
+        # only — changes no trading behaviour.
+        "mode": "live",
         "exchange": broker.config.exchange_id,
         "sandbox": broker.config.sandbox,
         "quote_currency": broker.config.quote_currency,

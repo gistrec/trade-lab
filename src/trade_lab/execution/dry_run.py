@@ -161,6 +161,9 @@ def run_dry_cycle(
 
 def _build_context(broker: Broker) -> dict:
     return {
+        # Durable live/dry marker for read-only monitoring (the health
+        # server), mirroring live_cycle._build_context. Metadata only.
+        "mode": "dry_run",
         "exchange": broker.config.exchange_id,
         "sandbox": broker.config.sandbox,
         "quote_currency": broker.config.quote_currency,
