@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from trade_lab.backtest.market_index import build_crypto_market_index_with_weights
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.signal import (
@@ -171,8 +172,47 @@ def test_basket_weights_reflect_divergent_performance():
     })
     broker = Broker(_config(), _ExchangeStub())
     snap = compute_live_signal(broker, fetch_candles=fetch)
-    assert snap.basket_weights["BTC"] >= snap.basket_weights["ETH"]
+    # Strict, non-flat: an accidental revert to flat 1/N in signal.py would
+    # make BTC == 1/7 and fail here. asof (~mid-May 2024 for this window) is
+    # not a month-start bar, so the weight is genuinely drifted.
+    assert snap.basket_weights["BTC"] > 1.0 / 7 + 1e-4
+    assert snap.basket_weights["ETH"] < 1.0 / 7
     assert sum(snap.basket_weights.values()) == pytest.approx(1.0)
+
+
+def test_basket_weights_are_the_asof_row_not_shifted():
+    """Timing lock: basket_weights must be the weight row AT asof (the last
+    completed bar) — the backtest's held-into-next-bar convention — NOT the
+    prior bar. A shift(1) off-by-one on the weight lookup would pick the
+    stale row and fail here."""
+    n = 500
+    strong = (100 + np.linspace(0, 400, n)).tolist()
+    weak = (100 + np.linspace(0, 20, n)).tolist()
+    symbol_to_closes = {"BTC": strong, "ETH": weak, "BNB": weak, "SOL": weak,
+                        "ADA": weak, "XRP": weak, "DOGE": weak}
+    fetch = _candles_factory(symbol_to_closes)
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+
+    # Rebuild the index EXACTLY as compute_live_signal does: the last
+    # candles_per_asset (400) bars, in-progress bar dropped (a no-op for
+    # these historical dates).
+    cutoff = pd.Timestamp.now(tz="UTC").normalize()
+    candles = {}
+    for s, c in symbol_to_closes.items():
+        df = _ohlcv(c).iloc[-400:]
+        candles[s] = df[df.index < cutoff]
+    market = build_crypto_market_index_with_weights(candles)
+
+    expected = market.weights.loc[snap.asof]
+    loc = market.weights.index.get_loc(snap.asof)
+    prev = market.weights.iloc[loc - 1]
+    # asof and the prior row must genuinely differ, else the test could not
+    # distinguish loc[asof] from a one-bar shift.
+    assert not np.allclose(expected.to_numpy(), prev.to_numpy())
+    for sym in candles:
+        assert snap.basket_weights[sym] == pytest.approx(float(expected[sym]))
+        assert snap.basket_weights[sym] != pytest.approx(float(prev[sym]))
 
 
 def test_signal_missing_asset_raises():
