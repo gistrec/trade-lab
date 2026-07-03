@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness,
+    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, as_float,
     cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
     duration_stats, equity_series, is_live_cycle, max_inter_cycle_gap_seconds,
     open_order_incidents, parse_iso, recent_incidents,
@@ -594,6 +594,34 @@ def test_max_inter_cycle_gap_detects_mid_window_pause():
 def test_max_inter_cycle_gap_none_with_under_two_timestamps():
     assert max_inter_cycle_gap_seconds([]) is None
     assert max_inter_cycle_gap_seconds([_cycle_entry("c1")]) is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud on an unreadable journal (Theme 3): the initial read runs OUTSIDE
+# tab-safety, so a PermissionError/IsADirectoryError must degrade to a
+# read_error, never propagate and blank the page + banner.
+# ---------------------------------------------------------------------------
+
+
+def test_directory_at_journal_path_records_read_error_not_raise(tmp_path):
+    """A directory where the journal file is expected raises IsADirectoryError
+    from open() — an OSError the reader now catches into read_error."""
+    journal = tmp_path / "cycles.jsonl"
+    journal.mkdir()                       # a directory, not a file
+    reader = JournalReader(journal)
+    assert reader.latest_cycle() is None          # must not raise
+    assert reader.staleness(3600) is Staleness.NO_DATA
+    stats = reader.stats()
+    assert stats.read_error is not None
+    assert "IsADirectoryError" in stats.read_error or "Error" in stats.read_error
+
+
+def test_as_float_is_total():
+    assert as_float(1.5) == 1.5
+    assert as_float("2.5") == 2.5
+    assert as_float(None) == 0.0            # present JSON null
+    assert as_float("garbage") == 0.0
+    assert as_float(None, default=9.0) == 9.0
 
 
 # ---------------------------------------------------------------------------

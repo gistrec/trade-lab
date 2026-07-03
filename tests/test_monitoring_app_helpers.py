@@ -338,6 +338,46 @@ def test_incidents_warns_on_failed_cycle(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Fail-loud robustness (Theme 3)
+# ---------------------------------------------------------------------------
+
+
+def test_series_return_tolerates_null_and_garbage_elements():
+    from trade_lab.monitoring.app import _series_return
+
+    assert _series_return([100.0, None], 1) == "—"        # null element
+    assert _series_return([100.0, "x"], 1) == "—"         # garbage element
+    assert _series_return([100.0, 110.0], 1) == "+10.00%"  # still works
+
+
+def test_render_read_stats_warns_on_corrupt_and_errors_on_read_error(monkeypatch):
+    import trade_lab.monitoring.app as app
+    from trade_lab.monitoring.data_source import ReadStats
+
+    cap = {}
+    _stub_st(monkeypatch, cap)
+
+    app._render_read_stats(ReadStats(total_lines=10, valid_cycles=8,
+                                     corrupt_lines=2))
+    assert cap["warning"]                       # corrupt → warning, not caption
+
+    cap2 = {}
+    _stub_st(monkeypatch, cap2)
+    app._render_read_stats(ReadStats(read_error="PermissionError: denied"))
+    assert cap2["error"]                        # unreadable journal → loud error
+
+
+def test_render_read_stats_silent_when_clean(monkeypatch):
+    import trade_lab.monitoring.app as app
+    from trade_lab.monitoring.data_source import ReadStats
+
+    cap = {}
+    _stub_st(monkeypatch, cap)
+    app._render_read_stats(ReadStats(total_lines=5, valid_cycles=5))
+    assert not cap["warning"] and not cap["error"] and not cap["caption"]
+
+
+# ---------------------------------------------------------------------------
 # Ladder chart: gate-closed shading (Theme 2)
 # ---------------------------------------------------------------------------
 

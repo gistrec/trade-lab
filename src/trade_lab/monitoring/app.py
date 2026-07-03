@@ -37,10 +37,10 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness, cycle_orders_executed, drift_series,
-    duration_series, duration_stats, equity_series, is_live_cycle,
-    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
-    recent_incidents,
+    JournalReader, ReadStats, Staleness, as_float, cycle_orders_executed,
+    drift_series, duration_series, duration_stats, equity_series,
+    is_live_cycle, max_inter_cycle_gap_seconds, open_order_incidents,
+    parse_iso, recent_incidents,
 )
 
 
@@ -178,7 +178,11 @@ def _render_status(reader: JournalReader) -> None:
         # string truncates) and surface the precise timestamp below
         # the row in a caption.
         cols[1].metric("Last cycle", _humanize_relative(last_ended_iso))
-        cols[2].metric("Last duration", f"{latest.get('duration_ms', 0)} ms")
+        _dur = latest.get("duration_ms")
+        cols[2].metric(
+            "Last duration",
+            f"{_dur} ms" if isinstance(_dur, (int, float)) else "—",
+        )
         cols[3].metric("Outcome", str(latest.get("outcome") or "?").upper())
     else:
         for c in cols[1:]:
@@ -350,12 +354,27 @@ def _render_incidents(reader: JournalReader) -> None:
 
 
 def _render_read_stats(stats: ReadStats) -> None:
-    if stats.corrupt_lines > 0 or stats.unknown_version_lines > 0:
+    if stats.read_error is not None:
+        st.error(
+            f"JOURNAL UNREADABLE — {stats.read_error}. The file exists but "
+            f"this process cannot read it. Check the path and permissions "
+            f"(`{JOURNAL_PATH}`): the monitoring user needs group-read on the "
+            f"journal. Until fixed, the dashboard shows NO data."
+        )
+    # Corrupt lines are a data-integrity event (truncated write, disk glitch,
+    # writer regression) → a visible warning, not a grey caption. Unknown-
+    # version lines are benign forward-compat and stay a low-key caption.
+    if stats.corrupt_lines > 0:
+        st.warning(
+            f"Journal scan: {stats.corrupt_lines} CORRUPT line(s) skipped "
+            f"(of {stats.total_lines} non-empty). {stats.valid_cycles} valid. "
+            f"A steady rise means the writer or disk is producing bad rows."
+        )
+    if stats.unknown_version_lines > 0:
         st.caption(
-            f"Journal scan: {stats.valid_cycles} valid, "
-            f"{stats.corrupt_lines} corrupt, "
-            f"{stats.unknown_version_lines} unknown-version "
-            f"(of {stats.total_lines} non-empty lines)."
+            f"Journal scan: {stats.unknown_version_lines} unknown-version "
+            f"entrie(s) skipped (of {stats.total_lines} non-empty) — likely a "
+            f"newer bot schema than this dashboard understands."
         )
 
 
@@ -377,7 +396,10 @@ def _render_signal(reader: JournalReader) -> None:
 
     # --- Top row: 4 metrics ---
     cols = st.columns(4)
-    cols[0].metric("Ladder value", f"{sig.get('ladder_value', 0.0):.2f}")
+    # as_float, not .get(default): a present JSON-null ladder_value makes
+    # .get return None and f"{None:.2f}" raise — the data layer is hardened
+    # against this (signal_history), the top metric was the bypass.
+    cols[0].metric("Ladder value", f"{as_float(sig.get('ladder_value')):.2f}")
     cols[1].metric(
         "SMA(200) gate",
         "OPEN" if gate_open else ("CLOSED" if gate_open is False else "—"),
@@ -490,11 +512,19 @@ def _render_signal(reader: JournalReader) -> None:
 
 
 def _series_return(values: list, n_days_ago: int) -> str:
-    """Format ``values[-1] / values[-(n+1)] - 1`` as a +/- percent."""
+    """Format ``values[-1] / values[-(n+1)] - 1`` as a +/- percent.
+
+    A null / non-numeric element (external journal input) yields ``—``
+    instead of raising — the series can carry garbage the same way any other
+    journal field can.
+    """
     if len(values) < n_days_ago + 1:
         return "—"
-    today = float(values[-1])
-    past = float(values[-(n_days_ago + 1)])
+    try:
+        today = float(values[-1])
+        past = float(values[-(n_days_ago + 1)])
+    except (TypeError, ValueError):
+        return "—"
     if past == 0:
         return "—"
     return f"{(today / past - 1.0) * 100:+.2f}%"
@@ -687,8 +717,10 @@ def _render_portfolio(reader: JournalReader) -> None:
     total_target = 0.0
     total_current = 0.0
     for asset in sorted(set(list(target.keys()) + list(current.keys()))):
-        t = float(target.get(asset, 0.0))
-        c = float(current.get(asset, 0.0))
+        # as_float, not float(.get(default)): a present JSON-null weight makes
+        # .get return None and float(None) raise, blanking the tab.
+        t = as_float(target.get(asset))
+        c = as_float(current.get(asset))
         rows.append({
             "asset": asset,
             f"target {quote}": t,
@@ -1138,7 +1170,19 @@ def main() -> None:
     )
 
     reader = _get_reader()
-    latest = reader.latest_cycle()
+    # The initial read and the safety banner run BEFORE the per-tab
+    # containment, so an unexpected error here would blank the whole page —
+    # including the mainnet banner. The reader is hardened to fail into a
+    # read_error rather than raise, but keep a belt-and-suspenders guard so
+    # nothing can take the banner down.
+    try:
+        latest = reader.latest_cycle()
+    except Exception as exc:  # pragma: no cover - reader is hardened
+        latest = None
+        st.error(
+            f"JOURNAL READ FAILED — {type(exc).__name__}: {exc}. Check the "
+            f"journal path and permissions (`{JOURNAL_PATH}`)."
+        )
     _render_top_banner(latest)
 
     tab_status, tab_signal, tab_portfolio, tab_cycles, tab_validation = st.tabs(

@@ -51,6 +51,11 @@ class ReadStats:
     valid_cycles: int = 0
     corrupt_lines: int = 0
     unknown_version_lines: int = 0
+    # Set when the journal exists but could not be read (permission/OS error,
+    # a directory at the path). The whole deployment hinges on the monitoring
+    # user having exactly read access — this is the failure the README's
+    # permission steps warn about, so it must be surfaced, not swallowed.
+    read_error: Optional[str] = None
 
 
 def cycle_orders_executed(cycle: dict) -> list:
@@ -294,7 +299,7 @@ def parse_iso(s) -> Optional[datetime]:
     return dt
 
 
-def _as_float(value, default: float = 0.0) -> float:
+def as_float(value, default: float = 0.0) -> float:
     """Coerce a journal field to float; total (never raises).
 
     JSON null, non-numeric strings, and absent keys all fall back to
@@ -308,6 +313,10 @@ def _as_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# Internal alias retained for the module's own historical call sites.
+_as_float = as_float
 
 
 class JournalReader:
@@ -427,6 +436,15 @@ class JournalReader:
                 self._cache = []
                 self._stats = ReadStats()
             return
+        except OSError as exc:
+            # Path exists but is unstattable (permission on the directory, a
+            # broken mount). Fail loud into a read_error, not an exception
+            # that blanks the page.
+            self._mtime = None
+            self._size = None
+            self._cache = []
+            self._stats = ReadStats(read_error=f"{type(exc).__name__}: {exc}")
+            return
         if st.st_mtime == self._mtime and st.st_size == self._size:
             return
         self._mtime = st.st_mtime
@@ -442,6 +460,15 @@ class JournalReader:
                 raw = f.read()
         except FileNotFoundError:
             self._cache = []
+            self._stats = stats
+            return
+        except OSError as exc:
+            # The journal exists but is unreadable — a PermissionError (wrong
+            # group/mode, the exact README misconfiguration) or a directory at
+            # the path (IsADirectoryError). Record it loud instead of letting
+            # it propagate out of the un-contained initial read in main().
+            self._cache = []
+            stats.read_error = f"{type(exc).__name__}: {exc}"
             self._stats = stats
             return
         for line_bytes in raw.split(b"\n"):
