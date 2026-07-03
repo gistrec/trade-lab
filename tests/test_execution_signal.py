@@ -140,6 +140,41 @@ def test_signal_returns_match_states():
         assert snap.per_lookback_states[L] == expected_state
 
 
+def test_signal_records_basket_weights():
+    """basket_weights carries one drifted weight per basket asset; with
+    identical trajectories they stay equal-weight (~1/7) and sum to 1.
+    The allocator sizes each asset to signal × w_i × equity (C3)."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    fetch = _candles_factory({s: closes for s in
+        ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+    assert set(snap.basket_weights.keys()) == {
+        "BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE",
+    }
+    assert sum(snap.basket_weights.values()) == pytest.approx(1.0)
+    for w in snap.basket_weights.values():
+        assert w == pytest.approx(1.0 / 7)
+
+
+def test_basket_weights_reflect_divergent_performance():
+    """When one asset far outperforms the rest, its drifted weight at
+    asof is >= the laggards' (strictly greater unless asof lands exactly
+    on a monthly rebalance bar, where all reset to 1/N). This drifted
+    weight — not a flat 1/N reset — is what the allocator must size to."""
+    n = 500
+    strong = (100 + np.linspace(0, 400, n)).tolist()   # steep uptrend
+    weak = (100 + np.linspace(0, 20, n)).tolist()      # nearly flat
+    fetch = _candles_factory({
+        "BTC": strong, "ETH": weak, "BNB": weak, "SOL": weak,
+        "ADA": weak, "XRP": weak, "DOGE": weak,
+    })
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+    assert snap.basket_weights["BTC"] >= snap.basket_weights["ETH"]
+    assert sum(snap.basket_weights.values()) == pytest.approx(1.0)
+
+
 def test_signal_missing_asset_raises():
     """If a single basket asset returns no candles, the signal computation
     refuses to proceed — we never want the basket to silently shrink."""

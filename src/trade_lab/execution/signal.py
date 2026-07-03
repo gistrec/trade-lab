@@ -33,7 +33,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from ..backtest.market_index import build_crypto_market_index
+from ..backtest.market_index import build_crypto_market_index_with_weights
 from ..strategies.tsmom import TimeSeriesMomentumStrategy
 from .broker import Broker
 
@@ -66,6 +66,14 @@ class SignalSnapshot:
     # Actual pct_change(L) at asof per lookback. Magnitude distinguishes
     # "barely positive" from "screaming uptrend" — the binary states
     # alone hide that distance to a flip.
+    basket_weights: dict[str, float] = field(default_factory=dict)
+    # Per-asset drifted weight at asof, taken from the basket index's
+    # weight matrix (flat 1/N_active right after a monthly rebalance,
+    # drifting between). The allocator sizes each asset to
+    # ``signal × w_i × equity`` so live execution tracks the backtest's
+    # monthly-rebalanced, between-rebalance-drifting weights instead of
+    # resetting to flat 1/N every daily cycle (C3 / Option B). Empty for
+    # callers/tests that construct the snapshot by hand.
 
 
 def compute_live_signal(
@@ -121,7 +129,7 @@ def compute_live_signal(
         asset_candles[sym] = df
 
     try:
-        basket = build_crypto_market_index(
+        market = build_crypto_market_index_with_weights(
             asset_candles,
             fee_rate=fee_rate,
             slippage_rate=slippage_rate,
@@ -130,6 +138,7 @@ def compute_live_signal(
         # Data gaps (missing candles after listing) — same category as
         # a failed fetch: the basket is not whole, refuse loudly.
         raise SignalComputationError(str(exc)) from exc
+    basket = market.index
     if basket.empty:
         raise SignalComputationError("Basket construction returned empty frame.")
 
@@ -143,6 +152,13 @@ def compute_live_signal(
         raise SignalComputationError("Strategy returned an empty signal series.")
     asof = signal_series.index[-1]
     signal_value = float(signal_series.iloc[-1])
+
+    # Per-asset drifted weight at asof (same code path as the backtest,
+    # so the weights the executor sizes to are the ones the backtest
+    # actually held). ``.loc[asof]`` fails loud if the weight matrix and
+    # the signal series ever disagree on the last bar.
+    weights_row = market.weights.loc[asof]
+    basket_weights = {sym: float(weights_row[sym]) for sym in asset_candles}
 
     # Diagnostics: report whether the SMA(200) regime gate was open at
     # asof. This is useful in the dry-run log to explain why the
@@ -178,6 +194,7 @@ def compute_live_signal(
         basket_close_tail=basket["close"].tail(100),
         sma_value=float(sma) if pd.notna(sma) else None,
         per_lookback_returns=per_lookback_returns,
+        basket_weights=basket_weights,
     )
 
 
