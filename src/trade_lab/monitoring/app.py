@@ -66,6 +66,13 @@ EXPECTED_LIVE_INTERVAL_S = int(
 REPO_URL = os.environ.get(
     "TRADE_LAB_MONITORING_REPO_URL", "https://github.com/gistrec/trade-lab"
 ).rstrip("/")
+# Footer author + contact links. All env-configurable; a contact link renders
+# only when its URL is non-empty (LinkedIn is off until a URL is provided).
+AUTHOR_NAME = os.environ.get("TRADE_LAB_MONITORING_AUTHOR", "Aleksandr Kovalko")
+TELEGRAM_URL = os.environ.get(
+    "TRADE_LAB_MONITORING_TELEGRAM_URL", "https://t.me/gistrec"
+).rstrip("/")
+LINKEDIN_URL = os.environ.get("TRADE_LAB_MONITORING_LINKEDIN_URL", "").rstrip("/")
 
 # Validation forward-test paths (see paper_trading/README.md). All
 # read-only; the validation panel never writes.
@@ -1298,6 +1305,39 @@ def _render_tab_safely(tab_name: str, render_fn) -> None:
     render_tab_safely(tab_name, render_fn, note=_TAB_NOTE)
 
 
+def _render_footer() -> None:
+    """Subtle bottom-of-page footer: project + author links.
+
+    All links are env-configurable; each renders only when its URL is set
+    (``LINKEDIN_URL`` is empty by default, so LinkedIn stays hidden until a
+    URL is provided). Read-only text — no data, no exchange, no credentials.
+    """
+    def _a(url: str, label: str) -> str:
+        return (
+            f"<a href='{url}' target='_blank' rel='noopener' "
+            f"style='color:#8ab4f8;text-decoration:none;'>{label} ↗</a>"
+        )
+
+    links = []
+    if REPO_URL:
+        links.append(_a(REPO_URL, "GitHub"))
+    if TELEGRAM_URL:
+        links.append(_a(TELEGRAM_URL, "Telegram"))
+    if LINKEDIN_URL:
+        links.append(_a(LINKEDIN_URL, "LinkedIn"))
+
+    line1 = "trade-lab" + ("&nbsp;·&nbsp;" + "&nbsp;·&nbsp;".join(links)
+                           if links else "")
+    st.markdown(
+        f"<hr style='margin-top:2.5rem;margin-bottom:0.5rem;border:none;"
+        f"border-top:1px solid #333;'>"
+        f"<div style='text-align:center;color:#888;font-size:0.85rem;"
+        f"line-height:1.7;'>{line1}<br>"
+        f"Read-only monitoring · {AUTHOR_NAME}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="trade-lab monitoring",
@@ -1346,6 +1386,8 @@ def main() -> None:
         _render_tab_safely("Cycles", lambda: _render_cycles(reader))
     with tab_validation:
         _render_tab_safely("Validation", _render_validation)
+
+    _render_footer()
 
 
 if __name__ == "__main__":

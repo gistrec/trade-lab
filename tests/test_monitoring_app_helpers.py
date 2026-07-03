@@ -509,6 +509,49 @@ def test_commit_link_plain_span_when_repo_url_disabled(monkeypatch):
     assert app._commit_link("abc1234") == "`abc1234`"
 
 
+# ---------------------------------------------------------------------------
+# Footer — project + author links (env-configurable, hidden when URL empty)
+# ---------------------------------------------------------------------------
+
+
+def _capture_footer(monkeypatch):
+    import trade_lab.monitoring.app as app
+    md: list[str] = []
+    monkeypatch.setattr(
+        app.st, "markdown",
+        lambda html, unsafe_allow_html=False: md.append(html),
+    )
+    app._render_footer()
+    assert len(md) == 1
+    return app, md[0]
+
+
+def test_footer_shows_github_and_telegram_not_linkedin_by_default(monkeypatch):
+    import trade_lab.monitoring.app as app
+    monkeypatch.setattr(app, "LINKEDIN_URL", "")   # default: hidden
+    app, html = _capture_footer(monkeypatch)
+    assert app.REPO_URL in html and "GitHub" in html
+    assert app.TELEGRAM_URL in html and "Telegram" in html
+    assert "LinkedIn" not in html
+    assert app.AUTHOR_NAME in html
+
+
+def test_footer_shows_linkedin_when_url_set(monkeypatch):
+    import trade_lab.monitoring.app as app
+    monkeypatch.setattr(app, "LINKEDIN_URL", "https://linkedin.com/in/example")
+    _app, html = _capture_footer(monkeypatch)
+    assert "linkedin.com/in/example" in html and "LinkedIn" in html
+
+
+def test_footer_hides_a_link_when_its_url_is_empty(monkeypatch):
+    import trade_lab.monitoring.app as app
+    monkeypatch.setattr(app, "TELEGRAM_URL", "")
+    monkeypatch.setattr(app, "LINKEDIN_URL", "")
+    _app, html = _capture_footer(monkeypatch)
+    assert "Telegram" not in html and "LinkedIn" not in html
+    assert "GitHub" in html                         # REPO_URL still set
+
+
 def test_banner_not_sticky_to_avoid_health_line_overlap(monkeypatch):
     """The banner is deliberately NOT position:sticky: a sticky banner with a
     non-sticky health line below it makes the health line slide UNDER the
