@@ -1,5 +1,7 @@
 # trade-lab
 
+[![CI](https://github.com/gistrec/trade-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/gistrec/trade-lab/actions/workflows/ci.yml)
+
 A research framework for fetching crypto OHLCV data, defining trading
 strategies, and backtesting them with realistic fees and slippage — built
 around a **layered honesty** validation stack so the final number you ship

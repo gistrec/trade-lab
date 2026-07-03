@@ -1,0 +1,83 @@
+name: CI
+
+# Gate every push to main and every PR against it. The daily
+# paper-place-orders CLI and the execution layer place real orders on
+# testnet, so a red suite must block code from reaching the VPS.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same ref cancels the in-flight run — saves CI
+# minutes and avoids stale green/red badges racing each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the checked-out code.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every interpreter's result even if one fails, rather than
+      # aborting the whole matrix on the first red.
+      fail-fast: false
+      matrix:
+        # Mirrors requires-python = ">=3.11". 3.11 and 3.13 are verified
+        # locally; 3.12 sits between them.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + all extras
+        # research/monitoring/dashboard extras are needed so every module
+        # imports (hmmlearn, scikit-learn, streamlit, plotly); otherwise
+        # collection of the monitoring/backtest tests would error.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,research,monitoring,dashboard]"
+
+      - name: Run tests with coverage
+        # Floor sits just under the current 73% so a small regression is
+        # caught without turning the build red on noise. Ratchet upward
+        # as coverage of the CLI paths grows.
+        run: >-
+          pytest
+          --cov=trade_lab
+          --cov-report=term-missing
+          --cov-fail-under=70
+
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff
+        # Version range mirrors the dev extra in pyproject.toml so local
+        # and CI enforce the same rule set.
+        run: python -m pip install "ruff>=0.15,<0.16"
+
+      - name: ruff check
+        # --output-format=github annotates offending lines inline in the
+        # PR diff. Rule set + per-file-ignores live in pyproject.toml.
+        run: ruff check --output-format=github .
