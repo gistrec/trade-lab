@@ -18,11 +18,13 @@ Configuration via environment variables:
   default; the underlying data only updates once per bot cycle, so
   smaller values just waste CPU.
 
-Autorefresh uses ``streamlit-autorefresh`` (a thin JS component that
-triggers a Streamlit rerun without reloading the page). An HTML
-``<meta>`` tag would also tick but at the cost of a full page reload,
-which throws away the active tab and any other session state — for a
-multi-tab dashboard that is operationally annoying every refresh.
+Auto-refresh uses a native ``st.fragment(run_every=...)`` around the
+dashboard body: Streamlit reruns just that fragment every
+``MONITORING_REFRESH_SECONDS`` to pull fresh journal data, with no browser
+reload (the active tab and slider state survive). This replaced the earlier
+``streamlit-autorefresh`` component, whose iframe flashed a skeleton
+placeholder on the page each tick. An HTML ``<meta>`` refresh tag was never
+an option — a full page reload throws away the active tab and session state.
 """
 from __future__ import annotations
 
@@ -34,7 +36,6 @@ from typing import Optional
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
     DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER, Staleness,
@@ -1412,18 +1413,17 @@ def _render_footer() -> None:
     )
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="trade-lab monitoring",
-        layout="wide",
-    )
+@st.fragment(run_every=REFRESH_SECONDS)
+def _render_dashboard() -> None:
+    """Everything below the title, re-rendered on the auto-refresh tick.
 
-    st.title("trade-lab monitoring")
-    st.caption(
-        f"Read-only dashboard for the paper-trading bot. "
-        f"Auto-refreshes every {REFRESH_SECONDS}s. Journal: `{JOURNAL_PATH}`."
-    )
-
+    A native ``st.fragment`` with ``run_every`` reruns THIS block every
+    REFRESH_SECONDS to pull fresh journal data — no browser reload (the active
+    tab and slider state survive) and, unlike the old streamlit-autorefresh
+    component, no iframe and therefore no skeleton placeholder flashing on the
+    page. Widget interactions here also rerun only this fragment, not the whole
+    script.
+    """
     reader = _get_reader()
     # The initial read and the safety banner run BEFORE the per-tab
     # containment, so an unexpected error here would blank the whole page —
@@ -1457,16 +1457,20 @@ def main() -> None:
 
     _render_footer()
 
-    # Rerun every REFRESH_SECONDS. No browser reload, so the active tab and
-    # other session state survive the tick. Placed LAST on purpose: this is a
-    # custom-component iframe whose load handshake flashes a skeleton
-    # placeholder at its slot on every rerun — at the bottom of the page it is
-    # unobtrusive; at the top it visibly 'popped in' above the title. Position
-    # does not affect the timer (it triggers a full rerun regardless).
-    st_autorefresh(
-        interval=REFRESH_SECONDS * 1000,
-        key="monitoring_autorefresh",
+
+def main() -> None:
+    st.set_page_config(
+        page_title="trade-lab monitoring",
+        layout="wide",
     )
+    # Static header rendered once; the dynamic body lives in an auto-rerunning
+    # fragment (no skeleton-flashing autorefresh iframe).
+    st.title("trade-lab monitoring")
+    st.caption(
+        f"Read-only dashboard for the paper-trading bot. "
+        f"Auto-refreshes every {REFRESH_SECONDS}s. Journal: `{JOURNAL_PATH}`."
+    )
+    _render_dashboard()
 
 
 if __name__ == "__main__":
