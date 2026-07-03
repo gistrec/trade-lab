@@ -218,6 +218,26 @@ def test_success_path_clean_uptrend(tmp_path):
     assert len(cycle["orders_executed"]) == 2
 
 
+def test_journal_records_basket_weights(tmp_path):
+    """The whole C3 chain must reach the journal: the signal snapshot's
+    drifted per-asset weights are recorded so a reviewer can reconcile
+    that execution sized to the basket's drifted weights, not flat 1/N.
+    With the stub's identical closes the weights come out equal-weight
+    and sum to 1."""
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    broker = _broker(stub)
+    clock = _MockClock()
+    run_live_cycle(
+        broker, journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    cycle = _read_cycles(tmp_path)[0]
+    weights = cycle["signal"]["basket_weights"]
+    assert set(weights.keys()) == {"BTC", "ETH"}
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["BTC"] == pytest.approx(0.5)
+
+
 def test_signal_zero_no_orders(tmp_path):
     """Downtrend → signal=0 → no orders planned → outcome=success,
     orders_executed=[]."""

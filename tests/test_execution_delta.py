@@ -13,11 +13,13 @@ from trade_lab.execution.delta import (
 
 _PRICES = {"BTC": 50_000.0, "ETH": 3_000.0}
 _BASKET = ("BTC", "ETH")
+_EQUAL = {"BTC": 0.5, "ETH": 0.5}   # flat 1/N weights for a 2-asset basket
 
 
-def _allocation(signal=1.0, equity=70_000.0):
+def _allocation(signal=1.0, equity=70_000.0, weights=_EQUAL):
     return compute_target_allocation(
-        signal=signal, total_equity=equity, prices=_PRICES, basket=_BASKET,
+        signal=signal, total_equity=equity, prices=_PRICES,
+        basket=_BASKET, weights=weights,
     )
 
 
@@ -141,6 +143,46 @@ def test_total_skipped_quote_drift_sums_notional():
     )
     drift = total_skipped_quote_drift(plan)
     assert drift == pytest.approx(5.0)
+
+
+_DRIFTED = {"BTC": 0.6, "ETH": 0.4}   # BTC outperformed → overweight in the index
+
+
+def _holdings_tracking(weights, equity=70_000.0):
+    """Base-unit holdings whose quote value equals signal=1 × weights ×
+    equity — i.e. holdings that have drifted along with the index."""
+    return {sym: (weights[sym] * equity) / _PRICES[sym] for sym in _BASKET}
+
+
+def test_drifted_weight_target_produces_no_orders_when_holdings_track_index():
+    """Option B self-gating (C3): between monthly rebalances the
+    drifted-weight target equals the drifted holdings, so NO orders fire —
+    exactly the low daily turnover the backtest measured. Sizing to flat
+    1/N instead would churn every day (see the contrast test)."""
+    alloc = _allocation(signal=1.0, weights=_DRIFTED)
+    current = _holdings_tracking(_DRIFTED)
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+    )
+    assert plan.orders == []
+    assert plan.skipped == []
+
+
+def test_flat_weight_target_churns_the_same_drifted_holdings():
+    """Contrast + regression witness: the SAME drifted holdings sized to
+    FLAT 1/N force a full rebalance (BTC sell, ETH buy). This is both the
+    pre-C3 daily-churn bug AND, correctly, what the month-start weight
+    reset does — the difference is cadence, and only the drifted-weight
+    path suppresses it on the in-between days."""
+    alloc = _allocation(signal=1.0, weights=_EQUAL)   # flat 1/N reset weights
+    current = _holdings_tracking(_DRIFTED)            # holdings still drifted
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+    )
+    sides = {o.symbol: o.side for o in plan.orders}
+    assert sides == {"BTC/USDT": "sell", "ETH/USDT": "buy"}
 
 
 def test_missing_constraints_does_no_filtering():

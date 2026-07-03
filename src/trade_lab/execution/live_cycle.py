@@ -150,6 +150,7 @@ def run_live_cycle(
             total_equity=equity,
             prices=ticker_prices,
             basket=broker.config.basket,
+            weights=snap.basket_weights,
         )
         quote = broker.config.quote_currency
         constraints = _gather_constraints(broker, broker.config.basket, quote)
@@ -529,6 +530,7 @@ def _write_main_cycle(
             },
             "basket_close": snap.basket_close,
             "asset_closes": snap.asset_closes,
+            "basket_weights": dict(snap.basket_weights),
         },
         basket_close_series=_basket_close_series_dict(snap.basket_close_tail),
         balance={
