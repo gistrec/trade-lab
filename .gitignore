@@ -23,6 +23,9 @@ htmlcov/
 # Local owner-only ops helper (SSH deploy) — never committed
 deploy.sh
 
+# Local owner-only personal / interview drafts — never committed
+docs/systems_visibility_roadmap.md
+
 # Local data and secrets
 .env
 /data/
