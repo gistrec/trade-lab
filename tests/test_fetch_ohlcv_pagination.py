@@ -60,3 +60,29 @@ def test_short_pages_do_not_truncate_history(monkeypatch):
     # All 6 candles arrive even though every page was "short" (2 < 1000).
     assert len(df) == _PagedExchange.N_CANDLES
     assert instances[0].fetch_calls >= 3
+
+
+def test_tz_aware_until_does_not_crash_and_trims(monkeypatch):
+    """A timezone-aware `until` (produced by CLI --until with an offset,
+    or datetime.now(timezone.utc)) must trim, not crash:
+    pd.Timestamp(until, tz="UTC") raises ValueError on a tz-aware datetime
+    (regression: C2). Trimming reuses the already-computed until_ms."""
+    def factory(params=None):
+        return _PagedExchange(params)
+
+    monkeypatch.setattr(ccxt, "pagedexchange", factory, raising=False)
+
+    from datetime import datetime, timezone
+
+    # until at the 3rd candle (START + 2 days), tz-AWARE.
+    until_dt = datetime.fromtimestamp(
+        (_PagedExchange.START_MS + 2 * _DAY_MS) / 1000, tz=timezone.utc,
+    )
+    df = fetch_ohlcv(
+        "pagedexchange", "BTC/USDT", timeframe="1d",
+        since=datetime(2020, 9, 13, tzinfo=timezone.utc),
+        until=until_dt,
+        limit=1000,
+    )
+    # Must not raise; trimmed to candles at or before `until` (indices 0,1,2).
+    assert len(df) == 3

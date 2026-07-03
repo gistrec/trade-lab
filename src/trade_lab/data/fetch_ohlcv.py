@@ -89,8 +89,11 @@ def fetch_ohlcv(
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.set_index("timestamp").sort_index()
     df = df[~df.index.duplicated(keep="first")]
-    if until is not None and not df.empty:
-        df = df[df.index <= pd.Timestamp(until, tz="UTC")]
+    if until_ms is not None and not df.empty:
+        # Reuse the already tz-correct until_ms: pd.Timestamp(until, tz="UTC")
+        # raises ValueError when `until` is tz-aware (e.g. CLI --until with an
+        # offset, or datetime.now(timezone.utc)).
+        df = df[df.index <= pd.Timestamp(until_ms, unit="ms", tz="UTC")]
     validate_ohlcv(df)
     return df
 
