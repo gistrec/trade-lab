@@ -60,6 +60,12 @@ REFRESH_SECONDS = int(os.environ.get("MONITORING_REFRESH_SECONDS", "30"))
 EXPECTED_LIVE_INTERVAL_S = int(
     os.environ.get("MONITORING_EXPECTED_LIVE_INTERVAL_SECONDS", "86400")
 )
+# Base URL for linking a journalled git_commit to its source on the host.
+# Override for a fork / self-hosted git; empty string disables linking (commits
+# render as plain code spans).
+REPO_URL = os.environ.get(
+    "TRADE_LAB_MONITORING_REPO_URL", "https://github.com/gistrec/trade-lab"
+).rstrip("/")
 
 # Validation forward-test paths (see paper_trading/README.md). All
 # read-only; the validation panel never writes.
@@ -123,7 +129,7 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     if latest is None:
         st.markdown(
             "<div style='background:#37474f;color:white;padding:0.8rem;"
-            "border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.2rem;'>"
+            "border-radius:0.5rem;text-align:center;font-size:1.2rem;'>"
             "NO JOURNAL DATA — bot has not started</div>",
             unsafe_allow_html=True,
         )
@@ -137,14 +143,14 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     if sandbox is True:
         st.markdown(
             f"<div style='background:#1b5e20;color:white;padding:0.8rem;"
-            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.4rem;'>"
+            f"border-radius:0.5rem;text-align:center;font-size:1.4rem;'>"
             f"TESTNET — {exchange}</div>",
             unsafe_allow_html=True,
         )
     elif sandbox is not False:
         st.markdown(
             f"<div style='background:#bf360c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:1.6rem;"
+            f"border-radius:0.5rem;text-align:center;font-size:1.6rem;"
             f"font-weight:bold;'>"
             f"SANDBOX FLAG UNKNOWN — {exchange} — verify config before "
             f"trusting this dashboard</div>",
@@ -153,7 +159,7 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     else:
         st.markdown(
             f"<div style='background:#b71c1c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;position:sticky;top:0;z-index:999;text-align:center;font-size:2rem;"
+            f"border-radius:0.5rem;text-align:center;font-size:2rem;"
             f"font-weight:bold;letter-spacing:0.1rem;'>"
             f"MAINNET — {exchange} — REAL MONEY</div>",
             unsafe_allow_html=True,
@@ -214,12 +220,14 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
 def _render_health_line(reader: JournalReader) -> None:
     level, why = _health_verdict(reader)
     color = {"HEALTHY": "#1b5e20", "DEGRADED": "#bf360c", "DOWN": "#b71c1c"}[level]
-    # Not sticky (the sandbox/mainnet banner above owns the pinned slot; two
-    # stacked stickies at top:0 would overlap). This sits directly under it,
-    # above the tabs, so it is visible on load and on every tab switch.
+    # A clear margin-top gap separates this from the sandbox/mainnet banner
+    # above — without it two same-green plaques (TESTNET + HEALTHY are both
+    # #1b5e20) read as one merged block. Neither is sticky: a sticky banner
+    # with a non-sticky sibling makes the sibling slide UNDER it on scroll.
     st.markdown(
         f"<div style='background:{color};color:white;padding:0.5rem;"
-        f"border-radius:0.4rem;text-align:center;font-size:1.05rem;'>"
+        f"margin-top:0.5rem;border-radius:0.4rem;text-align:center;"
+        f"font-size:1.05rem;'>"
         f"BOT {level} — {why}</div>",
         unsafe_allow_html=True,
     )
@@ -314,11 +322,12 @@ def _render_status(reader: JournalReader) -> None:
 
     commits = _distinct_commits(reader.cycles(n=500))
     if len(commits) > 1:
+        links = ", ".join(_commit_link(c) for c in commits)
         st.warning(
             f"Observation window spans {len(commits)} git commits "
-            f"({', '.join(commits)}). A redeploy mid-window means the "
-            f"signal-stability sample mixes code versions — interpret trends "
-            f"across the boundary with care."
+            f"({links}). A redeploy mid-window means the signal-stability "
+            f"sample mixes code versions — interpret trends across the "
+            f"boundary with care."
         )
 
     drift = reader.cumulative_skipped_drift()
@@ -655,6 +664,15 @@ def _distinct_commits(cycles: list) -> list:
         if gc and gc not in seen:
             seen.append(gc)
     return seen
+
+
+def _commit_link(sha: str) -> str:
+    """Markdown for one commit: a link to its source when REPO_URL is set,
+    else a plain code span. st.warning renders markdown, so links are
+    clickable in the dashboard."""
+    if REPO_URL:
+        return f"[`{sha}`]({REPO_URL}/commit/{sha})"
+    return f"`{sha}`"
 
 
 def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:

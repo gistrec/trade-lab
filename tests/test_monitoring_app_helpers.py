@@ -493,11 +493,32 @@ def test_distinct_commits_first_seen_order():
     assert _distinct_commits(cycles) == ["aaa", "bbb"]
 
 
-def test_banner_is_sticky(monkeypatch):
+def test_commit_link_builds_clickable_markdown():
+    import trade_lab.monitoring.app as app
+
+    link = app._commit_link("abc1234")
+    # markdown link to the commit source (st.warning renders markdown)
+    assert link == f"[`abc1234`]({app.REPO_URL}/commit/abc1234)"
+    assert "/commit/abc1234" in link
+
+
+def test_commit_link_plain_span_when_repo_url_disabled(monkeypatch):
+    import trade_lab.monitoring.app as app
+
+    monkeypatch.setattr(app, "REPO_URL", "")
+    assert app._commit_link("abc1234") == "`abc1234`"
+
+
+def test_banner_not_sticky_to_avoid_health_line_overlap(monkeypatch):
+    """The banner is deliberately NOT position:sticky: a sticky banner with a
+    non-sticky health line below it makes the health line slide UNDER the
+    banner on scroll, and the two same-green plaques read as one merged block
+    (user-reported regression). Kept as a plain top-of-page element."""
     html = _captured_banner(
         monkeypatch, {"context": {"sandbox": False, "exchange": "kraken"}}
     )
-    assert "position:sticky" in html and "MAINNET" in html
+    assert "MAINNET" in html
+    assert "position:sticky" not in html
 
 
 # ---------------------------------------------------------------------------
