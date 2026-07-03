@@ -86,6 +86,22 @@ def parse_iso(s) -> Optional[datetime]:
     return dt
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    """Coerce a journal field to float; total (never raises).
+
+    JSON null, non-numeric strings, and absent keys all fall back to
+    ``default``. The journal is external input to this process — a single
+    bad field must degrade one value, not raise and blank the dashboard.
+    Mirrors :func:`parse_iso`'s totality for numeric fields. Note that
+    ``dict.get(key, default)`` does NOT cover a present JSON null (it
+    returns None), which is exactly the case that crashed here.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class JournalReader:
     """Cached, fail-soft reader for a journal file.
 
@@ -138,7 +154,7 @@ class JournalReader:
                 continue
             out.append((
                 asof,
-                float(sig.get("ladder_value", 0.0)),
+                _as_float(sig.get("ladder_value")),
                 bool(sig.get("sma_gate_open", False)),
             ))
         return out

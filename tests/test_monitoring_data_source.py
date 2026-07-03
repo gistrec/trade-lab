@@ -130,6 +130,38 @@ def test_reads_valid_entries(tmp_path):
     assert reader.stats().valid_cycles == 3
 
 
+def test_signal_history_tolerates_null_ladder_value(tmp_path):
+    """A cycle whose signal.ladder_value is JSON null must not crash
+    signal_history: .get(key, default) does NOT catch a present null, so
+    float(None) would raise TypeError and blank the whole dashboard. The
+    module contract is to tolerate null/garbage journal fields
+    (regression: R4)."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("good", signal_value=1.0),
+        _cycle_entry("nullish", signal_value=None),
+    ])
+    reader = JournalReader(journal)
+    history = reader.signal_history(days=30)  # must not raise
+    ladders = [v for _, v, _ in history]
+    assert 1.0 in ladders
+    assert 0.0 in ladders          # null coerced, not crashed
+    assert len(history) == 2
+
+
+def test_signal_history_tolerates_garbage_ladder_value(tmp_path):
+    """A non-numeric ladder_value (corrupt/hand-edited row) must not
+    crash signal_history either (regression: R4)."""
+    journal = tmp_path / "j.jsonl"
+    good = _cycle_entry("good", signal_value=1.0)
+    garbage = _cycle_entry("garbage", signal_value=1.0)
+    garbage["signal"]["ladder_value"] = "not-a-number"
+    _write_journal(journal, [good, garbage])
+    reader = JournalReader(journal)
+    history = reader.signal_history(days=30)  # must not raise
+    assert any(v == 1.0 for _, v, _ in history)
+
+
 def test_cycles_n_returns_last_n(tmp_path):
     journal = tmp_path / "j.jsonl"
     _write_journal(journal, [
