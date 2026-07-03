@@ -94,7 +94,11 @@ from .ensemble import (
     sortino_ratio,
 )
 from .ensemble_sleeves import DEFAULT_ASSETS, default_sleeves
-from .market_index import build_crypto_market_index
+from .market_index import (
+    MarketIndex,
+    build_crypto_market_index,
+    build_crypto_market_index_with_weights,
+)
 from .cluster_stability import (
     ClusterStabilityResult, run_cluster_stability_check,
 )
@@ -123,7 +127,9 @@ __all__ = [
     "aggregate_walk_forward",
     "DEFAULT_ASSETS",
     "EnsembleResult",
+    "MarketIndex",
     "build_crypto_market_index",
+    "build_crypto_market_index_with_weights",
     "ClusterStabilityResult",
     "run_cluster_stability_check",
     "SleeveSpec",

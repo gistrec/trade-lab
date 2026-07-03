@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from trade_lab.backtest.market_index import build_crypto_market_index
+from trade_lab.backtest.market_index import (
+    MarketIndex,
+    build_crypto_market_index,
+    build_crypto_market_index_with_weights,
+)
 
 
 def _candles(closes, start="2020-01-01"):
@@ -157,3 +161,86 @@ def test_leading_nan_late_listing_still_allowed():
     idx = build_crypto_market_index(candles)
     assert len(idx) == 100
     assert (idx["close"] > 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Per-asset drifted weights (Option B: the live executor sizes to these
+# instead of resetting to flat 1/N every daily cycle — C3)
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_returns_bare_dataframe_for_backcompat():
+    """build_crypto_market_index still returns just the OHLCV frame so
+    the backtest engine / harness / lookahead detector are unaffected."""
+    candles = {"BTC/USDT": _candles(np.linspace(100, 150, 30).tolist())}
+    out = build_crypto_market_index(candles)
+    assert isinstance(out, pd.DataFrame)
+    assert list(out.columns) == ["open", "high", "low", "close", "volume"]
+
+
+def test_with_weights_returns_index_and_weights():
+    closes = np.linspace(100, 200, 50).tolist()
+    candles = {"BTC/USDT": _candles(closes)}
+    mi = build_crypto_market_index_with_weights(
+        candles, fee_rate=0.0, slippage_rate=0.0,
+    )
+    assert isinstance(mi, MarketIndex)
+    assert list(mi.index.columns) == ["open", "high", "low", "close", "volume"]
+    assert list(mi.weights.columns) == ["BTC/USDT"]
+    assert mi.weights.index.equals(mi.index.index)
+    # A single active asset always carries the whole basket.
+    assert np.allclose(mi.weights["BTC/USDT"].to_numpy(), 1.0)
+
+
+def test_weights_sum_to_one_over_active_assets():
+    a = np.linspace(100, 150, 40).tolist()
+    b = np.linspace(100, 90, 40).tolist()
+    candles = {"A/USDT": _candles(a), "B/USDT": _candles(b)}
+    mi = build_crypto_market_index_with_weights(
+        candles, fee_rate=0.0, slippage_rate=0.0,
+    )
+    assert np.allclose(mi.weights.sum(axis=1).to_numpy(), 1.0)
+
+
+def test_weights_flat_at_rebalance_then_drift_between():
+    """The core Option-B property. Within a single month (only bar 0
+    rebalances under freq='MS') the weights start equal-weight and then
+    drift with returns — the overperformer becomes overweight. The live
+    executor must size to *this* drifted weight, not snap back to 50/50
+    daily."""
+    a = np.linspace(100, 200, 20).tolist()   # A doubles across the month
+    b = [100.0] * 20                          # B flat
+    candles = {"A/USDT": _candles(a), "B/USDT": _candles(b)}
+    w = build_crypto_market_index_with_weights(
+        candles, fee_rate=0.0, slippage_rate=0.0,
+    ).weights
+    assert w["A/USDT"].iloc[0] == pytest.approx(0.5)
+    assert w["B/USDT"].iloc[0] == pytest.approx(0.5)
+    # A outperformed with no intervening rebalance → overweight.
+    assert w["A/USDT"].iloc[-1] > 0.6
+    assert w["B/USDT"].iloc[-1] < 0.4
+    assert w["A/USDT"].iloc[-1] + w["B/USDT"].iloc[-1] == pytest.approx(1.0)
+
+
+def test_weights_reset_to_flat_on_monthly_rebalance():
+    """The Feb-01 month-start rebalance snaps the Jan drift back to
+    equal-weight — this is exactly the monthly turnover the backtest
+    paid and the live executor should reproduce (real orders fire here,
+    not daily)."""
+    n = 45   # 2020-01-01 .. 2020-02-14
+    a = np.linspace(100, 200, 31).tolist() + [200.0] * (n - 31)  # Jan doubles, Feb flat
+    b = [100.0] * n
+    candles = {"A/USDT": _candles(a), "B/USDT": _candles(b)}
+    w = build_crypto_market_index_with_weights(
+        candles, fee_rate=0.0, slippage_rate=0.0,
+    ).weights
+    feb_start = pd.Timestamp("2020-02-01", tz="UTC")
+    pre = w.loc[w.index < feb_start, "A/USDT"].iloc[-1]
+    assert pre > 0.6                                      # overweight just before reset
+    assert w.loc[feb_start, "A/USDT"] == pytest.approx(0.5)   # snapped back
+
+
+def test_with_weights_empty_input_returns_empty_weights():
+    mi = build_crypto_market_index_with_weights({})
+    assert mi.index.empty
+    assert mi.weights.empty

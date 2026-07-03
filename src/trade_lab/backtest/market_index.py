@@ -21,6 +21,7 @@ charged inside the index construction so callers see a "clean" series.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Mapping
 
 import numpy as np
@@ -28,6 +29,28 @@ import pandas as pd
 
 
 _OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+
+@dataclass(frozen=True)
+class MarketIndex:
+    """The basket index series plus the per-asset weights that built it.
+
+    ``index`` is the OHLCV-shaped synthetic close series a single-asset
+    Strategy consumes. ``weights`` holds the *actual* per-asset weight
+    held at each bar — flat ``1/N_active`` immediately after a rebalance,
+    drifting with returns between rebalances, renormalised to sum to 1
+    over active assets. Its index matches ``index``; its columns are the
+    asset keys of ``asset_candles``.
+
+    The live executor sizes to ``weights.loc[asof]`` so it replicates the
+    backtest's *drifted* holdings, rather than forcing a flat-weight
+    rebalance every daily cycle (which would add per-day turnover the
+    monthly-rebalanced backtest never paid). See
+    :func:`trade_lab.execution.allocator.compute_target_allocation`.
+    """
+
+    index: pd.DataFrame
+    weights: pd.DataFrame
 
 
 def build_crypto_market_index(
@@ -38,6 +61,31 @@ def build_crypto_market_index(
     slippage_rate: float = 0.0005,
     rebalance_freq: str = "MS",
 ) -> pd.DataFrame:
+    """Equal-weight market-basket index (OHLCV only).
+
+    Thin wrapper over :func:`build_crypto_market_index_with_weights` for
+    the many callers (backtest engine, harness, lookahead detector) that
+    only consume the synthetic close series. Callers that must size to
+    the basket's drifted per-asset weights — i.e. the live executor —
+    use :func:`build_crypto_market_index_with_weights` directly.
+    """
+    return build_crypto_market_index_with_weights(
+        asset_candles,
+        initial_capital=initial_capital,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        rebalance_freq=rebalance_freq,
+    ).index
+
+
+def build_crypto_market_index_with_weights(
+    asset_candles: Mapping[str, pd.DataFrame],
+    *,
+    initial_capital: float = 10_000.0,
+    fee_rate: float = 0.001,
+    slippage_rate: float = 0.0005,
+    rebalance_freq: str = "MS",
+) -> MarketIndex:
     """Equal-weight market-basket index with periodic rebalancing.
 
     Algorithm:
@@ -57,20 +105,21 @@ def build_crypto_market_index(
        same index value) so any single-asset Strategy can consume it
        unchanged.
 
-    Returns a DataFrame indexed by ``timestamp`` with columns
-    ``open, high, low, close, volume`` (all open/high/low = close;
-    volume is 1.0 as a placeholder — no real volume aggregation is
-    attempted here).
+    Returns a :class:`MarketIndex` whose ``index`` is a DataFrame indexed
+    by ``timestamp`` with columns ``open, high, low, close, volume`` (all
+    open/high/low = close; volume is 1.0 as a placeholder — no real
+    volume aggregation is attempted here), and whose ``weights`` holds
+    the per-asset drifted weight at every bar (see :class:`MarketIndex`).
     """
     if not asset_candles:
-        return _empty_index()
+        return MarketIndex(_empty_index(), _empty_weights())
 
     closes = pd.concat(
         {k: v["close"].astype(float) for k, v in asset_candles.items()},
         axis=1,
     ).sort_index()
     if closes.empty:
-        return _empty_index()
+        return MarketIndex(_empty_index(), _empty_weights())
 
     # Fail loud on data gaps. Leading NaN = asset not yet listed
     # (dynamic universe entry, by design). NaN *after* an asset's first
@@ -177,8 +226,12 @@ def build_crypto_market_index(
         index=closes.index,
     )
     out.index.name = "timestamp"
-    return out
+    return MarketIndex(index=out, weights=weights_df)
 
 
 def _empty_index() -> pd.DataFrame:
     return pd.DataFrame(columns=_OHLCV_COLUMNS).rename_axis("timestamp")
+
+
+def _empty_weights() -> pd.DataFrame:
+    return pd.DataFrame().rename_axis("timestamp")
