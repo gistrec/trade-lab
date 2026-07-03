@@ -123,7 +123,10 @@ def run_cluster_stability_check(
             return_oos_returns=True,
         )
         summary = aggregate_walk_forward(
-            detail, oos_returns=oos, num_trials=num_trials_for_dsr,
+            detail,
+            annualization_factor=annualization_factor,
+            oos_returns=oos,
+            num_trials=num_trials_for_dsr,
         )
         rows.append({
             "variant": spec.label,

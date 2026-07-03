@@ -53,6 +53,34 @@ def test_per_variant_row_count_matches_grid():
     assert set(res.per_variant["variant"]) == {"sma_10_30", "sma_20_50", "sma_30_100"}
 
 
+def test_annualization_factor_forwarded_to_concat_oos_sharpe():
+    """concat_oos_sharpe must be annualized with the caller's factor, the
+    same basis as mean_per_fold_sharpe. The factor was passed to the
+    per-fold walk-forward but NOT to aggregate_walk_forward, so
+    concat_oos_sharpe silently used the 365 default (regression: C11)."""
+    candles = _candles(1400, seed=3)
+    grid = _sma_grid([(10, 30), (20, 50)])
+    kw = dict(train_months=12, test_months=3, step_months=3)
+    res365 = run_cluster_stability_check(
+        candles, grid, annualization_factor=365, **kw
+    )
+    res252 = run_cluster_stability_check(
+        candles, grid, annualization_factor=252, **kw
+    )
+    m365 = res365.per_variant.set_index("variant")
+    m252 = res252.per_variant.set_index("variant")
+    expected_ratio = np.sqrt(252 / 365)
+    checked = 0
+    for variant in m365.index:
+        c365 = m365.loc[variant, "concat_oos_sharpe"]
+        c252 = m252.loc[variant, "concat_oos_sharpe"]
+        if abs(c365) < 1e-9:
+            continue
+        checked += 1
+        assert c252 / c365 == pytest.approx(expected_ratio, rel=1e-6)
+    assert checked > 0, "no variant produced a non-zero concat_oos_sharpe"
+
+
 def test_passes_threshold_flag_consistent_with_dsr():
     candles = _candles(1200, seed=2)
     grid = _sma_grid([(10, 30), (20, 50)])
