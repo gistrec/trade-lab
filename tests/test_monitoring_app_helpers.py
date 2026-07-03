@@ -280,3 +280,13 @@ def test_banner_unknown_on_non_bool_garbage(monkeypatch):
     )
     assert "UNKNOWN" in html
     assert "TESTNET" not in html
+
+
+def test_banner_unknown_on_non_dict_context(monkeypatch):
+    """A truthy non-dict context (schema drift / corrupt row) must degrade
+    to the UNKNOWN banner, not raise AttributeError — the banner is the
+    ONE renderer outside tab-safety, so a crash blanks the whole page
+    (regression: R6)."""
+    html = _captured_banner(monkeypatch, {"context": "binance-sandbox"})
+    assert "UNKNOWN" in html
+    assert "TESTNET" not in html

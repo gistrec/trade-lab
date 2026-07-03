@@ -95,7 +95,13 @@ def _render_top_banner(latest: Optional[dict]) -> None:
             unsafe_allow_html=True,
         )
         return
-    ctx = latest.get("context") or {}
+    ctx = latest.get("context")
+    # `or {}` alone only guards None/falsy — a truthy non-dict context
+    # (schema drift, corruption) would make ctx.get() raise AttributeError
+    # and blank the whole page, since the banner is the one renderer
+    # outside _render_tab_safely. Coerce anything non-dict to {}.
+    if not isinstance(ctx, dict):
+        ctx = {}
     # Safety banner fails loud: only an explicit True is "safe". A
     # missing or non-bool flag (schema drift, truncated context) must
     # NOT render the reassuring green testnet banner.
