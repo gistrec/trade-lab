@@ -144,7 +144,7 @@ def run_ctrend_proxy(
     fwd_returns = closes.shift(-rebalance_days) / closes - 1.0
     daily_returns = closes.pct_change(fill_method=None).fillna(0.0)
 
-    earliest = int(max(windows)) + train_lookback_days + purge_days
+    earliest = int(max(windows)) + train_lookback_days + purge_days + rebalance_days
     dates = list(closes.index)
     weights = pd.DataFrame(0.0, index=closes.index, columns=closes.columns)
     rebalance_dates: list[pd.Timestamp] = []
@@ -160,8 +160,14 @@ def run_ctrend_proxy(
             weights.iloc[i] = current_w
             continue
 
-        # ----- Train window: trailing 2y up to (d - purge_days) -----
-        train_cut_idx = i - purge_days
+        # ----- Train window: trailing 2y, purged for the label horizon ---
+        # Each train sample s carries an H-day forward-return label ending
+        # at s + rebalance_days, so purging only on the train DATE
+        # (i - purge_days) let the last sample's label reach up to
+        # rebalance_days-1 bars PAST the decision bar whenever
+        # purge_days < rebalance_days — a look-ahead leak. Cut on the label
+        # end so s + rebalance_days + purge_days <= i for every sample.
+        train_cut_idx = i - purge_days - rebalance_days
         train_start_idx = max(0, train_cut_idx - train_lookback_days)
         train_dates = closes.index[train_start_idx:train_cut_idx]
 

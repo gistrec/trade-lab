@@ -180,6 +180,53 @@ def test_purge_excludes_overlapping_targets(monkeypatch):
         )
 
 
+def test_purge_accounts_for_label_horizon_when_purge_below_rebalance(monkeypatch):
+    """The purge must exclude a train sample whose H-day forward target
+    reaches the rebalance date, not just gap the train DATE. With
+    purge_days < rebalance_days the old code cut on (i - purge_days), so
+    the last sample's label ended purge_days-rebalance_days bars AFTER the
+    decision — a look-ahead leak (regression: C7). Invariant: for every
+    train date s, s + rebalance_days + purge_days <= rebalance_date."""
+    from trade_lab.backtest import ctrend_proxy as mod
+
+    purge_days = 3
+    rebalance_days = 7
+    captured_train_dates: list[pd.Index] = []
+    rebalances: list[pd.Timestamp] = []
+
+    original_collect = mod._collect_panel
+    original_predict = mod._predict_at_date
+
+    def spy_collect(*args, **kwargs):
+        captured_train_dates.append(args[3])
+        return original_collect(*args, **kwargs)
+
+    def spy_predict(d, *args, **kwargs):
+        rebalances.append(d)
+        return original_predict(d, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_collect_panel", spy_collect)
+    monkeypatch.setattr(mod, "_predict_at_date", spy_predict)
+
+    coins = [f"C{i}" for i in range(8)]
+    panel = _synthetic_panel(coins, days=800)
+    run_ctrend_proxy(
+        panel, _all_eligible(panel),
+        windows=(5, 20, 50),
+        train_lookback_days=200, top_k=2,
+        purge_days=purge_days, rebalance_days=rebalance_days,
+    )
+
+    assert captured_train_dates and rebalances
+    for td, rd in zip(captured_train_dates, rebalances):
+        # Label of the latest train date ends at td[-1] + rebalance_days;
+        # with the purge margin it must land at or before the rebalance.
+        assert (rd - td[-1]).days >= rebalance_days + purge_days, (
+            f"train date {td[-1]}'s {rebalance_days}d label overlaps "
+            f"rebalance {rd} (purge={purge_days}d)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Eligibility honoured
 # ---------------------------------------------------------------------------
