@@ -187,9 +187,9 @@ def _render_status(reader: JournalReader) -> None:
         mode = _cycle_mode(latest)
         if mode == "DRY":
             st.caption(
-                f"Latest journal cycle is a **DRY-RUN** (planning only) — the "
-                f"hourly heartbeat. Real orders run once daily; see 'Live "
-                f"order cron' below for the last REAL cycle."
+                "Latest journal cycle is a **DRY-RUN** (planning only) — the "
+                "hourly heartbeat. Real orders run once daily; see 'Live "
+                "order cron' below for the last REAL cycle."
             )
         else:
             st.caption("Latest journal cycle is a **LIVE** (real-order) cycle.")
