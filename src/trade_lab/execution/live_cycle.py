@@ -48,7 +48,7 @@ from .journal import (
     get_python_version,
     new_cycle_id,
 )
-from .order_state import OrderStateEntry, OrderStateStore, utcnow_iso
+from .order_state import OrderStateStore, utcnow_iso
 from .orders import (
     TOTAL_TIMEOUT_S,
     OrderResult,

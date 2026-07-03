@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
@@ -12,7 +11,6 @@ from trade_lab.paper_trading.fingerprint import (
     DEFAULT_ANNUALIZATION_FACTOR,
     DEFAULT_ROLLING_WINDOW_DAYS,
     compute_reference_fingerprint,
-    fingerprint_content_hash,
     load_reference,
     save_reference,
 )

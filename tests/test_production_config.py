@@ -24,7 +24,6 @@ import pytest
 from trade_lab.config import (
     CANONICAL_HASH,
     PRODUCTION_CONFIG,
-    ProductionConfig,
     production_config_hash,
 )
 

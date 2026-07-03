@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from trade_lab.backtest.cross_sectional import _sharpe
@@ -161,7 +160,6 @@ def evaluate(basket: pd.DataFrame, scenario_name: str, scenario: dict) -> dict:
     # Verified window (2022-01-21 → 2026-05-28)
     v_rets = _slice_window(full_returns, VERIFIED_START, VERIFIED_END)
     v_eq = (1.0 + v_rets).cumprod() * PRODUCTION_CONFIG.initial_capital
-    v_gross_rets = full_eq.pct_change().reindex(v_rets.index).fillna(0)  # placeholder; we compute net here
     # For the verified-window gross we need a clean recompute:
     # gross = position * bar_return; recompute on the slice.
     close = basket["close"]

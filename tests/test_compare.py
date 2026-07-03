@@ -6,8 +6,6 @@ from trade_lab.backtest.compare import (
     COMPARISON_COLUMNS,
     DEFAULT_COMPARISON_STRATEGIES,
     DEFAULT_SUBPERIODS,
-    StrategySpec,
-    Subperiod,
     render_comparison_markdown,
     run_comparison_report,
 )

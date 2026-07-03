@@ -13,7 +13,7 @@ import math
 import pytest
 
 from trade_lab.execution.allocator import (
-    TargetAllocation, compute_target_allocation,
+    compute_target_allocation,
 )
 
 

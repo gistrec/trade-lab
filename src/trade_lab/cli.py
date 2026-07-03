@@ -40,7 +40,6 @@ from .backtest.yearly import (
 from .config import load_config
 from .data.fetch_ohlcv import fetch_ohlcv, validate_ohlcv
 from .data.storage import (
-    candles_path,
     filter_candles_by_date,
     load_candles,
     save_candles,
@@ -781,7 +780,7 @@ def cmd_paper_status(args: argparse.Namespace) -> None:
         broker = Broker.connect(config)
     except BrokerError as exc:
         raise SystemExit(f"Broker connection failed: {exc}")
-    print(f"Connected. Pulling balance...")
+    print("Connected. Pulling balance...")
     snap = broker.fetch_balance_snapshot()
     print()
     print(f"  {config.quote_currency:6s}: free {snap.quote_free:>12,.2f}  "

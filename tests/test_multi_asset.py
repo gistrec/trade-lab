@@ -11,12 +11,8 @@ from trade_lab.backtest.multi_asset import (
     summarize_across_assets,
 )
 from trade_lab.backtest.yearly import (
-    DEFAULT_FIXED_STRATEGIES,
-    FixedStrategySpec,
     run_yearly_validation,
 )
-from trade_lab.strategies.regime_only import RegimeOnlyStrategy
-from trade_lab.strategies.sma_cross import SMACrossStrategy
 
 
 def _daily_candles(start: str, periods: int, seed: int) -> pd.DataFrame:

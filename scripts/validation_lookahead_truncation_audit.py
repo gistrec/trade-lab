@@ -32,7 +32,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from trade_lab.backtest.engine import run_backtest
 from trade_lab.backtest.market_index import build_crypto_market_index
 from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG
 from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
@@ -210,7 +209,7 @@ def main() -> int:
     Path("outputs/validation_test4_truncation_audit.json").write_text(
         json.dumps(summary, indent=2, default=str)
     )
-    print(f"\nWrote outputs/validation_test4_truncation_audit.json")
+    print("\nWrote outputs/validation_test4_truncation_audit.json")
     return 0 if verdict == "CLEAN" else 1
 
 

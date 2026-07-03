@@ -12,9 +12,7 @@ import pandas as pd
 import pytest
 
 from trade_lab.backtest.walk_forward_v2 import (
-    OBJECTIVE_RETURN_DIV_DRAWDOWN,
     OBJECTIVE_SHARPE,
-    OBJECTIVE_TOTAL_RETURN,
     ParamGridSpec,
     aggregate_walk_forward,
     generate_month_windows,

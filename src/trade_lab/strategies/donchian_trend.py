@@ -33,7 +33,7 @@ This is a research candidate, not a profitable claim — see
 """
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd

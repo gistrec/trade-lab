@@ -7,7 +7,6 @@ stop pagination — that silently truncated history to a single page.
 from __future__ import annotations
 
 import ccxt
-import pytest
 
 from trade_lab.data.fetch_ohlcv import fetch_ohlcv
 

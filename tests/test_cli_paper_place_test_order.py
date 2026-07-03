@@ -23,7 +23,7 @@ import ccxt
 import pytest
 
 from trade_lab.cli import cmd_paper_place_test_order
-from trade_lab.execution.broker import Broker, MarketConstraints
+from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 
 
@@ -118,7 +118,6 @@ def _patch_config_and_broker(
     monkeypatch, *, config: PaperConfig, exchange: _FakeExchange,
 ):
     """Replace load_paper_config and Broker.connect on the CLI module."""
-    import trade_lab.cli
 
     def fake_load_paper_config():
         return config

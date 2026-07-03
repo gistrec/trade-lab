@@ -12,7 +12,6 @@ from trade_lab.backtest.yearly import (
     run_yearly_validation,
 )
 from trade_lab.strategies.regime_only import RegimeOnlyStrategy
-from trade_lab.strategies.sma_cross import SMACrossStrategy
 
 
 def _daily_candles_multi_year(start: str = "2020-01-01", periods: int = 365 * 3 + 1):

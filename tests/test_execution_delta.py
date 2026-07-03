@@ -6,7 +6,6 @@ import pytest
 from trade_lab.execution.allocator import compute_target_allocation
 from trade_lab.execution.broker import MarketConstraints
 from trade_lab.execution.delta import (
-    DeltaPlan, OrderIntent, SkippedDelta,
     compute_delta_plan, total_skipped_quote_drift,
 )
 

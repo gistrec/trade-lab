@@ -13,7 +13,7 @@ them from the environment. Loading code never logs them, and the
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple
 
 

@@ -11,7 +11,7 @@ import os
 import pytest
 
 from trade_lab.execution.config import (
-    PaperConfig, PaperConfigError, load_paper_config,
+    PaperConfigError, load_paper_config,
 )
 
 

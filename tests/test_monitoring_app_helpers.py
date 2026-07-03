@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
 
 from trade_lab.monitoring.app import _humanize_iso, _humanize_relative
 

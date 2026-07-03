@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 
 from dataclasses import dataclass
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -40,7 +40,6 @@ from ..strategies.base import Strategy
 from .walk_forward_v2 import (
     ParamGridSpec,
     PROJECT_NUM_TRIALS,
-    aggregate_walk_forward,
     run_strategy_walk_forward,
 )
 

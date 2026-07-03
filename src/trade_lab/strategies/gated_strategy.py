@@ -16,9 +16,8 @@ condition.
 """
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Mapping
 
-import numpy as np
 import pandas as pd
 
 from .base import Strategy

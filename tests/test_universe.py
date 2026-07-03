@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from trade_lab.data.coin_registry import CoinMeta, stablecoins
 from trade_lab.data.universe import build_pit_universe, closes_for_universe

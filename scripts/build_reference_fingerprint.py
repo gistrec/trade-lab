@@ -88,7 +88,7 @@ def main() -> int:
     loaded = load_reference(OUT_PATH)
     expected = fingerprint_content_hash(loaded)
     if loaded.content_hash != expected:
-        print(f"FATAL: round-trip hash mismatch on save→load.", file=sys.stderr)
+        print("FATAL: round-trip hash mismatch on save→load.", file=sys.stderr)
         return 2
     print("Round-trip hash verification OK.\n")
 
@@ -105,7 +105,7 @@ def main() -> int:
     _summary(fp.regime_gate_flip_freq_rolling.name, fp.regime_gate_flip_freq_rolling)
     _summary(fp.rebalance_turnover_per_event.name, fp.rebalance_turnover_per_event)
     dd = fp.drawdown_profile
-    print(f"  drawdown_profile:")
+    print("  drawdown_profile:")
     for k in sorted(dd.percentiles.keys()):
         print(f"    {k} = {dd.percentiles[k]*100:.2f}%")
     print(f"    max_historical_dd = {dd.max_historical_dd*100:.2f}%  (breach if live DD goes below this)")

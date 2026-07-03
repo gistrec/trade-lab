@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
     dd = report.drawdown
-    print(f"  drawdown:")
+    print("  drawdown:")
     print(f"    latest_dd = {dd.latest_drawdown*100:+.2f}%")
     print(f"    max_live_dd = {dd.max_live_drawdown*100:+.2f}%")
     print(f"    reference max_historical_dd = {dd.reference_max_historical_dd*100:+.2f}%")
@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     rb = report.rebalance_turnover_per_event
-    print(f"  rebalance_turnover_per_event:")
+    print("  rebalance_turnover_per_event:")
     print(f"    n_live_events = {rb['n_live_events']}")
     print(f"    events_outside_p05_p95 = {rb['events_outside_reference_p05_p95']}")
     print()

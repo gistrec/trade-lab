@@ -72,10 +72,10 @@ def canonical_serialize(asset_candles: Mapping[str, pd.DataFrame]) -> bytes:
         df.index = idx
         df = df.sort_index()
         for ts, row in df[list(_FIELDS)].iterrows():
-            o, h, l, c, v = (float(row[f]) for f in _FIELDS)
+            o, h, low, c, v = (float(row[f]) for f in _FIELDS)
             lines.append(
                 f"{sym}|{ts.isoformat()}|"
-                f"{o:.8f}|{h:.8f}|{l:.8f}|{c:.8f}|{v:.8f}\n"
+                f"{o:.8f}|{h:.8f}|{low:.8f}|{c:.8f}|{v:.8f}\n"
             )
     return "".join(lines).encode("utf-8")
 
@@ -151,8 +151,8 @@ def _parse_canonical_serialize(payload: bytes) -> dict[str, pd.DataFrame]:
         ts = pd.Timestamp(parts[1])
         if ts.tz is None:
             ts = ts.tz_localize("UTC")
-        o, h, l, c, v = (float(x) for x in parts[2:7])
-        per_asset_rows.setdefault(sym, []).append((ts, o, h, l, c, v))
+        o, h, low, c, v = (float(x) for x in parts[2:7])
+        per_asset_rows.setdefault(sym, []).append((ts, o, h, low, c, v))
 
     out: dict[str, pd.DataFrame] = {}
     for sym, rows in per_asset_rows.items():

@@ -6,7 +6,6 @@ logic in particular MUST be exercised here, not deferred."""
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,10 +13,8 @@ import pytest
 
 from trade_lab.config import PRODUCTION_CONFIG
 from trade_lab.paper_trading.harness import run_paper_trading_cycle
-from trade_lab.paper_trading.journal import HarnessLogRow, append_row, read_log
+from trade_lab.paper_trading.journal import HarnessLogRow, append_row
 from trade_lab.paper_trading.lookahead_detector import (
-    LookAheadReport,
-    RowComparison,
     check_journal_for_lookahead,
     classify_signal_match,
     replay_signal_for_vintage,

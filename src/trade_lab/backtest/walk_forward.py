@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List
 
 import pandas as pd
 from pandas.tseries.offsets import DateOffset

@@ -34,7 +34,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 
 from ..backtest.market_index import build_crypto_market_index
 from ..config import PRODUCTION_CONFIG

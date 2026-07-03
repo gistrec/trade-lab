@@ -14,7 +14,6 @@ from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG
 from trade_lab.paper_trading import harness as harness_mod
 from trade_lab.paper_trading import (
     HarnessError,
-    is_already_logged,
     read_log,
     run_paper_trading_cycle,
 )

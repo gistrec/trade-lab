@@ -22,7 +22,6 @@ import pandas as pd
 import pytest
 
 from trade_lab.backtest.ctrend_proxy import (
-    DEFAULT_WINDOWS,
     compute_price_features,
     run_ctrend_proxy,
 )

@@ -15,7 +15,6 @@ Coverage focus:
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import ccxt
 import pytest
@@ -26,13 +25,9 @@ from trade_lab.execution.delta import OrderIntent
 from trade_lab.execution.order_state import (
     OrderStateEntry,
     OrderStateStore,
-    TERMINAL_STATUSES,
 )
 from trade_lab.execution.orders import (
     POLL_INITIAL_S,
-    POLL_MAX_S,
-    TOTAL_TIMEOUT_S,
-    OrderResult,
     place_order,
     reconstruct_status,
     sort_orders_for_placement,
