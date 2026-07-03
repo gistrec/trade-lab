@@ -1083,6 +1083,79 @@ def _render_cycle_detail(cycle: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _file_sig(path: Path) -> Optional[tuple]:
+    """(mtime, size) of a file, or None if absent.
+
+    A cache key that changes *exactly* when the file changes — so caching a
+    computation on it recomputes as soon as new data lands and NEVER serves a
+    stale result. This is what makes caching the breach checks safe: a new
+    journal row bumps mtime → new key → re-evaluation (no masked breach).
+    """
+    try:
+        stt = path.stat()
+        return (stt.st_mtime, stt.st_size)
+    except OSError:
+        return None
+
+
+def _dir_sig(root: Path, pattern: str = "*.txt") -> tuple:
+    """(file_count, max_mtime, total_size) over ``pattern`` under ``root``.
+
+    Cheap signature for the vintage directory: changes when a vintage is
+    added (count), rewritten (max mtime), or truncated/grown (total size), so
+    the look-ahead cache invalidates on vintage changes even if the live
+    journal were unchanged. The default matches the vintage store's on-disk
+    format — canonical TEXT under ``h[:2]/<hash>.txt`` (vintage_store.py), NOT
+    parquet — and ``rglob`` recurses the two-level layout.
+    """
+    try:
+        stats = [f.stat() for f in root.rglob(pattern)]
+    except OSError:
+        return (0, 0.0, 0)
+    return (
+        len(stats),
+        max((s.st_mtime for s in stats), default=0.0),
+        sum(s.st_size for s in stats),
+    )
+
+
+# The three heavy Validation computations run on EVERY 30s rerun because
+# Streamlit executes all tab bodies each run. They are pure functions of their
+# input files, so cache them on a file signature: recompute only when the
+# journal / reference / vintages actually change. ``sig`` is the cache key;
+# the ``_``-prefixed path args are excluded from Streamlit's arg hashing.
+@st.cache_data(show_spinner=False)
+def _cached_config_hash() -> str:
+    from trade_lab.config import PRODUCTION_CONFIG, production_config_hash
+    return production_config_hash(PRODUCTION_CONFIG)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_validation_rows(_log_path: Path, sig):
+    from trade_lab.paper_trading.journal import read_log
+    return read_log(_log_path)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_fingerprint(_log_path: Path, _reference_path: Path, sig):
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+    return check_journal_against_reference(
+        log_path=_log_path, reference_path=_reference_path,
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_lookahead(_log_path: Path, _vintage_root: Path, sig):
+    from trade_lab.paper_trading.lookahead_detector import (
+        check_journal_for_lookahead,
+    )
+    return check_journal_for_lookahead(
+        log_path=_log_path, vintage_root=_vintage_root,
+    )
+
+
 def _render_validation() -> None:
     """Read-only view of the validation forward-test infrastructure.
 
@@ -1098,17 +1171,10 @@ def _render_validation() -> None:
     TypeError from a schema-drifted journal row) is contained to this
     tab by ``_render_tab_safely`` in :func:`main`.
     """
-    from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG, production_config_hash
-    from trade_lab.paper_trading.fingerprint_monitor import (
-        check_journal_against_reference,
-    )
-    from trade_lab.paper_trading.journal import read_log
-    from trade_lab.paper_trading.lookahead_detector import (
-        check_journal_for_lookahead,
-    )
+    from trade_lab.config import CANONICAL_HASH
 
     st.markdown("### Frozen-config gate")
-    runtime_hash = production_config_hash(PRODUCTION_CONFIG)
+    runtime_hash = _cached_config_hash()
     cols = st.columns(2)
     if runtime_hash == CANONICAL_HASH:
         cols[0].success("Hash MATCH — harness will run")
@@ -1125,7 +1191,9 @@ def _render_validation() -> None:
         )
         return
 
-    rows = read_log(VALIDATION_LOG_PATH)
+    rows = _cached_validation_rows(
+        VALIDATION_LOG_PATH, _file_sig(VALIDATION_LOG_PATH),
+    )
     cols = st.columns(4)
     cols[0].metric("Rows", len(rows))
     if rows:
@@ -1170,9 +1238,11 @@ def _render_validation() -> None:
         )
     else:
         try:
-            report = check_journal_against_reference(
-                log_path=VALIDATION_LOG_PATH,
-                reference_path=VALIDATION_REFERENCE_PATH,
+            report = _cached_fingerprint(
+                VALIDATION_LOG_PATH,
+                VALIDATION_REFERENCE_PATH,
+                (_file_sig(VALIDATION_LOG_PATH),
+                 _file_sig(VALIDATION_REFERENCE_PATH)),
             )
         except Exception as exc:
             # Broad on purpose (matches the look-ahead detector below):
@@ -1221,9 +1291,11 @@ def _render_validation() -> None:
         )
     else:
         try:
-            la = check_journal_for_lookahead(
-                log_path=VALIDATION_LOG_PATH,
-                vintage_root=VALIDATION_VINTAGE_ROOT,
+            la = _cached_lookahead(
+                VALIDATION_LOG_PATH,
+                VALIDATION_VINTAGE_ROOT,
+                (_file_sig(VALIDATION_LOG_PATH),
+                 _dir_sig(VALIDATION_VINTAGE_ROOT)),
             )
         except Exception as exc:
             st.error(f"Look-ahead detector error: {exc}")

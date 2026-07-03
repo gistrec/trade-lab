@@ -572,6 +572,67 @@ def test_banner_not_sticky_to_avoid_health_line_overlap(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Validation-tab caching: the file signature is the cache key, so it must
+# change exactly when the underlying data changes (else a breach is masked).
+# ---------------------------------------------------------------------------
+
+
+def test_file_sig_changes_when_file_changes(tmp_path):
+    import time
+    from trade_lab.monitoring.app import _file_sig
+
+    p = tmp_path / "journal.jsonl"
+    p.write_text("row1\n")
+    s1 = _file_sig(p)
+    assert s1 is not None
+    time.sleep(0.01)
+    p.write_text("row1\nrow2 with more bytes\n")   # size changes → key changes
+    assert _file_sig(p) != s1
+
+
+def test_file_sig_none_for_missing():
+    from pathlib import Path
+    from trade_lab.monitoring.app import _file_sig
+
+    assert _file_sig(Path("/no/such/file.jsonl")) is None
+
+
+def test_dir_sig_changes_when_vintage_added(tmp_path):
+    """Vintages live under a two-level h[:2]/<hash>.txt layout; _dir_sig must
+    recurse and count the REAL .txt format (regression: it globbed .parquet,
+    which never matches, making the look-ahead cache key a dead constant)."""
+    from trade_lab.monitoring.app import _dir_sig
+
+    (tmp_path / "ab").mkdir()
+    (tmp_path / "ab" / ("a" * 64 + ".txt")).write_text("vintage-1")
+    s1 = _dir_sig(tmp_path)
+    assert s1[0] == 1                               # nested .txt IS counted
+    (tmp_path / "cd").mkdir()
+    (tmp_path / "cd" / ("c" * 64 + ".txt")).write_text("vintage-2")
+    s2 = _dir_sig(tmp_path)
+    assert s2[0] == 2 and s2 != s1
+
+
+def test_dir_sig_matches_real_vintage_store_format(tmp_path):
+    """Couple the signature to the store's actual path builder, so a future
+    change to the vintage serialization format re-breaks this loudly instead
+    of silently zeroing the cache key again."""
+    from trade_lab.monitoring.app import _dir_sig
+    from trade_lab.paper_trading.vintage_store import vintage_path
+
+    p = vintage_path(tmp_path, "b" * 64)            # tmp/bb/<hash>.txt
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("real-format vintage bytes")
+    assert _dir_sig(tmp_path)[0] == 1               # picked up the real format
+
+
+def test_dir_sig_empty_for_missing_root(tmp_path):
+    from trade_lab.monitoring.app import _dir_sig
+
+    assert _dir_sig(tmp_path / "absent") == (0, 0.0, 0)
+
+
+# ---------------------------------------------------------------------------
 # Ladder chart: gate-closed shading (Theme 2)
 # ---------------------------------------------------------------------------
 
