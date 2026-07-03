@@ -193,6 +193,53 @@ def test_non_dict_root_returns_empty_with_warning(tmp_path, caplog):
         assert store.all_entries() == {}
 
 
+def test_entry_missing_field_is_skipped_not_crashed(tmp_path, caplog):
+    """A valid-JSON entry missing a required field must be skipped with a
+    warning, not raise TypeError out of all_entries()/open_entries() — the
+    store promises corrupt state degrades to empty, and open_entries()
+    runs first thing in the daily cron (regression: R5)."""
+    import json
+    path = tmp_path / "orders.json"
+    good = {
+        "client_order_id": "good", "symbol": "BTC/USDT", "side": "buy",
+        "intended_amount": 0.001, "status": "open", "exchange_order_id": None,
+        "placed_at": "2026-05-30T00:05:01+00:00",
+        "last_seen_at": "2026-05-30T00:05:01+00:00",
+    }
+    missing = {k: v for k, v in good.items() if k != "side"}
+    missing["client_order_id"] = "missing"
+    path.write_text(json.dumps({"good": good, "missing": missing}))
+    store = OrderStateStore(path)
+    with caplog.at_level("WARNING"):
+        entries = store.all_entries()
+    assert set(entries) == {"good"}          # malformed entry dropped
+    assert store.get("missing") is None
+    # open_entries (first cron step) must not raise.
+    assert set(store.open_entries()) == {"good"}
+    assert caplog.records, "a dropped entry must be logged, not silent"
+
+
+def test_entry_with_unknown_field_survives(tmp_path):
+    """A newer-schema entry carrying an extra field older code doesn't
+    know must still load — the unknown key is dropped (forward-compatible)
+    rather than crashing the store (regression: R5)."""
+    import json
+    path = tmp_path / "orders.json"
+    entry = {
+        "client_order_id": "c1", "symbol": "BTC/USDT", "side": "buy",
+        "intended_amount": 0.001, "status": "open", "exchange_order_id": None,
+        "placed_at": "2026-05-30T00:05:01+00:00",
+        "last_seen_at": "2026-05-30T00:05:01+00:00",
+        "some_future_field": 123,
+    }
+    path.write_text(json.dumps({"c1": entry}))
+    store = OrderStateStore(path)
+    loaded = store.get("c1")
+    assert loaded is not None
+    assert loaded.status == "open"
+    assert loaded.client_order_id == "c1"
+
+
 def test_corrupt_state_does_not_block_subsequent_writes(tmp_path):
     """After a corrupt read, the next put() succeeds and the file is
     repaired with valid JSON."""

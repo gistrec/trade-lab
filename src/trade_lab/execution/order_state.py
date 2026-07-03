@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -68,6 +68,42 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_ENTRY_FIELDS = frozenset(f.name for f in fields(OrderStateEntry))
+
+
+def _entry_from_raw(coid: str, raw: object) -> Optional[OrderStateEntry]:
+    """Build an :class:`OrderStateEntry` from an on-disk dict, defensively.
+
+    A valid-JSON entry whose shape has drifted from the current schema
+    must NOT crash the store: ``OrderStateEntry(**raw)`` raises
+    ``TypeError`` on a missing or unexpected field, and the docstring
+    guarantees corrupt state degrades to empty with a warning, not a hard
+    error — ``open_entries()`` runs first thing in the daily cron.
+
+    * Unknown keys (a newer-schema file read by older code) are dropped
+      so the entry still loads — forward-compatible.
+    * A missing required field cannot be reconstructed, so the entry is
+      skipped with a warning (the exchange, the source of truth, will
+      rediscover it next cycle).
+    """
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Order state entry %s is not a JSON object (got %s); skipping.",
+            coid, type(raw).__name__,
+        )
+        return None
+    known = {k: v for k, v in raw.items() if k in _ENTRY_FIELDS}
+    try:
+        return OrderStateEntry(**known)
+    except TypeError as exc:
+        logger.warning(
+            "Order state entry %s has a drifted shape (%s); skipping it. "
+            "The exchange will be queried for this order next cycle.",
+            coid, exc,
+        )
+        return None
+
+
 class OrderStateStore:
     """Persistent dict of :class:`OrderStateEntry`, keyed by clientOrderId.
 
@@ -83,7 +119,7 @@ class OrderStateStore:
 
     def get(self, client_order_id: str) -> Optional[OrderStateEntry]:
         raw = self._read().get(client_order_id)
-        return None if raw is None else OrderStateEntry(**raw)
+        return None if raw is None else _entry_from_raw(client_order_id, raw)
 
     def put(self, entry: OrderStateEntry) -> None:
         """Insert or overwrite an entry. Atomic per call."""
@@ -92,7 +128,12 @@ class OrderStateStore:
         self._write_atomic(state)
 
     def all_entries(self) -> dict[str, OrderStateEntry]:
-        return {coid: OrderStateEntry(**raw) for coid, raw in self._read().items()}
+        out: dict[str, OrderStateEntry] = {}
+        for coid, raw in self._read().items():
+            entry = _entry_from_raw(coid, raw)
+            if entry is not None:
+                out[coid] = entry
+        return out
 
     def open_entries(self) -> dict[str, OrderStateEntry]:
         """Non-terminal entries — what reconstruction must resolve."""
