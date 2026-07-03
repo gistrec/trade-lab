@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from .base import Strategy
-from .donchian_trend import _coerce_int_sequence
+from .donchian_trend import _coerce_bool, _coerce_int_sequence
 
 
 class TimeSeriesMomentumStrategy(Strategy):
@@ -86,7 +86,7 @@ class TimeSeriesMomentumStrategy(Strategy):
         self.annualization_factor = int(annualization_factor)
         self.max_position_size = float(max_position_size)
         self.rebalance_threshold = float(rebalance_threshold)
-        self.use_vol_target = bool(use_vol_target)
+        self.use_vol_target = _coerce_bool(use_vol_target, "use_vol_target")
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)

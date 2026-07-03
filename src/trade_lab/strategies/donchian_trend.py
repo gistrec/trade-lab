@@ -54,6 +54,35 @@ def _coerce_int_sequence(value, name: str) -> tuple[int, ...]:
     return tuple(parsed)
 
 
+_TRUE_STRS = frozenset({"true", "yes", "on", "1"})
+_FALSE_STRS = frozenset({"false", "no", "off", "0"})
+
+
+def _coerce_bool(value, name: str) -> bool:
+    """Coerce a strategy boolean param, failing loud on an ambiguous value.
+
+    Accepts real bools, ``0``/``1`` ints/floats, and the string literals
+    true/false/yes/no/on/off/0/1 (case-insensitive). Anything else — a
+    typo'd or unrecognized value that plain ``bool()`` would silently treat
+    as truthy (e.g. ``bool("maybe")`` or ``bool("flase")`` == True) — raises
+    ValueError so the mistake surfaces instead of quietly flipping the flag.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in _TRUE_STRS:
+            return True
+        if low in _FALSE_STRS:
+            return False
+    raise ValueError(
+        f"{name} expects a boolean (true/false/yes/no/on/off/0/1), "
+        f"got {value!r}"
+    )
+
+
 class DonchianTrendEnsembleStrategy(Strategy):
     """Donchian breakout ensemble + SMA filter + vol targeting.
 

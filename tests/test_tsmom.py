@@ -167,3 +167,30 @@ def test_invalid_parameters_raise():
 def test_string_lookbacks_accepted_for_cli_use():
     strat = TimeSeriesMomentumStrategy(lookbacks="30,90,180")
     assert strat.lookbacks == (30, 90, 180)
+
+
+def test_use_vol_target_boolean_literals_coerced():
+    """The CLI passes booleans as strings; recognized literals and 0/1
+    coerce to the right bool (not bool('false') == True)."""
+    assert TimeSeriesMomentumStrategy(use_vol_target="false").use_vol_target is False
+    assert TimeSeriesMomentumStrategy(use_vol_target="true").use_vol_target is True
+    assert TimeSeriesMomentumStrategy(use_vol_target="off").use_vol_target is False
+    assert TimeSeriesMomentumStrategy(use_vol_target=0).use_vol_target is False
+    assert TimeSeriesMomentumStrategy(use_vol_target=1).use_vol_target is True
+    assert TimeSeriesMomentumStrategy(use_vol_target=False).use_vol_target is False
+    assert TimeSeriesMomentumStrategy().use_vol_target is True  # default
+
+
+def test_use_vol_target_rejects_ambiguous_value():
+    """A typo'd / unrecognized boolean must fail loud, not silently enable
+    the flag via bool('maybe') == True (verify finding)."""
+    with pytest.raises(ValueError, match="use_vol_target"):
+        TimeSeriesMomentumStrategy(use_vol_target="maybe")
+
+
+def test_pma_ratio_use_vol_target_rejects_ambiguous_value():
+    from trade_lab.strategies.pma_ratio import PriceMaRatioStrategy
+
+    assert PriceMaRatioStrategy(use_vol_target="no").use_vol_target is False
+    with pytest.raises(ValueError, match="use_vol_target"):
+        PriceMaRatioStrategy(use_vol_target="maybe")

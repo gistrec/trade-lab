@@ -171,7 +171,10 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
     strategy_cls = STRATEGIES[args.strategy]
     params = _parse_params(args.param)
-    strategy = strategy_cls(**params)
+    try:
+        strategy = strategy_cls(**params)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --param for {args.strategy}: {exc}")
 
     result = run_backtest(
         candles=candles,
