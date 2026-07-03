@@ -441,6 +441,29 @@ def _signal_history_figure(
 # ---------------------------------------------------------------------------
 
 
+def _unfilled_order_count(cycle: dict) -> Optional[int]:
+    """Planned orders that did not fully close, or ``None`` if no
+    execution was attempted.
+
+    A dry-run (planning-only) cycle writes ``orders_executed=None`` with a
+    populated ``orders_planned``. ``cycle_orders_executed`` collapses that
+    ``None`` to ``[]``, which cannot distinguish "no execution attempted"
+    from "execution attempted, nothing closed" — so counting off it fires
+    a false "planned orders did not fully close" warning on every dry-run
+    cycle (the hourly dry-run shares the monitored journal with the daily
+    live run). Gate on the raw field: return ``None`` for planning-only
+    cycles so the caller suppresses the partial-fill warning.
+    """
+    if cycle.get("orders_executed") is None:
+        return None
+    planned_count = len(cycle.get("orders_planned") or [])
+    executed = cycle_orders_executed(cycle)
+    fully_closed = sum(
+        1 for o in executed if o.get("terminal_status") == "closed"
+    )
+    return planned_count - fully_closed
+
+
 def _render_portfolio(reader: JournalReader) -> None:
     latest = reader.latest_cycle()
     if latest is None or latest.get("outcome") != "success":
@@ -480,12 +503,11 @@ def _render_portfolio(reader: JournalReader) -> None:
 
     # Planned vs executed divergence — surface unfilled / partial /
     # rejected counts so the operator sees them without drilling into
-    # the Cycles tab.
+    # the Cycles tab. Suppressed on dry-run (planning-only) cycles, where
+    # orders_executed is None and no execution was attempted.
     planned_count = len(latest.get("orders_planned") or [])
-    executed = cycle_orders_executed(latest)
-    fully_closed = sum(1 for o in executed if o.get("terminal_status") == "closed")
-    unfilled = planned_count - fully_closed
-    if planned_count > 0 and unfilled > 0:
+    unfilled = _unfilled_order_count(latest)
+    if unfilled is not None and unfilled > 0:
         st.warning(
             f"{unfilled} of {planned_count} planned orders did not fully "
             f"close this cycle — see the Cycles tab → cycle detail for "

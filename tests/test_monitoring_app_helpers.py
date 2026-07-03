@@ -130,6 +130,54 @@ def test_render_tab_safely_passes_through_on_success(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Unfilled-order count — dry-run (planning-only) cycles must not warn
+# ---------------------------------------------------------------------------
+
+
+def test_unfilled_count_none_for_dry_run_planning_only_cycle():
+    """A dry-run cycle writes orders_executed=None with orders_planned
+    populated. That is planning-only, not 'orders failed to fill', so the
+    partial-fill warning must be suppressed (return None), not fire on the
+    hourly dry-run cycles that share the monitored journal (regression:
+    R2)."""
+    from trade_lab.monitoring.app import _unfilled_order_count
+
+    dry_run_cycle = {
+        "outcome": "success",
+        "orders_planned": [{"symbol": "BTC/USDT"}, {"symbol": "ETH/USDT"}],
+        "orders_executed": None,
+    }
+    assert _unfilled_order_count(dry_run_cycle) is None
+
+
+def test_unfilled_count_counts_live_cycle_partial():
+    """A live cycle (orders_executed populated) with a planned order that
+    did not fully close returns the unfilled count."""
+    from trade_lab.monitoring.app import _unfilled_order_count
+
+    live_cycle = {
+        "outcome": "success",
+        "orders_planned": [{"symbol": "BTC/USDT"}, {"symbol": "ETH/USDT"}],
+        "orders_executed": [
+            {"terminal_status": "closed"},
+            {"terminal_status": "partial"},
+        ],
+    }
+    assert _unfilled_order_count(live_cycle) == 1
+
+
+def test_unfilled_count_zero_when_all_closed():
+    from trade_lab.monitoring.app import _unfilled_order_count
+
+    live_cycle = {
+        "outcome": "success",
+        "orders_planned": [{"symbol": "BTC/USDT"}],
+        "orders_executed": [{"terminal_status": "closed"}],
+    }
+    assert _unfilled_order_count(live_cycle) == 0
+
+
+# ---------------------------------------------------------------------------
 # Days since gate OPEN — counts distinct days, not cycles
 # ---------------------------------------------------------------------------
 
