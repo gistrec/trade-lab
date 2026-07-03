@@ -61,6 +61,20 @@ def test_buy_and_hold_row_reflects_entry_cost_against_close_ratio():
         assert bh_row.iloc[0]["return_pct"] == pytest.approx(expected, rel=1e-6)
 
 
+def test_buy_and_hold_fees_paid_is_fees_only_not_plus_slippage():
+    """The fees_paid column is fees-only for strategy rows (Trade.fees_paid
+    excludes slippage, which lives in slippage_cost_estimate). The
+    buy_and_hold row must use the same semantic — initial_capital *
+    fee_rate — not fee + slippage, or one column carries two meanings
+    (regression: C9)."""
+    candles = _daily_candles_multi_year()
+    df = run_yearly_validation(candles)  # capital 10_000, fee 0.001, slip 0.0005
+    bh = df[df["strategy"] == "buy_and_hold"]
+    assert len(bh) > 0
+    for _, row in bh.iterrows():
+        assert row["fees_paid"] == pytest.approx(10_000 * 0.001)
+
+
 def test_buy_and_hold_verdict_is_baseline_label():
     candles = _daily_candles_multi_year()
     df = run_yearly_validation(candles)

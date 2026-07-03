@@ -192,7 +192,11 @@ def _yearly_rows_for_buy_and_hold(
             fee_rate=fee_rate, slippage_rate=slippage_rate,
         )
         year_dd = _max_drawdown(year_equity)
-        entry_cost_paid = float(initial_capital * (fee_rate + slippage_rate))
+        # fees_paid is fees-only, matching the strategy rows' semantic
+        # (sum of Trade.fees_paid, which excludes slippage). Folding
+        # slippage in here made one column carry two meanings. Slippage
+        # is still reflected in return_pct via buy_and_hold_with_costs.
+        entry_cost_paid = float(initial_capital * fee_rate)
         rows.append(
             {
                 "year": year,
