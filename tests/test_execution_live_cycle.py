@@ -238,6 +238,35 @@ def test_journal_records_basket_weights(tmp_path):
     assert weights["BTC"] == pytest.approx(0.5)
 
 
+def test_nan_weight_fails_loud_through_cycle(tmp_path, monkeypatch):
+    """Fail-loud, end to end: a NaN in the signal's basket_weights must not
+    silently mis-size the book. run_live_cycle raises and journals
+    outcome='failed' — the guarantee enforced through the production
+    pipeline, not just in an allocator unit test."""
+    import math
+    from trade_lab.execution import live_cycle as lc
+    from trade_lab.execution.signal import SignalSnapshot
+
+    bad_snap = SignalSnapshot(
+        asof=pd.Timestamp("2026-06-11", tz="UTC"), signal=1.0,
+        basket_close=150.0, asset_closes={"BTC": 50_000.0, "ETH": 3_000.0},
+        sma_gate_open=True, n_assets_in_basket=2,
+        basket_weights={"BTC": math.nan, "ETH": 0.5},
+    )
+    monkeypatch.setattr(lc, "compute_live_signal", lambda *a, **k: bad_snap)
+
+    broker = _broker(_LiveStub(basket=("BTC", "ETH")))
+    clock = _MockClock()
+    with pytest.raises(ValueError, match="BTC"):
+        run_live_cycle(
+            broker, journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "ValueError"
+
+
 def test_signal_zero_no_orders(tmp_path):
     """Downtrend → signal=0 → no orders planned → outcome=success,
     orders_executed=[]."""

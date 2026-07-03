@@ -146,3 +146,33 @@ def test_dry_run_returns_structured_data_for_logging():
     assert isinstance(r.orders_planned, list)
     assert isinstance(r.orders_skipped, list)
     assert isinstance(r.total_skipped_quote_drift, float)
+
+
+def test_nan_weight_fails_loud_through_dry_cycle(tmp_path, monkeypatch):
+    """Mirror of the live-cycle fail-loud guard on the dry-run path: a NaN
+    in basket_weights raises and journals outcome='failed' rather than
+    silently mis-sizing the printed plan."""
+    import json
+    import math
+
+    from trade_lab.execution import dry_run as dr
+    from trade_lab.execution.journal import JournalWriter
+    from trade_lab.execution.signal import SignalSnapshot
+
+    bad_snap = SignalSnapshot(
+        asof=pd.Timestamp("2026-06-11", tz="UTC"), signal=1.0,
+        basket_close=150.0, asset_closes={"BTC": 50_000.0, "ETH": 3_000.0},
+        sma_gate_open=True, n_assets_in_basket=2,
+        basket_weights={"BTC": math.nan, "ETH": 0.5},
+    )
+    monkeypatch.setattr(dr, "compute_live_signal", lambda *a, **k: bad_snap)
+
+    broker = Broker(_config(), _StubExchange())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+    with pytest.raises(ValueError, match="BTC"):
+        run_dry_cycle(broker, journal=journal)
+
+    lines = (tmp_path / "cycles.jsonl").read_text().splitlines()
+    cycle = json.loads(lines[-1])
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "ValueError"
