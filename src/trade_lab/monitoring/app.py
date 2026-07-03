@@ -37,7 +37,9 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness, cycle_orders_executed, parse_iso,
+    JournalReader, ReadStats, Staleness, cycle_orders_executed, is_live_cycle,
+    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
+    recent_incidents,
 )
 
 
@@ -49,6 +51,13 @@ EXPECTED_INTERVAL_S = int(
     os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "3600")
 )
 REFRESH_SECONDS = int(os.environ.get("MONITORING_REFRESH_SECONDS", "30"))
+# The daily `paper-place-orders` cron is the LIVE order path; the hourly
+# dry-run shares the same journal. This is the expected spacing of LIVE
+# cycles (one calendar day) used to flag a silently-dead order cron that
+# the overall (dry-run-dominated) staleness cannot see.
+EXPECTED_LIVE_INTERVAL_S = int(
+    os.environ.get("MONITORING_EXPECTED_LIVE_INTERVAL_SECONDS", "86400")
+)
 
 # Validation forward-test paths (see paper_trading/README.md). All
 # read-only; the validation panel never writes.
@@ -89,6 +98,16 @@ def _cycle_context(cycle: Optional[dict]) -> dict:
     """
     ctx = (cycle or {}).get("context")
     return ctx if isinstance(ctx, dict) else {}
+
+
+def _cycle_mode(cycle: Optional[dict]) -> str:
+    """'LIVE' if the cycle placed real orders, else 'DRY'.
+
+    The journal is dominated ~24:1 by hourly dry-runs, so the operator needs
+    to know at a glance whether what they are looking at is the real daily
+    rebalance or a planning-only heartbeat.
+    """
+    return "LIVE" if is_live_cycle(cycle or {}) else "DRY"
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +183,17 @@ def _render_status(reader: JournalReader) -> None:
         for c in cols[1:]:
             c.metric("—", "—")
 
+    if latest is not None:
+        mode = _cycle_mode(latest)
+        if mode == "DRY":
+            st.caption(
+                f"Latest journal cycle is a **DRY-RUN** (planning only) — the "
+                f"hourly heartbeat. Real orders run once daily; see 'Live "
+                f"order cron' below for the last REAL cycle."
+            )
+        else:
+            st.caption("Latest journal cycle is a **LIVE** (real-order) cycle.")
+
     if last_ended_iso:
         st.caption(f"Last cycle ended at {_humanize_iso(last_ended_iso)}")
 
@@ -206,6 +236,9 @@ def _render_status(reader: JournalReader) -> None:
             "next cycle entry (if it has run yet)."
         )
 
+    _render_live_cron_health(reader)
+    _render_incidents(reader)
+
     drift = reader.cumulative_skipped_drift()
     if drift > 0:
         st.warning(
@@ -215,6 +248,104 @@ def _render_status(reader: JournalReader) -> None:
         )
 
     _render_read_stats(stats)
+
+
+def _render_live_cron_health(reader: JournalReader) -> None:
+    """Freshness clock for the LIVE order cron specifically.
+
+    The overall Staleness metric buckets on the last cycle of *any* type, so
+    the hourly dry-run keeps it FRESH even if the daily `paper-place-orders`
+    cron has been dead for days. This surfaces the last REAL-order cycle on
+    its own ~daily clock and fires loud when overdue.
+    """
+    st.subheader("Live order cron")
+    live = reader.latest_live_cycle()
+    if live is None:
+        st.info(
+            "No LIVE (real-order) cycle in the journal yet — only dry-runs. "
+            "The daily `paper-place-orders` cron writes the first LIVE cycle "
+            "when it next runs."
+        )
+        return
+
+    ended = live.get("ended_at")
+    cols = st.columns(3)
+    cols[0].metric("Last LIVE cycle", _humanize_relative(ended))
+    cols[1].metric("LIVE outcome", str(live.get("outcome") or "?").upper())
+    cols[2].metric("LIVE cycle", (live.get("cycle_id") or "?")[:8])
+    st.caption(
+        f"Last LIVE cycle ended at {_humanize_iso(ended)}. The Staleness "
+        f"metric above tracks the hourly dry-run heartbeat, not this."
+    )
+
+    dt = parse_iso(ended)
+    if dt is not None:
+        age = (datetime.now(tz=timezone.utc) - dt).total_seconds()
+        if age > EXPECTED_LIVE_INTERVAL_S * 1.5:
+            st.error(
+                f"LIVE order cron OVERDUE — last real-order cycle was "
+                f"{_humanize_relative(ended)} "
+                f"(threshold = 1.5× expected {EXPECTED_LIVE_INTERVAL_S}s). "
+                f"The hourly dry-run may be masking a dead daily cron; "
+                f"check the `paper-place-orders` cron on the VPS."
+            )
+
+
+def _render_incidents(reader: JournalReader) -> None:
+    """Window-level incident view: non-success cycles, unresolved orders,
+    and cadence gaps that the latest-cycle-only alerts above cannot show."""
+    cycles = reader.cycles(n=500)
+    incidents = recent_incidents(cycles)
+    open_orders = open_order_incidents(cycles)
+    gap = max_inter_cycle_gap_seconds(cycles)
+    gap_overdue = gap is not None and gap > EXPECTED_INTERVAL_S * 1.5
+
+    st.subheader("Incidents (last 500 cycles)")
+    if not incidents and not open_orders and not gap_overdue:
+        st.success(
+            "No failed/partial cycles, unresolved orders, or cadence gaps "
+            "in the window."
+        )
+        return
+
+    if incidents:
+        st.warning(
+            f"{len(incidents)} non-success cycle(s) in the window "
+            f"(failed / unknown_orders / partial)."
+        )
+        rows = [{
+            "ended_at": _humanize_iso(i["ended_at"]),
+            "mode": i["mode"],
+            "outcome": i["outcome"].upper(),
+            "cycle": i["cycle_id"],
+            "error": i["error_type"] or "",
+            "message": (i["error_message"] or "")[:80],
+        } for i in incidents]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    if open_orders:
+        st.error(
+            f"{len(open_orders)} executed order(s) NOT in a resolved terminal "
+            f"state (partial / rejected / lost_track / timeout). A lost_track "
+            f"keeps the CLI exit code non-zero until resolved."
+        )
+        rows = [{
+            "ended_at": _humanize_iso(o["ended_at"]),
+            "cycle": o["cycle_id"],
+            "side": o["side"],
+            "symbol": o["symbol"],
+            "status": o["status"],
+            "client_order_id": o["client_order_id"],
+        } for o in open_orders]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    if gap_overdue:
+        st.warning(
+            f"Largest gap between consecutive cycles: {gap / 3600:.1f}h "
+            f"(> 1.5× expected {EXPECTED_INTERVAL_S}s). A cycle may have been "
+            f"missed mid-window — the single-latest Staleness check cannot "
+            f"see this."
+        )
 
 
 def _render_read_stats(stats: ReadStats) -> None:
@@ -550,6 +681,7 @@ def _render_cycles(reader: JournalReader) -> None:
         sig = c.get("signal") or {}
         summary_rows.append({
             "ended_at": _humanize_iso(c.get("ended_at")),
+            "mode": _cycle_mode(c),
             "outcome": str(c.get("outcome") or "?").upper(),
             "duration_ms": c.get("duration_ms"),
             "signal": sig.get("ladder_value"),

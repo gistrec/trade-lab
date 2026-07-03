@@ -235,6 +235,109 @@ def test_days_since_gate_skips_cycles_without_signal():
 
 
 # ---------------------------------------------------------------------------
+# DRY vs LIVE surfacing (Theme 1)
+# ---------------------------------------------------------------------------
+
+
+class _Col:
+    def metric(self, *a, **k):
+        pass
+
+
+def _stub_st(monkeypatch, capture):
+    """Stub the Streamlit surface used by the Status render helpers, routing
+    each call into ``capture`` (a dict of lists) so tests can assert what the
+    operator would see."""
+    import trade_lab.monitoring.app as app
+
+    for name in ("subheader", "info", "caption", "warning", "error",
+                 "success", "dataframe"):
+        capture.setdefault(name, [])
+        monkeypatch.setattr(
+            app.st, name,
+            lambda *a, _n=name, **k: capture[_n].append(a[0] if a else None),
+        )
+    monkeypatch.setattr(app.st, "columns", lambda n: [_Col() for _ in range(n)])
+    return app
+
+
+def test_cycle_mode_live_vs_dry():
+    from trade_lab.monitoring.app import _cycle_mode
+
+    assert _cycle_mode({"orders_executed": []}) == "LIVE"
+    assert _cycle_mode({"orders_executed": [{"symbol": "BTC"}]}) == "LIVE"
+    assert _cycle_mode({"orders_executed": None}) == "DRY"
+    assert _cycle_mode({}) == "DRY"
+    assert _cycle_mode(None) == "DRY"
+
+
+class _LiveReader:
+    def __init__(self, live=None, cycles=None):
+        self._live = live
+        self._cycles = cycles or []
+
+    def latest_live_cycle(self):
+        return self._live
+
+    def cycles(self, n=20):
+        return self._cycles[-n:]
+
+
+def test_live_cron_health_info_when_no_live_cycle(monkeypatch):
+    app = _stub_st(monkeypatch, cap := {})
+    app._render_live_cron_health(_LiveReader(live=None))
+    assert cap["info"]                       # info shown
+    assert not cap["error"]                  # nothing overdue when none exists
+
+
+def test_live_cron_health_errors_when_overdue(monkeypatch):
+    from datetime import timedelta
+
+    app = _stub_st(monkeypatch, cap := {})
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    app._render_live_cron_health(
+        _LiveReader(live={"ended_at": old, "outcome": "success",
+                          "cycle_id": "abcdef12"})
+    )
+    assert cap["error"]                      # overdue → loud error
+    assert "OVERDUE" in cap["error"][0]
+
+
+def test_live_cron_health_no_error_when_fresh(monkeypatch):
+    from datetime import timedelta
+
+    app = _stub_st(monkeypatch, cap := {})
+    recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    app._render_live_cron_health(
+        _LiveReader(live={"ended_at": recent, "outcome": "success",
+                          "cycle_id": "abcdef12"})
+    )
+    assert not cap["error"]
+
+
+def test_incidents_success_when_clean(monkeypatch):
+    app = _stub_st(monkeypatch, cap := {})
+    clean = [{"outcome": "success", "cycle_id": "ok", "ended_at": None,
+              "orders_executed": []}]
+    app._render_incidents(_LiveReader(cycles=clean))
+    assert cap["success"]
+    assert not cap["warning"] and not cap["error"]
+
+
+def test_incidents_warns_on_failed_cycle(monkeypatch):
+    app = _stub_st(monkeypatch, cap := {})
+    cycles = [
+        {"outcome": "success", "cycle_id": "ok", "ended_at": None,
+         "orders_executed": []},
+        {"outcome": "failed", "cycle_id": "boom", "ended_at": None,
+         "orders_executed": None, "error": {"type": "CCXTError", "message": "x"}},
+    ]
+    app._render_incidents(_LiveReader(cycles=cycles))
+    assert cap["warning"]                    # non-success cycle surfaced
+    assert not cap["success"]
+
+
+# ---------------------------------------------------------------------------
 # Safety banner — fail loud on missing/garbage sandbox flag
 # ---------------------------------------------------------------------------
 

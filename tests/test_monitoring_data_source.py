@@ -16,9 +16,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from trade_lab.monitoring.data_source import (
     JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness,
-    cycle_orders_executed, parse_iso,
+    cycle_orders_executed, is_live_cycle, max_inter_cycle_gap_seconds,
+    open_order_incidents, parse_iso, recent_incidents,
 )
 
 
@@ -481,6 +484,115 @@ def test_staleness_no_data_on_null_ended_at(tmp_path):
     }) + "\n")
     reader = JournalReader(path)
     assert reader.staleness(3600) is Staleness.NO_DATA
+
+
+# ---------------------------------------------------------------------------
+# DRY vs LIVE discrimination (Theme 1: hourly dry-runs must not mask a dead
+# daily order cron)
+# ---------------------------------------------------------------------------
+
+
+def _live_cycle(cycle_id="live", ended_at=None, outcome="success",
+                orders_executed=None):
+    """A live (real-order) cycle sets orders_executed to a list."""
+    c = _cycle_entry(cycle_id, ended_at=ended_at, outcome=outcome,
+                     schema_version=2)
+    c["orders_executed"] = orders_executed if orders_executed is not None else []
+    return c
+
+
+def test_is_live_cycle_true_only_when_orders_executed_is_a_list():
+    assert is_live_cycle({"orders_executed": []}) is True
+    assert is_live_cycle({"orders_executed": [{"symbol": "BTC/USDT"}]}) is True
+    # dry-run: explicit None or absent → not live
+    assert is_live_cycle({"orders_executed": None}) is False
+    assert is_live_cycle({}) is False
+
+
+def test_latest_live_cycle_ignores_dry_runs(tmp_path):
+    """The core Theme-1 property: with ~24 dry-runs after the last live
+    cycle, latest_cycle() is a dry-run but latest_live_cycle() finds the
+    real one."""
+    journal = tmp_path / "j.jsonl"
+    entries = [_live_cycle("real1"), _live_cycle("real2")]
+    for i in range(24):  # a day of hourly dry-runs on top
+        entries.append(_cycle_entry(f"dry{i}"))
+    _write_journal(journal, entries)
+    reader = JournalReader(journal)
+    assert reader.latest_cycle()["cycle_id"] == "dry23"        # dry-run
+    assert reader.latest_live_cycle()["cycle_id"] == "real2"   # real order cron
+
+
+def test_latest_live_cycle_none_when_only_dry_runs(tmp_path):
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_cycle_entry("dry1"), _cycle_entry("dry2")])
+    reader = JournalReader(journal)
+    assert reader.latest_live_cycle() is None
+
+
+def test_recent_incidents_scans_window_not_just_latest():
+    """A failed LIVE cycle followed by dry-run successes is invisible to a
+    latest-only check but must appear in the incident scan."""
+    cycles = [
+        _cycle_entry("ok0"),
+        _live_cycle("boom", outcome="failed"),
+        _cycle_entry("dry_after"),   # later success would hide the failure
+    ]
+    incidents = recent_incidents(cycles)
+    assert [i["cycle_id"] for i in incidents] == ["boom"]
+    assert incidents[0]["outcome"] == "failed"
+    assert incidents[0]["mode"] == "LIVE"
+
+
+def test_recent_incidents_excludes_reconstructed_recovery():
+    cycles = [
+        {"outcome": "reconstructed", "cycle_id": "recov"},
+        {"outcome": "success", "cycle_id": "ok"},
+    ]
+    assert recent_incidents(cycles) == []
+
+
+def test_open_order_incidents_lists_non_resolved_orders():
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": "a",
+             "symbol": "BTC/USDT", "side": "buy"},
+            {"terminal_status": "lost_track", "client_order_id": "b",
+             "symbol": "ETH/USDT", "side": "sell"},
+        ]),
+    ]
+    out = open_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["status"] == "lost_track"
+    assert out[0]["symbol"] == "ETH/USDT"
+    assert out[0]["side"] == "SELL"
+
+
+def test_open_order_incidents_empty_when_all_resolved():
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": "a"},
+            {"terminal_status": "canceled", "client_order_id": "b"},
+        ]),
+    ]
+    assert open_order_incidents(cycles) == []
+
+
+def test_max_inter_cycle_gap_detects_mid_window_pause():
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    cycles = [
+        _cycle_entry("c1", ended_at=base.isoformat()),
+        _cycle_entry("c2", ended_at=(base + timedelta(hours=1)).isoformat()),
+        # 3-day pause here
+        _cycle_entry("c3", ended_at=(base + timedelta(days=3)).isoformat()),
+    ]
+    gap = max_inter_cycle_gap_seconds(cycles)
+    assert gap == pytest.approx((timedelta(days=3) - timedelta(hours=1)).total_seconds())
+
+
+def test_max_inter_cycle_gap_none_with_under_two_timestamps():
+    assert max_inter_cycle_gap_seconds([]) is None
+    assert max_inter_cycle_gap_seconds([_cycle_entry("c1")]) is None
 
 
 def test_signal_history_skips_null_asof(tmp_path):

@@ -64,6 +64,101 @@ def cycle_orders_executed(cycle: dict) -> list:
     return cycle.get("orders_executed") or []
 
 
+def is_live_cycle(cycle: dict) -> bool:
+    """True if this cycle attempted real order placement (not a dry-run).
+
+    ``run_live_cycle`` always writes ``orders_executed`` as a list — even an
+    empty one for a signal=0 no-op or a reconstruction. Dry-run (planning-
+    only) cycles write ``None`` (or omit the field on schema v1). The hourly
+    dry-run and the daily live run share one journal, so this predicate is
+    what separates 'the real order cron ran' from 'a dry-run kept the
+    journal warm'.
+
+    Caveat: a live cycle that raised *before* placing any order also writes
+    ``orders_executed=None`` (live_cycle.py:592), so it reads as non-live
+    here — but such a cycle still surfaces through its ``outcome=="failed"``
+    in :func:`recent_incidents`, so nothing is lost.
+    """
+    return cycle.get("orders_executed") is not None
+
+
+# Cycle-level outcomes that mean something went wrong and wants an operator's
+# eye. ``reconstructed`` is a *recovery* (an unknown-order state was resolved),
+# not an incident, so it is surfaced separately, not here.
+INCIDENT_OUTCOMES = frozenset({"failed", "unknown_orders", "partial"})
+
+# Terminal order states that count as fully resolved. Anything else an
+# executed order lands in (partial, rejected, lost_track, timeout, ...) is an
+# open incident until a later cycle resolves it.
+RESOLVED_ORDER_STATUSES = frozenset({"closed", "canceled", "cancelled"})
+
+
+def recent_incidents(cycles: list[dict]) -> list[dict]:
+    """Non-success cycles in the window, newest-first.
+
+    The Status tab otherwise only reacts to the *latest* cycle's outcome, so
+    a failed / unknown_orders / partial LIVE cycle from hours ago is
+    overwritten in the UI by a later dry-run 'success' and never seen. This
+    scans the whole window instead. ``reconstructed`` is excluded (it is a
+    recovery, not a failure).
+    """
+    out: list[dict] = []
+    for c in reversed(cycles):  # newest-first
+        if c.get("outcome") in INCIDENT_OUTCOMES:
+            err = c.get("error") or {}
+            out.append({
+                "ended_at": c.get("ended_at"),
+                "outcome": str(c.get("outcome") or "?"),
+                "mode": "LIVE" if is_live_cycle(c) else "DRY",
+                "cycle_id": (c.get("cycle_id") or "?")[:8],
+                "error_type": err.get("type") if isinstance(err, dict) else None,
+                "error_message": err.get("message") if isinstance(err, dict) else None,
+            })
+    return out
+
+
+def open_order_incidents(cycles: list[dict]) -> list[dict]:
+    """Executed orders across the window not in a resolved terminal state.
+
+    Surfaces partial / rejected / lost_track / timeout orders that would
+    otherwise be reachable only by opening each cycle's detail one at a time.
+    Newest-first. A window-level scan (does not attempt cross-cycle
+    resolution tracking — a later 'closed' for the same id is not de-duped;
+    that is a deliberate, fail-loud simplification).
+    """
+    out: list[dict] = []
+    for c in reversed(cycles):  # newest-first
+        for o in cycle_orders_executed(c):
+            status = o.get("terminal_status")
+            if status in RESOLVED_ORDER_STATUSES:
+                continue
+            out.append({
+                "ended_at": c.get("ended_at"),
+                "cycle_id": (c.get("cycle_id") or "?")[:8],
+                "client_order_id": (o.get("client_order_id") or "?")[:24],
+                "symbol": o.get("symbol"),
+                "side": (o.get("side") or "").upper(),
+                "status": str(status or "?"),
+            })
+    return out
+
+
+def max_inter_cycle_gap_seconds(cycles: list[dict]) -> Optional[float]:
+    """Largest gap (seconds) between consecutive cycles' ``ended_at``.
+
+    ``staleness`` only inspects the newest cycle's age, so a pause in the
+    *middle* of the window (the daily cron skipped a day but has fired
+    since) is invisible to it. This looks at every consecutive pair.
+    Returns ``None`` when fewer than two timestamps parse.
+    """
+    times = sorted(
+        t for t in (parse_iso(c.get("ended_at")) for c in cycles) if t is not None
+    )
+    if len(times) < 2:
+        return None
+    return max((b - a).total_seconds() for a, b in zip(times, times[1:]))
+
+
 def parse_iso(s) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp written by the journal; total function.
 
@@ -125,6 +220,21 @@ class JournalReader:
         """Return the most recently appended valid cycle, or None."""
         self._refresh_if_changed()
         return self._cache[-1] if self._cache else None
+
+    def latest_live_cycle(self) -> Optional[dict]:
+        """Most recent cycle that placed real orders, or None.
+
+        The hourly dry-run and the daily live run share one journal, so
+        :meth:`latest_cycle` is almost always a dry-run — a dead daily order
+        cron stays invisible while dry-runs keep the journal fresh. This is
+        the clock that answers 'is the real order cron still alive?'. See
+        :func:`is_live_cycle` for the discriminator and its one caveat.
+        """
+        self._refresh_if_changed()
+        for c in reversed(self._cache):
+            if is_live_cycle(c):
+                return c
+        return None
 
     def cycles(self, n: int = 20) -> list[dict]:
         """Return up to ``n`` most recent valid cycles, newest last."""
