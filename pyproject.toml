@@ -57,6 +57,10 @@ where = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+# ops/ holds runnable operational scripts (the Netdata health server) that
+# live outside the package but still need unit tests. Put it on the import
+# path so tests can `import health_server`.
+pythonpath = ["ops"]
 
 [tool.ruff]
 target-version = "py311"

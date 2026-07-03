@@ -1,0 +1,238 @@
+"""Tests for the read-only Netdata health server (``ops/health_server.py``).
+
+The decision logic (``evaluate_heartbeat`` / ``evaluate_daily``) is a pure
+function of a :class:`JournalReader` and an injected ``now``, so it is tested
+directly against temp journal files with a frozen clock — no wall-clock
+flakiness. One end-to-end test starts the real HTTP server on an ephemeral
+port and asserts the status codes a Netdata ``httpcheck`` job would see.
+"""
+from __future__ import annotations
+
+import json
+import threading
+from datetime import datetime, timedelta, timezone
+from http.client import HTTPConnection
+from pathlib import Path
+
+import pytest
+
+import health_server as hs
+from trade_lab.monitoring.data_source import JournalReader
+
+NOW = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _entry(
+    *,
+    ended_at: datetime,
+    outcome: str = "success",
+    live: bool,
+    cycle_id: str = "c1",
+    orders_executed=None,
+) -> dict:
+    """Build a minimal schema-v2 journal entry the reader will accept."""
+    if live and orders_executed is None:
+        orders_executed = []  # a list (even empty) marks a live cycle
+    return {
+        "schema_version": 2,
+        "cycle_id": cycle_id,
+        "started_at": ended_at.isoformat(),
+        "ended_at": ended_at.isoformat(),
+        "duration_ms": 1000,
+        "outcome": outcome,
+        "orders_executed": orders_executed,  # None => dry-run, list => live
+    }
+
+
+def _journal(tmp_path: Path, entries: list[dict]) -> JournalReader:
+    path = tmp_path / "cycles.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    return JournalReader(path)
+
+
+# --------------------------------------------------------------------------
+# heartbeat
+# --------------------------------------------------------------------------
+
+def test_heartbeat_no_journal_file(tmp_path):
+    reader = JournalReader(tmp_path / "does_not_exist.jsonl")
+    r = hs.evaluate_heartbeat(reader, NOW, hs.DEFAULT_HEARTBEAT_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "no cycles" in r.reason
+
+
+def test_heartbeat_fresh_dry_run_ok(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(minutes=30), live=False),
+    ])
+    r = hs.evaluate_heartbeat(reader, NOW, hs.DEFAULT_HEARTBEAT_MAX_AGE_S)
+    assert r.ok and r.status_code == 200
+
+
+def test_heartbeat_stale_fails(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=5), live=False),
+    ])
+    r = hs.evaluate_heartbeat(reader, NOW, hs.DEFAULT_HEARTBEAT_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "no cycle in" in r.reason
+
+
+def test_heartbeat_unreadable_journal_is_a_directory(tmp_path):
+    # A directory at the journal path -> ReadStats.read_error, not a crash.
+    (tmp_path / "cycles.jsonl").mkdir()
+    reader = JournalReader(tmp_path / "cycles.jsonl")
+    r = hs.evaluate_heartbeat(reader, NOW, hs.DEFAULT_HEARTBEAT_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "unreadable" in r.reason
+
+
+# --------------------------------------------------------------------------
+# daily live
+# --------------------------------------------------------------------------
+
+def test_daily_dry_run_only_has_no_live_cycle(tmp_path):
+    # Hourly dry-runs keep the journal warm but no live order cron ran.
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(minutes=10), live=False),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "no live" in r.reason
+
+
+def test_daily_fresh_live_success_ok(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=3), outcome="success", live=True),
+        _entry(ended_at=NOW - timedelta(minutes=5), live=False),  # later dry-run
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert r.ok and r.status_code == 200
+    assert r.detail["outcome"] == "success"
+
+
+def test_daily_reconstruction_alone_is_not_healthy(tmp_path):
+    # A reconstruction cycle proves recovery of a PRIOR cycle's orders, not
+    # that today's placement ran — it must not satisfy /healthz/daily.
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=2), outcome="reconstructed",
+               live=True),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "no live" in r.reason
+
+
+def test_daily_reconstruction_does_not_mask_stale_main(tmp_path):
+    # Fresh reconstruction + a stale main success must still 503 (stale),
+    # not be rescued to 200 by the fresh reconstruction cycle.
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=30), outcome="success",
+               live=True, cycle_id="old_main"),
+        _entry(ended_at=NOW - timedelta(hours=1), outcome="reconstructed",
+               live=True, cycle_id="fresh_recon"),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "ago" in r.reason  # keyed off the main success, not the reconstruction
+
+
+def test_daily_reconstruction_plus_fresh_main_success_ok(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=2), outcome="reconstructed",
+               live=True, cycle_id="recon"),
+        _entry(ended_at=NOW - timedelta(hours=1), outcome="success",
+               live=True, cycle_id="main_ok"),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert r.ok and r.status_code == 200
+
+
+def test_daily_stale_live_fails(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=30), outcome="success", live=True),
+        _entry(ended_at=NOW - timedelta(minutes=5), live=False),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "ago" in r.reason
+
+
+@pytest.mark.parametrize("bad", ["failed", "unknown_orders", "partial"])
+def test_daily_bad_outcome_fails(tmp_path, bad):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=1), outcome=bad, live=True),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert bad in r.reason
+
+
+def test_daily_live_outcome_failure_when_not_latest(tmp_path):
+    # A failed LIVE cycle (orders placed then failed) that is NOT the most
+    # recent entry — a later dry-run succeeded. The live-outcome check, not
+    # the fresh-failure catch, must still flag it.
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=3), outcome="failed", live=True,
+               cycle_id="live_fail"),
+        _entry(ended_at=NOW - timedelta(minutes=5), outcome="success",
+               live=False, cycle_id="later_dry"),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "last live outcome=failed" in r.reason
+
+
+def test_daily_catches_fresh_failure_before_placement(tmp_path):
+    # THE blind spot: a live run that failed *before* placing an order writes
+    # orders_executed=None, so it reads as non-live. Without the fresh-failure
+    # catch, latest_live_cycle() would return the still-fresh (<26h) success
+    # and report 200 while today's live attempt actually failed.
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=20), outcome="success",
+               live=True, cycle_id="yesterday_ok"),
+        _entry(ended_at=NOW - timedelta(minutes=10), outcome="failed",
+               live=False, cycle_id="today_failed_early"),  # orders_executed=None
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "failed after last live success" in r.reason
+
+
+# --------------------------------------------------------------------------
+# end-to-end over a real socket (what Netdata httpcheck actually sees)
+# --------------------------------------------------------------------------
+
+def _get(port: int, path: str) -> tuple[int, dict]:
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode("utf-8"))
+        return resp.status, body
+    finally:
+        conn.close()
+
+
+def test_end_to_end_status_codes(tmp_path):
+    path = tmp_path / "cycles.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in [
+        _entry(ended_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+               outcome="success", live=True),
+    ]))
+    cfg = hs.Config(journal_path=str(path), host="127.0.0.1", port=0)
+    httpd = hs.build_server(cfg)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        code, body = _get(port, "/healthz")
+        assert code == 200 and body["ok"] is True
+        code, body = _get(port, "/healthz/daily")
+        assert code == 200 and body["check"] == "daily_live"
+        code, body = _get(port, "/nope")
+        assert code == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

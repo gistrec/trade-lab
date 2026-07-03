@@ -1,0 +1,31 @@
+# Drop-in for Netdata's go.d httpcheck collector.
+#
+# Install:
+#   sudo cp ops/netdata/go.d/httpcheck.conf.example /etc/netdata/go.d/httpcheck.conf
+#   # (if the file already exists, MERGE these jobs into its `jobs:` list)
+#   sudo netdatacli reload-health   # or: sudo systemctl restart netdata
+#
+# These probe the trade-lab health server (ops/health_server.py). It returns
+# 503 when a cycle is stale or a live outcome failed, so a plain "is it 200?"
+# check doubles as a dead-man's-switch — no special logic needed on this side.
+jobs:
+  # Heartbeat: is the bot writing to the journal at all? (hourly dry-run
+  # cadence). Goes 503 when nothing has been written for ~2h.
+  - name: trade_lab_heartbeat
+    url: http://127.0.0.1:7001/healthz
+    timeout: 2
+    status_accepted: [200]
+
+  # Daily live: did today's real order cycle run (<26h) and succeed?
+  # Goes 503 on a missing/stale live cycle or a failed/partial outcome.
+  - name: trade_lab_daily
+    url: http://127.0.0.1:7001/healthz/daily
+    timeout: 2
+    status_accepted: [200]
+
+  # Bonus (zero extra code): liveness of the read-only Streamlit dashboard
+  # itself, via Streamlit's built-in health endpoint.
+  - name: trade_lab_dashboard
+    url: http://127.0.0.1:7000/_stcore/health
+    timeout: 2
+    status_accepted: [200]
