@@ -97,16 +97,30 @@ def test_weights_used_recorded_on_allocation():
     assert alloc.weights_used == pytest.approx(_EQUAL)
 
 
-def test_partial_weights_leave_rest_in_cash():
-    """Weights summing to < 1 (e.g. an inactive asset carrying weight 0)
-    invest less than signal × equity — the remainder stays in cash, never
-    forced onto the other assets."""
+def test_partial_weights_with_signal_raise():
+    """Weights summing to < 1 while signal > 0 mean the active basket is
+    silently under-invested / shrunken — the fail-loud hard rule forbids
+    sizing to a shrunken book, so raise instead of quietly parking the
+    remainder in cash. (Not reachable via the deployed pipeline, which
+    renormalises weights to 1 over active assets, but the allocator must
+    not delegate its whole fail-loud guarantee to the index.)"""
     weights = {sym: 0.10 for sym in _BASKET}   # sums to 0.70
+    with pytest.raises(ValueError, match="sum"):
+        compute_target_allocation(
+            signal=1.0, total_equity=100_000.0,
+            prices=_PRICES, basket=_BASKET, weights=weights,
+        )
+
+
+def test_partial_weights_all_cash_ok():
+    """signal=0 is all-cash regardless of weights, so a sub-1 weights row
+    is harmless there — no under-investment to flag."""
+    weights = {sym: 0.10 for sym in _BASKET}
     alloc = compute_target_allocation(
-        signal=1.0, total_equity=100_000.0,
+        signal=0.0, total_equity=100_000.0,
         prices=_PRICES, basket=_BASKET, weights=weights,
     )
-    assert sum(alloc.target_quote_per_asset.values()) == pytest.approx(70_000.0)
+    assert all(v == 0.0 for v in alloc.target_quote_per_asset.values())
 
 
 def test_invalid_signal_raises():

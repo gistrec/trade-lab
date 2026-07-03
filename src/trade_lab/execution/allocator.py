@@ -100,6 +100,18 @@ def compute_target_allocation(
             f"Basket weights sum to {total_weight:.6f} > 1; refusing to "
             "over-invest beyond the fully-invested book."
         )
+    # Lower bound: the ladder signal already encodes the cash fraction, so
+    # when signal > 0 the active basket must be fully invested (weights sum
+    # to ~1). A sub-1 sum means an asset silently dropped to weight 0 or an
+    # upstream normalisation regressed — the "basket never shrinks silently"
+    # hard rule forbids sizing to it. (All-cash, signal == 0, is exempt: no
+    # book to shrink.)
+    if signal > 0.0 and total_weight < 1.0 - 1e-6:
+        raise ValueError(
+            f"Basket weights sum to {total_weight:.6f} < 1 while signal="
+            f"{signal} > 0; refusing to size to a silently shrunken / "
+            "under-invested basket."
+        )
 
     target_quote = {
         sym: signal * weights_used[sym] * total_equity for sym in basket
