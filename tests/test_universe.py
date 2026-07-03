@@ -59,6 +59,34 @@ def _panels(n: int = 200) -> tuple[pd.DataFrame, pd.DataFrame]:
     return market_caps, volumes
 
 
+def test_nan_metric_coin_not_eligible_in_small_universe():
+    """When fewer than top_n coins have a valid market cap/volume,
+    na_option='bottom' assigns NaN cells a rank <= top_n, so a tradable
+    coin with a missing (NaN) market cap was marked eligible without its
+    cap ever being verified as top-N (regression: C12)."""
+    idx = _date_index(120)
+    registry = {
+        "BIG":   CoinMeta("big-id",   "BIG/USDT",   "2020-01-01", None),
+        "NOCAP": CoinMeta("nocap-id", "NOCAP/USDT", "2020-01-01", None),
+    }
+    market_caps = pd.DataFrame(
+        {"BIG": np.full(120, 1e11), "NOCAP": np.full(120, np.nan)},
+        index=idx,
+    )
+    volumes = pd.DataFrame(
+        {"BIG": np.full(120, 5e9), "NOCAP": np.full(120, 5e8)},
+        index=idx,
+    )
+    eligibility = build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+    )
+    assert eligibility["BIG"].iloc[-1] == True
+    # NOCAP's market cap is unknown (NaN) — it must NOT be eligible even
+    # though the tiny universe leaves its NaN rank numerically <= top_n.
+    assert eligibility["NOCAP"].iloc[-1] == False
+
+
 def test_top_n_picks_largest_caps_when_tradable():
     market_caps, volumes = _panels(200)
     eligibility = build_pit_universe(

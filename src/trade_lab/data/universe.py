@@ -164,12 +164,19 @@ def build_pit_universe(
     mc_for_rank = market_caps.where(tradable, other=float("nan"))
     vol_for_rank = rolling_vol.where(tradable, other=float("nan"))
 
-    # Rank descending (1 = biggest). ``na_option="bottom"`` keeps NaN
-    # coins out of the top-N selection. Ranking is done per row.
+    # Rank descending (1 = biggest). Ranking is done per row.
     mc_rank = mc_for_rank.rank(axis=1, method="min", ascending=False, na_option="bottom")
     vol_rank = vol_for_rank.rank(axis=1, method="min", ascending=False, na_option="bottom")
 
-    eligible = (mc_rank <= top_n) & (vol_rank <= top_n) & tradable
+    # A coin must have an OBSERVED market cap and volume to be eligible.
+    # na_option="bottom" alone does NOT keep NaN coins out of the top-N:
+    # when fewer than top_n coins have a valid metric on a date (early
+    # history), the shared NaN rank is (count of valid)+1 <= top_n, so NaN
+    # cells slip through `rank <= top_n`. Require notna() explicitly.
+    eligible = (
+        (mc_rank <= top_n) & (vol_rank <= top_n) & tradable
+        & mc_for_rank.notna() & vol_for_rank.notna()
+    )
 
     if start_date:
         eligible = eligible[eligible.index >= pd.Timestamp(start_date, tz=eligible.index.tz)]
