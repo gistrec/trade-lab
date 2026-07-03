@@ -460,6 +460,22 @@ def _render_trades_tab(result, candles: pd.DataFrame) -> None:
     )
 
 
+def _render_tab_safely(tab_name: str, render_fn) -> None:
+    """Contain a tab's failure to that tab.
+
+    Streamlit runs every tab body in a single top-down script run, so an
+    uncaught exception in one tab (e.g. strftime on a Parquet whose index
+    passed validate_ohlcv by name but is not a DatetimeIndex) would
+    otherwise abort the run and blank every other tab. Mirrors the
+    monitoring app's containment: the error stays loud, rendered red
+    inside the failing tab, without taking down the siblings.
+    """
+    try:
+        render_fn()
+    except Exception as exc:
+        st.error(f"{tab_name} tab failed: {type(exc).__name__}: {exc}")
+
+
 def main() -> None:
     st.set_page_config(page_title="trade-lab dashboard", layout="wide")
     st.title("trade-lab — backtest dashboard")
@@ -504,15 +520,19 @@ def main() -> None:
         st.stop()
 
     # Re-run on every interaction — params change too often to memoize.
-    result = run_backtest(
-        candles=candles,
-        strategy=strategy,
-        initial_capital=controls["initial_cash"],
-        fee_rate=controls["fee_rate"],
-        slippage_rate=controls["slippage_rate"],
-        position_size=controls["position_size"],
-    )
-    metrics = compute_metrics(result)
+    try:
+        result = run_backtest(
+            candles=candles,
+            strategy=strategy,
+            initial_capital=controls["initial_cash"],
+            fee_rate=controls["fee_rate"],
+            slippage_rate=controls["slippage_rate"],
+            position_size=controls["position_size"],
+        )
+        metrics = compute_metrics(result)
+    except Exception as exc:
+        st.error(f"Backtest failed: {type(exc).__name__}: {exc}")
+        st.stop()
 
     _render_metric_cards(metrics)
     _render_warnings(metrics, n_bars=len(candles))
@@ -521,16 +541,23 @@ def main() -> None:
         ["Overview", "Price & Trades", "Equity", "Drawdown", "Trades"]
     )
 
+    # Each tab is contained: one failing tab must not blank the others.
     with tab_overview:
-        _render_overview_tab(metrics, candles, controls)
+        _render_tab_safely(
+            "Overview", lambda: _render_overview_tab(metrics, candles, controls),
+        )
     with tab_price:
-        _render_price_tab(candles, result.positions)
+        _render_tab_safely(
+            "Price & Trades", lambda: _render_price_tab(candles, result.positions),
+        )
     with tab_equity:
-        _render_equity_tab(result, controls["initial_cash"])
+        _render_tab_safely(
+            "Equity", lambda: _render_equity_tab(result, controls["initial_cash"]),
+        )
     with tab_dd:
-        _render_drawdown_tab(result.equity)
+        _render_tab_safely("Drawdown", lambda: _render_drawdown_tab(result.equity))
     with tab_trades:
-        _render_trades_tab(result, candles)
+        _render_tab_safely("Trades", lambda: _render_trades_tab(result, candles))
 
 
 if __name__ == "__main__":
