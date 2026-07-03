@@ -138,6 +138,7 @@ def run_backtest(
         equity=equity,
         turnover=turnover,
         gross_returns=gross_returns,
+        prior_equity=prior_equity,
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
         initial_capital=initial_capital,
@@ -219,6 +220,7 @@ def _extract_trades(
     equity: pd.Series,
     turnover: pd.Series,
     gross_returns: pd.Series,
+    prior_equity: pd.Series,
     fee_rate: float,
     slippage_rate: float,
     initial_capital: float,
@@ -239,6 +241,7 @@ def _extract_trades(
                 equity=equity,
                 turnover=turnover,
                 gross_returns=gross_returns,
+                prior_equity=prior_equity,
                 fee_rate=fee_rate,
                 slippage_rate=slippage_rate,
                 initial_capital=initial_capital,
@@ -257,6 +260,7 @@ def _build_trade(
     equity: pd.Series,
     turnover: pd.Series,
     gross_returns: pd.Series,
+    prior_equity: pd.Series,
     fee_rate: float,
     slippage_rate: float,
     initial_capital: float,
@@ -292,19 +296,16 @@ def _build_trade(
     pnl = final_equity - entry_capital
     net_return_pct = pnl / entry_capital if entry_capital > 0 else 0.0
 
-    entry_fee = float(turnover.iloc[entry_idx] * fee_rate * entry_capital)
-    entry_slippage = float(turnover.iloc[entry_idx] * slippage_rate * entry_capital)
-    if open_at_end:
-        exit_fee = 0.0
-        exit_slippage = 0.0
-    else:
-        exit_prior_equity = float(equity.iloc[exit_idx - 1])
-        exit_fee = float(turnover.iloc[exit_idx] * fee_rate * exit_prior_equity)
-        exit_slippage = float(
-            turnover.iloc[exit_idx] * slippage_rate * exit_prior_equity
-        )
-    fees_paid = entry_fee + exit_fee
-    slippage_cost = entry_slippage + exit_slippage
+    # Attribute ALL turnover between entry and exit (inclusive of any
+    # intra-trade ladder/vol-target steps), each charged on the equity at
+    # the end of the prior bar — mirroring the engine's total_fees
+    # computation — so per-trade costs reconcile with result.total_fees.
+    # Summing only the entry and exit bars dropped mid-trade turnover
+    # (e.g. 0.5->1.0, 1.0->0.5) that the portfolio was really charged.
+    turnover_slice = turnover.iloc[entry_idx : exit_idx + 1]
+    prior_slice = prior_equity.iloc[entry_idx : exit_idx + 1]
+    fees_paid = float((turnover_slice * fee_rate * prior_slice).sum())
+    slippage_cost = float((turnover_slice * slippage_rate * prior_slice).sum())
 
     bars_held = (n_bars - entry_idx) if open_at_end else (exit_idx - entry_idx)
 

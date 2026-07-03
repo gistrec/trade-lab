@@ -345,6 +345,25 @@ def test_gross_return_equals_net_at_zero_cost_for_ladder():
     assert trade.gross_return_pct == pytest.approx(0.334021, abs=1e-5)
 
 
+def test_per_trade_fees_reconcile_with_total_for_ladder():
+    """Per-trade fees/slippage must include intra-trade ladder turnover
+    (0.5->1.0 and 1.0->0.5), not just the entry and exit bars, so the sum
+    over trades reconciles with the portfolio totals (regression: C6)."""
+    closes = [100, 110, 121, 133.1, 146.41, 161.05, 177.155]
+    candles = _candles(closes)
+    result = run_backtest(
+        candles, _FloatSignalStrategy([0, 0.5, 1.0, 1.0, 0.5, 0, 0]),
+        initial_capital=10_000, fee_rate=0.001, slippage_rate=0.0005,
+        position_size=1.0,
+    )
+    assert sum(t.fees_paid for t in result.trades) == pytest.approx(
+        result.total_fees
+    )
+    assert sum(t.slippage_cost_estimate for t in result.trades) == pytest.approx(
+        result.total_slippage
+    )
+
+
 def test_invalid_position_size_raises():
     candles = _candles([100, 101, 102])
     with pytest.raises(ValueError):
