@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 KNOWN_SCHEMA_VERSIONS = frozenset({1, 2})
 
+# Staleness thresholds, as multiples of the expected cycle interval. Single
+# source of truth: staleness() decides with these, and the operator-facing
+# messages in app.py import the SAME constants so the number shown always
+# equals the number decided on.
+STALE_MULTIPLIER = 1.5
+DOWN_MULTIPLIER = 10.0
+
 
 class Staleness(str, Enum):
     """Bucketed answer to: how recent is the last cycle?"""
@@ -134,6 +141,10 @@ def open_order_incidents(cycles: list[dict]) -> list[dict]:
     out: list[dict] = []
     for c in reversed(cycles):  # newest-first
         for o in cycle_orders_executed(c):
+            if not isinstance(o, dict):
+                # A corrupt cycle whose orders_executed holds a non-dict must
+                # degrade one entry, not raise (same totality as the reader).
+                continue
             status = o.get("terminal_status")
             if status in RESOLVED_ORDER_STATUSES:
                 continue
@@ -401,9 +412,9 @@ class JournalReader:
         if ended is None:
             return Staleness.NO_DATA
         elapsed = datetime.now(timezone.utc).timestamp() - ended.timestamp()
-        if elapsed < expected_interval_s * 1.5:
+        if elapsed < expected_interval_s * STALE_MULTIPLIER:
             return Staleness.FRESH
-        if elapsed < expected_interval_s * 10:
+        if elapsed < expected_interval_s * DOWN_MULTIPLIER:
             return Staleness.STALE
         return Staleness.DOWN
 

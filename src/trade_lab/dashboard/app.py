@@ -20,6 +20,7 @@ from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
 from trade_lab.strategies.rsi import RSIMeanReversionStrategy
 from trade_lab.strategies.sma_cross import SMACrossStrategy
 from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
+from trade_lab.uikit import render_tab_safely
 
 
 @st.cache_data(show_spinner="Loading candles...")
@@ -247,18 +248,22 @@ def _sidebar_controls() -> dict:
 
 
 def _render_metric_cards(metrics: Metrics) -> None:
-    cols = st.columns(7)
-    cols[0].metric("Final equity", f"${metrics.final_equity:,.2f}")
-    cols[1].metric(
+    # Two rows of 4 + 3 rather than one row of 7 — seven cards in a single
+    # st.columns(7) truncate their values ("$10,000.00") and delta strings on
+    # a narrow / mobile viewport.
+    row1 = st.columns(4)
+    row1[0].metric("Final equity", f"${metrics.final_equity:,.2f}")
+    row1[1].metric(
         "Total return",
         f"{metrics.total_return:.2%}",
         delta=f"{(metrics.total_return - metrics.buy_and_hold_return) * 100:.2f}pp vs B&H",
     )
-    cols[2].metric("Buy & hold", f"{metrics.buy_and_hold_return:.2%}")
-    cols[3].metric("Max drawdown", f"{metrics.max_drawdown:.2%}")
-    cols[4].metric("# Trades", f"{metrics.num_trades}")
-    cols[5].metric("Win rate", f"{metrics.win_rate:.2%}")
-    cols[6].metric("Fees paid", f"${metrics.total_fees:,.2f}")
+    row1[2].metric("Buy & hold", f"{metrics.buy_and_hold_return:.2%}")
+    row1[3].metric("Max drawdown", f"{metrics.max_drawdown:.2%}")
+    row2 = st.columns(3)
+    row2[0].metric("# Trades", f"{metrics.num_trades}")
+    row2[1].metric("Win rate", f"{metrics.win_rate:.2%}")
+    row2[2].metric("Fees paid", f"${metrics.total_fees:,.2f}")
 
 
 def _render_warnings(metrics: Metrics, n_bars: int) -> None:
@@ -461,19 +466,15 @@ def _render_trades_tab(result, candles: pd.DataFrame) -> None:
 
 
 def _render_tab_safely(tab_name: str, render_fn) -> None:
-    """Contain a tab's failure to that tab.
+    """Contain a tab's failure to that tab (thin wrapper over the shared
+    :func:`trade_lab.uikit.render_tab_safely`).
 
     Streamlit runs every tab body in a single top-down script run, so an
     uncaught exception in one tab (e.g. strftime on a Parquet whose index
-    passed validate_ohlcv by name but is not a DatetimeIndex) would
-    otherwise abort the run and blank every other tab. Mirrors the
-    monitoring app's containment: the error stays loud, rendered red
-    inside the failing tab, without taking down the siblings.
+    passed validate_ohlcv by name but is not a DatetimeIndex) would otherwise
+    abort the run and blank every other tab.
     """
-    try:
-        render_fn()
-    except Exception as exc:
-        st.error(f"{tab_name} tab failed: {type(exc).__name__}: {exc}")
+    render_tab_safely(tab_name, render_fn)
 
 
 def main() -> None:

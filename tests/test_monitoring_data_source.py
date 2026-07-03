@@ -386,6 +386,16 @@ def test_parse_iso_naive_treated_as_utc():
     assert dt.tzinfo == timezone.utc
 
 
+def test_staleness_multipliers_are_named_constants():
+    """The thresholds are a single source of truth shared with app.py's
+    operator-facing messages (Theme 5)."""
+    from trade_lab.monitoring.data_source import (
+        DOWN_MULTIPLIER, STALE_MULTIPLIER,
+    )
+    assert STALE_MULTIPLIER == 1.5
+    assert DOWN_MULTIPLIER == 10.0
+
+
 def test_known_schema_versions_includes_one_and_two():
     """v1 is the dry-run-only shape; v2 adds orders_executed."""
     assert 1 in KNOWN_SCHEMA_VERSIONS
@@ -567,6 +577,21 @@ def test_open_order_incidents_lists_non_resolved_orders():
     assert out[0]["status"] == "lost_track"
     assert out[0]["symbol"] == "ETH/USDT"
     assert out[0]["side"] == "SELL"
+
+
+def test_open_order_incidents_skips_non_dict_order_entry():
+    """A corrupt cycle whose orders_executed holds a non-dict entry must
+    degrade that entry, not raise on o.get(...)."""
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            "garbage-non-dict",
+            {"terminal_status": "lost_track", "client_order_id": "b",
+             "symbol": "ETH/USDT", "side": "sell"},
+        ]),
+    ]
+    out = open_order_incidents(cycles)         # must not raise
+    assert len(out) == 1
+    assert out[0]["status"] == "lost_track"
 
 
 def test_open_order_incidents_empty_when_all_resolved():

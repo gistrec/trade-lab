@@ -37,11 +37,12 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, ReadStats, Staleness, as_float, cycle_orders_executed,
-    drift_series, duration_series, duration_stats, equity_series,
-    is_live_cycle, max_inter_cycle_gap_seconds, open_order_incidents,
-    parse_iso, recent_incidents,
+    DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER, Staleness,
+    as_float, cycle_orders_executed, drift_series, duration_series,
+    duration_stats, equity_series, is_live_cycle, max_inter_cycle_gap_seconds,
+    open_order_incidents, parse_iso, recent_incidents,
 )
+from trade_lab.uikit import render_tab_safely
 
 
 JOURNAL_PATH = os.environ.get(
@@ -187,7 +188,7 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
         dt = parse_iso(live.get("ended_at"))
         if dt is not None:
             age = (datetime.now(tz=timezone.utc) - dt).total_seconds()
-            live_overdue = age > EXPECTED_LIVE_INTERVAL_S * 1.5
+            live_overdue = age > EXPECTED_LIVE_INTERVAL_S * STALE_MULTIPLIER
 
     if staleness is Staleness.DOWN or open_orders or live_overdue:
         why = []
@@ -270,14 +271,16 @@ def _render_status(reader: JournalReader) -> None:
     if staleness is Staleness.DOWN:
         st.error(
             f"Bot appears DOWN: last cycle was over "
-            f"{int(EXPECTED_INTERVAL_S * 10)}s ago "
-            f"(threshold = 10× expected interval of {EXPECTED_INTERVAL_S}s)."
+            f"{int(EXPECTED_INTERVAL_S * DOWN_MULTIPLIER)}s ago "
+            f"(threshold = {DOWN_MULTIPLIER:g}× expected interval of "
+            f"{EXPECTED_INTERVAL_S}s)."
         )
     elif staleness is Staleness.STALE:
         st.warning(
             f"Bot is STALE: last cycle elapsed > "
-            f"{int(EXPECTED_INTERVAL_S * 1.5)}s "
-            f"(threshold = 1.5× expected interval of {EXPECTED_INTERVAL_S}s)."
+            f"{int(EXPECTED_INTERVAL_S * STALE_MULTIPLIER)}s "
+            f"(threshold = {STALE_MULTIPLIER:g}× expected interval of "
+            f"{EXPECTED_INTERVAL_S}s)."
         )
     elif staleness is Staleness.NO_DATA:
         st.info(
@@ -360,11 +363,12 @@ def _render_live_cron_health(reader: JournalReader) -> None:
     dt = parse_iso(ended)
     if dt is not None:
         age = (datetime.now(tz=timezone.utc) - dt).total_seconds()
-        if age > EXPECTED_LIVE_INTERVAL_S * 1.5:
+        if age > EXPECTED_LIVE_INTERVAL_S * STALE_MULTIPLIER:
             st.error(
                 f"LIVE order cron OVERDUE — last real-order cycle was "
                 f"{_humanize_relative(ended)} "
-                f"(threshold = 1.5× expected {EXPECTED_LIVE_INTERVAL_S}s). "
+                f"(threshold = {STALE_MULTIPLIER:g}× expected "
+                f"{EXPECTED_LIVE_INTERVAL_S}s). "
                 f"The hourly dry-run may be masking a dead daily cron; "
                 f"check the `paper-place-orders` cron on the VPS."
             )
@@ -377,7 +381,7 @@ def _render_incidents(reader: JournalReader) -> None:
     incidents = recent_incidents(cycles)
     open_orders = open_order_incidents(cycles)
     gap = max_inter_cycle_gap_seconds(cycles)
-    gap_overdue = gap is not None and gap > EXPECTED_INTERVAL_S * 1.5
+    gap_overdue = gap is not None and gap > EXPECTED_INTERVAL_S * STALE_MULTIPLIER
 
     st.subheader("Incidents (last 500 cycles)")
     if not incidents and not open_orders and not gap_overdue:
@@ -421,9 +425,9 @@ def _render_incidents(reader: JournalReader) -> None:
     if gap_overdue:
         st.warning(
             f"Largest gap between consecutive cycles: {gap / 3600:.1f}h "
-            f"(> 1.5× expected {EXPECTED_INTERVAL_S}s). A cycle may have been "
-            f"missed mid-window — the single-latest Staleness check cannot "
-            f"see this."
+            f"(> {STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
+            f"cycle may have been missed mid-window — the single-latest "
+            f"Staleness check cannot see this."
         )
 
 
@@ -1263,24 +1267,17 @@ def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_tab_safely(tab_name: str, render_fn) -> None:
-    """Contain a tab's failure to that tab.
+_TAB_NOTE = (
+    "Other tabs are unaffected. The tab will render again on the next "
+    "auto-refresh once the underlying data or module is fixed."
+)
 
-    Streamlit aborts the whole script run on an uncaught exception, so
-    a single drifted research-side module or journal row would
-    otherwise blank every tab at once. The error stays loud — rendered
-    red inside the failing tab — without taking down the safety
-    banner and the other tabs.
-    """
-    try:
-        render_fn()
-    except Exception as exc:
-        st.error(f"{tab_name} tab failed: {type(exc).__name__}: {exc}")
-        st.caption(
-            "Other tabs are unaffected. The tab will render again on "
-            "the next auto-refresh once the underlying data or module "
-            "is fixed."
-        )
+
+def _render_tab_safely(tab_name: str, render_fn) -> None:
+    """Contain a tab's failure to that tab (thin wrapper over the shared
+    :func:`trade_lab.uikit.render_tab_safely`, carrying this app's
+    auto-refresh reassurance caption)."""
+    render_tab_safely(tab_name, render_fn, note=_TAB_NOTE)
 
 
 def main() -> None:
