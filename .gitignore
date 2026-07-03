@@ -20,6 +20,9 @@ htmlcov/
 .vscode/
 .DS_Store
 
+# Local owner-only ops helper (SSH deploy) — never committed
+deploy.sh
+
 # Local data and secrets
 .env
 /data/
