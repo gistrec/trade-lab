@@ -134,6 +134,15 @@ Charts appear under the `trade_lab` job. The exporter is **total**: a corrupt
 or missing journal degrades individual metrics (or sets
 `tradelab_journal_read_error 1`) rather than failing the scrape.
 
+**Value-based alarms** (`ops/netdata/health.d/trade_lab_metrics.conf`, →
+`botcrit`) complement the httpcheck dead-man's-switch: `trade_lab_open_orders`
+(any executed order stuck in a non-terminal state — the `lost_track == 0`
+SLO), `trade_lab_cycle_latency` (max cycle duration > 60s/120s — slow exchange
+round-trips), and `trade_lab_journal_read_error` (journal unreadable). Each
+targets a unique `prometheus.trade_lab.<metric>` context, so no scoping is
+needed. Install with `sudo cp ... && sudo netdatacli reload-health` (the
+metric charts already exist, so no restart).
+
 ## Known limitation (by design)
 
 On-host Netdata can't alert if the **whole VPS** dies — the agent dies with
