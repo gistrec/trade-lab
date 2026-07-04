@@ -349,7 +349,9 @@ def test_constraints_non_power_of_ten_step_maps_to_none():
 
 def test_exchange_call_stats_starts_empty():
     broker = Broker(_config(), _MockExchange())
-    assert broker.exchange_call_stats() == {"count": 0, "errors": 0}
+    assert broker.exchange_call_stats() == {
+        "count": 0, "errors": 0, "max_ms": 0.0, "p95_ms": 0.0,
+        "total_ms": 0.0, "by_endpoint": {}}
 
 
 def test_timed_calls_accumulate_stats():
@@ -373,3 +375,74 @@ def test_timed_call_records_failure_and_reraises():
     stats = broker.exchange_call_stats()
     assert stats["errors"] == 1
     assert stats["by_endpoint"]["fetch_ticker"]["errors"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Read-only retry on transient network errors (#2b). _config() leaves the
+# dataclass default retry_base_delay_s=0.0, so retries are instant in tests.
+# ---------------------------------------------------------------------------
+
+
+def test_read_call_retries_transient_then_succeeds():
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def flaky():
+        n["c"] += 1
+        if n["c"] < 3:
+            raise ccxt.RequestTimeout("blip")  # a NetworkError subclass
+        return exch.balance
+
+    exch.fetch_balance = flaky
+    broker = Broker(_config(), exch)
+    snap = broker.fetch_balance_snapshot()
+    assert snap.quote_total == 1050.0
+    assert n["c"] == 3  # 2 transient failures + 1 success
+    assert broker.exchange_call_stats()["by_endpoint"]["fetch_balance"]["count"] == 3
+
+
+def test_read_call_gives_up_after_max_attempts():
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def always_fail():
+        n["c"] += 1
+        raise ccxt.NetworkError("down")
+
+    exch.fetch_balance = always_fail
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.NetworkError):
+        broker.fetch_balance_snapshot()
+    assert n["c"] == 3  # default retry_max_attempts
+
+
+def test_read_call_does_not_retry_non_transient():
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def auth_fail():
+        n["c"] += 1
+        raise ccxt.AuthenticationError("bad key")
+
+    exch.fetch_balance = auth_fail
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.AuthenticationError):
+        broker.fetch_balance_snapshot()
+    assert n["c"] == 1  # non-transient: no retry
+
+
+def test_create_order_is_not_retried():
+    # Placement must never be retried at the broker (idempotency is via the
+    # reconstruction path). A transient error surfaces after a single attempt.
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def co(*a, **k):
+        n["c"] += 1
+        raise ccxt.NetworkError("timeout")
+
+    exch.create_order = co
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.NetworkError):
+        broker.create_order_safe("BTC/USDT", "buy", 0.001, "cid-1")
+    assert n["c"] == 1  # timed once, NOT retried

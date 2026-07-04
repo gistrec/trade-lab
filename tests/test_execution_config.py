@@ -236,3 +236,41 @@ def test_non_positive_timeout_raises_config_error(monkeypatch):
     _apply_env(monkeypatch, env)
     with pytest.raises(PaperConfigError, match="positive"):
         load_paper_config()
+
+
+# ---------------------------------------------------------------------------
+# Read-only retry policy (#2b)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_defaults_are_production_backoff(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV)
+    cfg = load_paper_config()
+    assert cfg.retry_max_attempts == 3
+    assert cfg.retry_base_delay_s == 0.5  # prod default, not the dataclass 0.0
+
+
+def test_retry_env_overrides(monkeypatch):
+    env = {**_DEFAULT_ENV,
+           "TRADE_LAB_EXCHANGE_RETRY_ATTEMPTS": "5",
+           "TRADE_LAB_EXCHANGE_RETRY_BASE_DELAY_S": "0.25"}
+    _apply_env(monkeypatch, env)
+    cfg = load_paper_config()
+    assert cfg.retry_max_attempts == 5
+    assert cfg.retry_base_delay_s == 0.25
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-1"])
+def test_retry_base_delay_rejects_non_finite_or_negative(monkeypatch, bad):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_EXCHANGE_RETRY_BASE_DELAY_S": bad}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="RETRY_BASE_DELAY_S"):
+        load_paper_config()
+
+
+@pytest.mark.parametrize("bad", ["0", "11"])
+def test_retry_attempts_out_of_range_raises(monkeypatch, bad):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_EXCHANGE_RETRY_ATTEMPTS": bad}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="RETRY_ATTEMPTS"):
+        load_paper_config()

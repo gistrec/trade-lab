@@ -12,6 +12,7 @@ them from the environment. Loading code never logs them, and the
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from typing import Tuple
@@ -39,6 +40,12 @@ class PaperConfig:
     quote_currency: str          # e.g. "USDT"
     basket: Tuple[str, ...]      # universe symbols, e.g. ("BTC","ETH",...)
     request_timeout_ms: int      # CCXT timeout
+    # Retry for READ-ONLY exchange calls on transient network errors. The bare
+    # dataclass defaults are inert (base_delay 0 → instant) so unit tests that
+    # build PaperConfig directly stay fast; load_paper_config sets the real
+    # production defaults from env.
+    retry_max_attempts: int = 3
+    retry_base_delay_s: float = 0.0
 
     def __repr__(self) -> str:
         # Never leak credentials in logs or REPL inspection.
@@ -124,6 +131,31 @@ def load_paper_config() -> PaperConfig:
             f"TRADE_LAB_PAPER_TIMEOUT_MS must be positive, got {timeout_ms}."
         )
 
+    # Read-only-call retry policy (production defaults live here, not in the
+    # dataclass). base_delay 0.5s → ~0.5s + ~1s of jittered backoff over 3 tries.
+    retry_attempts_raw = os.getenv("TRADE_LAB_EXCHANGE_RETRY_ATTEMPTS", "3")
+    retry_delay_raw = os.getenv("TRADE_LAB_EXCHANGE_RETRY_BASE_DELAY_S", "0.5")
+    try:
+        retry_max_attempts = int(retry_attempts_raw)
+        retry_base_delay_s = float(retry_delay_raw)
+    except ValueError:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_RETRY_ATTEMPTS / _BASE_DELAY_S must be numeric, "
+            f"got {retry_attempts_raw!r} / {retry_delay_raw!r}."
+        ) from None
+    if not 1 <= retry_max_attempts <= 10:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_RETRY_ATTEMPTS must be between 1 and 10, "
+            f"got {retry_max_attempts}."
+        )
+    # isfinite guards NaN/Inf, which slip past a bare `< 0` check and would make
+    # the backoff sleep hang or raise mid-cycle.
+    if not math.isfinite(retry_base_delay_s) or retry_base_delay_s < 0:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_RETRY_BASE_DELAY_S must be a finite value >= 0, "
+            f"got {retry_base_delay_s!r}."
+        )
+
     # Refuse-by-default to mainnet. Two flags must agree.
     if not sandbox and not allow_mainnet:
         raise PaperConfigError(
@@ -153,4 +185,6 @@ def load_paper_config() -> PaperConfig:
         quote_currency=quote_currency,
         basket=basket,
         request_timeout_ms=timeout_ms,
+        retry_max_attempts=retry_max_attempts,
+        retry_base_delay_s=retry_base_delay_s,
     )

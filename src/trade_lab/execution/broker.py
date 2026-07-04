@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 import time
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -187,6 +188,8 @@ class Broker:
         # Per-instance accumulator of exchange round-trip timings. A Broker is
         # built fresh per cycle, so this covers exactly one cycle's calls.
         self._calls: list[dict] = []
+        # Backoff sleep, injectable so tests can zero it out.
+        self._sleep = time.sleep
 
     # ------------------------------------------------------------------
     # Exchange round-trip instrumentation
@@ -216,15 +219,52 @@ class Broker:
                        "ok": ok, "slow": ms >= SLOW_CALL_MS},
             )
 
+    def _read_call(self, endpoint: str, fn, *args, **kwargs):
+        """Timed READ-ONLY call, retried on transient network errors.
+
+        Retries ``ccxt.NetworkError`` — which covers RequestTimeout /
+        DDoSProtection / ExchangeNotAvailable — with exponential backoff +
+        jitter. Non-transient errors (auth, bad symbol, order-not-found, ...)
+        are not NetworkErrors and propagate on the first attempt. Only
+        idempotent reads are routed here; ``create_order`` is NOT (a retried
+        placement could double-fill — reconstruction handles its failures).
+        """
+        attempts = max(1, self.config.retry_max_attempts)
+        base = max(0.0, self.config.retry_base_delay_s)
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._timed_call(endpoint, fn, *args, **kwargs)
+            except ccxt.NetworkError as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                delay = base * (2 ** (attempt - 1)) * random.uniform(0.5, 1.0)
+                logger.warning(
+                    "transient exchange error on %s (attempt %d/%d), "
+                    "retrying in %.2fs: %s",
+                    endpoint, attempt, attempts, delay, exc,
+                    extra={"endpoint": endpoint, "attempt": attempt,
+                           "max_attempts": attempts,
+                           "retry_delay_s": round(delay, 3),
+                           "error_type": type(exc).__name__},
+                )
+                self._sleep(delay)
+        raise last_exc  # reached only after a caught, non-final NetworkError
+
     def exchange_call_stats(self) -> dict:
         """Summary of this cycle's exchange round-trips.
 
         ``{count, errors, max_ms, p95_ms, total_ms, by_endpoint}`` — a read-only
-        telemetry view a caller can journal or log at cycle end.
+        telemetry view a caller can journal or log at cycle end. ``count`` is
+        round-trips (a retried read counts each attempt, since each is a real
+        round-trip that consumed wall-clock time); ``errors`` counts the failed
+        attempts. The shape is stable even for a zero-call cycle.
         """
         calls = self._calls
         if not calls:
-            return {"count": 0, "errors": 0}
+            return {"count": 0, "errors": 0, "max_ms": 0.0, "p95_ms": 0.0,
+                    "total_ms": 0.0, "by_endpoint": {}}
         durs = sorted(c["ms"] for c in calls)
         by_ep: dict[str, dict] = {}
         for c in calls:
@@ -309,7 +349,7 @@ class Broker:
         try:
             # fetch_balance is the standard "are we connected and
             # authenticated?" probe. Most exchanges return immediately.
-            balance = self._timed_call("fetch_balance", self.exchange.fetch_balance)
+            balance = self._read_call("fetch_balance", self.exchange.fetch_balance)
         except ccxt.AuthenticationError as exc:
             raise BrokerError(
                 f"Authentication failed for {self.config.exchange_id} "
@@ -347,7 +387,7 @@ class Broker:
         is on purpose: a testnet balance reset, a partial-fill update,
         or a manual deposit must all be visible immediately.
         """
-        raw = self._timed_call("fetch_balance", self.exchange.fetch_balance)
+        raw = self._read_call("fetch_balance", self.exchange.fetch_balance)
         if not isinstance(raw, dict):
             raise BrokerError("fetch_balance did not return a dict.")
         quote = self.config.quote_currency
@@ -375,7 +415,7 @@ class Broker:
 
     def fetch_ticker_price(self, symbol: str) -> float:
         """Latest last-trade price for ``symbol`` (CCXT format BASE/QUOTE)."""
-        ticker = self._timed_call("fetch_ticker", self.exchange.fetch_ticker, symbol)
+        ticker = self._read_call("fetch_ticker", self.exchange.fetch_ticker, symbol)
         if not isinstance(ticker, dict):
             raise BrokerError(f"fetch_ticker did not return a dict for {symbol}.")
         last = ticker.get("last")
@@ -403,7 +443,7 @@ class Broker:
         (skip the order, round up to min, etc.). For Binance: cost.min
         is usually populated; for Kraken: amount.min and precision.
         """
-        markets = self._timed_call("load_markets", self.exchange.load_markets)
+        markets = self._read_call("load_markets", self.exchange.load_markets)
         if symbol not in markets:
             raise BrokerError(
                 f"Market {symbol!r} not found on {self.config.exchange_id}. "
@@ -475,7 +515,7 @@ class Broker:
         record of the ID — the caller turns that into a "needs
         placement" decision.
         """
-        return self._timed_call(
+        return self._read_call(
             "fetch_order", self.exchange.fetch_order,
             client_order_id, symbol,
             {"origClientOrderId": client_order_id},
@@ -489,7 +529,7 @@ class Broker:
         the state file was wiped or a previous cycle crashed before
         persisting.
         """
-        return self._timed_call(
+        return self._read_call(
             "fetch_open_orders", self.exchange.fetch_open_orders, symbol)
 
     def fetch_my_trades_since(
@@ -503,7 +543,7 @@ class Broker:
         lets the exchange decide the default window (Binance returns
         the last 24h by default).
         """
-        return self._timed_call(
+        return self._read_call(
             "fetch_my_trades", self.exchange.fetch_my_trades, symbol, since_ms)
 
     # ------------------------------------------------------------------
