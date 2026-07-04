@@ -81,6 +81,7 @@ class _CcxtExchange(Protocol):
     def fetch_balance(self) -> dict: ...
     def fetch_ticker(self, symbol: str) -> dict: ...
     def fetch_status(self) -> dict: ...
+    def fetch_time(self) -> int: ...
     def load_markets(self, reload: bool = ...) -> dict: ...
     # Phase #2b — order placement and reconstruction:
     def create_order(
@@ -324,6 +325,10 @@ class Broker:
             "secret": config.api_secret,
             "enableRateLimit": True,
             "timeout": int(config.request_timeout_ms),
+            # Signed requests carry a timestamp; the exchange rejects any that
+            # fall outside recvWindow of ITS clock. Set it explicitly rather
+            # than inherit the CCXT default.
+            "options": {"recvWindow": int(config.recv_window_ms)},
         })
 
         # Order matters: set sandbox mode BEFORE the first authenticated
@@ -371,9 +376,42 @@ class Broker:
                 f"({type(balance).__name__}); the CCXT exchange object "
                 "may be misconfigured."
             )
+        self._check_clock_skew()
         logger.info(
             "Broker connected: exchange=%s sandbox=%s",
             self.config.exchange_id, self.config.sandbox,
+        )
+
+    def _check_clock_skew(self) -> None:
+        """Fail loud if the local clock is too far from the exchange's clock.
+
+        The idempotency key is derived from the UTC date and signed requests
+        must fall within recvWindow of server time, so a skewed clock either
+        double-places across midnight or gets every request rejected (-1021).
+        Aborting with a clear message beats discovering it as a cryptic
+        rejection deep in a cycle. ``clock_skew_max_ms=0`` disables the check.
+        """
+        max_ms = self.config.clock_skew_max_ms
+        if max_ms <= 0:
+            return
+        try:
+            server_ms = self._read_call("fetch_time", self.exchange.fetch_time)
+        except Exception as exc:
+            raise BrokerError(
+                "Could not fetch exchange server time for the clock-skew "
+                f"check on {self.config.exchange_id}: {exc}"
+            ) from exc
+        skew_ms = float(server_ms) - time.time() * 1000.0
+        if abs(skew_ms) > max_ms:
+            raise BrokerError(
+                f"Clock skew {skew_ms:.0f}ms exceeds {max_ms}ms vs "
+                f"{self.config.exchange_id} server time. Fix host NTP (chrony) "
+                "before trading: the idempotency key is UTC-derived and signed "
+                "requests must be within recvWindow."
+            )
+        logger.info(
+            "clock skew ok: %.0fms (limit %dms)", skew_ms, max_ms,
+            extra={"clock_skew_ms": round(skew_ms, 1), "limit_ms": max_ms},
         )
 
     # ------------------------------------------------------------------

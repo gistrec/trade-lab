@@ -274,3 +274,39 @@ def test_retry_attempts_out_of_range_raises(monkeypatch, bad):
     _apply_env(monkeypatch, env)
     with pytest.raises(PaperConfigError, match="RETRY_ATTEMPTS"):
         load_paper_config()
+
+
+# ---------------------------------------------------------------------------
+# Clock-skew guard + recvWindow (NTP)
+# ---------------------------------------------------------------------------
+
+
+def test_clock_skew_defaults(monkeypatch):
+    _apply_env(monkeypatch, _DEFAULT_ENV)
+    cfg = load_paper_config()
+    assert cfg.clock_skew_max_ms == 1000  # prod default (dataclass default is 0)
+    assert cfg.recv_window_ms == 5000
+
+
+def test_clock_skew_env_overrides(monkeypatch):
+    env = {**_DEFAULT_ENV,
+           "TRADE_LAB_EXCHANGE_CLOCK_SKEW_MAX_MS": "0",  # 0 disables
+           "TRADE_LAB_EXCHANGE_RECV_WINDOW_MS": "10000"}
+    _apply_env(monkeypatch, env)
+    cfg = load_paper_config()
+    assert cfg.clock_skew_max_ms == 0
+    assert cfg.recv_window_ms == 10000
+
+
+def test_negative_clock_skew_raises(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_EXCHANGE_CLOCK_SKEW_MAX_MS": "-1"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="CLOCK_SKEW_MAX_MS"):
+        load_paper_config()
+
+
+def test_non_positive_recv_window_raises(monkeypatch):
+    env = {**_DEFAULT_ENV, "TRADE_LAB_EXCHANGE_RECV_WINDOW_MS": "0"}
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="RECV_WINDOW_MS"):
+        load_paper_config()

@@ -6,6 +6,8 @@ broker calls it correctly and surfaces errors clearly.
 """
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import ccxt
@@ -62,7 +64,7 @@ class _MockExchange:
         return {sym: {} for sym in self.tickers}
 
 
-def _config(sandbox=True, allow_mainnet=False) -> PaperConfig:
+def _config(sandbox=True, allow_mainnet=False, clock_skew_max_ms=0) -> PaperConfig:
     return PaperConfig(
         exchange_id="binance",
         sandbox=sandbox,
@@ -72,6 +74,7 @@ def _config(sandbox=True, allow_mainnet=False) -> PaperConfig:
         quote_currency="USDT",
         basket=("BTC", "ETH"),
         request_timeout_ms=5000,
+        clock_skew_max_ms=clock_skew_max_ms,
     )
 
 
@@ -446,3 +449,43 @@ def test_create_order_is_not_retried():
     with pytest.raises(ccxt.NetworkError):
         broker.create_order_safe("BTC/USDT", "buy", 0.001, "cid-1")
     assert n["c"] == 1  # timed once, NOT retried
+
+
+# ---------------------------------------------------------------------------
+# Clock-skew guard (NTP)
+# ---------------------------------------------------------------------------
+
+
+def test_clock_skew_within_limit_passes():
+    exch = _MockExchange()
+    exch.fetch_time = lambda: int(time.time() * 1000)  # in sync
+    broker = Broker(_config(clock_skew_max_ms=1000), exch)
+    broker._verify_connection()  # must not raise
+
+
+def test_clock_skew_exceeds_limit_raises():
+    exch = _MockExchange()
+    exch.fetch_time = lambda: int(time.time() * 1000) + 5000  # 5s ahead
+    broker = Broker(_config(clock_skew_max_ms=1000), exch)
+    with pytest.raises(BrokerError, match="lock skew"):
+        broker._verify_connection()
+
+
+def test_clock_skew_disabled_skips_fetch_time():
+    # clock_skew_max_ms=0 disables the guard, so a mock without fetch_time
+    # still verifies cleanly.
+    exch = _MockExchange()  # no fetch_time attribute
+    broker = Broker(_config(clock_skew_max_ms=0), exch)
+    broker._verify_connection()  # must not raise
+
+
+def test_clock_skew_fetch_time_failure_raises_brokererror():
+    exch = _MockExchange()
+
+    def boom():
+        raise ccxt.NetworkError("no time endpoint")
+
+    exch.fetch_time = boom
+    broker = Broker(_config(clock_skew_max_ms=1000), exch)
+    with pytest.raises(BrokerError, match="server time"):
+        broker._verify_connection()

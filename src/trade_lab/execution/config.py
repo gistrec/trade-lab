@@ -46,6 +46,13 @@ class PaperConfig:
     # production defaults from env.
     retry_max_attempts: int = 3
     retry_base_delay_s: float = 0.0
+    # Clock-skew guard: abort connect if the local clock differs from the
+    # exchange's server time by more than this (ms). 0 disables — the dataclass
+    # default is inert (tests build mocks without fetch_time); load_paper_config
+    # sets the production 1000ms. recv_window_ms is passed to the exchange as
+    # recvWindow for signed requests.
+    clock_skew_max_ms: int = 0
+    recv_window_ms: int = 5000
 
     def __repr__(self) -> str:
         # Never leak credentials in logs or REPL inspection.
@@ -156,6 +163,26 @@ def load_paper_config() -> PaperConfig:
             f"got {retry_base_delay_s!r}."
         )
 
+    # Clock-skew guard + recvWindow (production defaults live here).
+    skew_raw = os.getenv("TRADE_LAB_EXCHANGE_CLOCK_SKEW_MAX_MS", "1000")
+    recv_raw = os.getenv("TRADE_LAB_EXCHANGE_RECV_WINDOW_MS", "5000")
+    try:
+        clock_skew_max_ms = int(skew_raw)
+        recv_window_ms = int(recv_raw)
+    except ValueError:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_CLOCK_SKEW_MAX_MS / _RECV_WINDOW_MS must be "
+            f"integers, got {skew_raw!r} / {recv_raw!r}."
+        ) from None
+    if clock_skew_max_ms < 0:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_CLOCK_SKEW_MAX_MS must be >= 0 (0 disables)."
+        )
+    if recv_window_ms <= 0:
+        raise PaperConfigError(
+            "TRADE_LAB_EXCHANGE_RECV_WINDOW_MS must be > 0."
+        )
+
     # Refuse-by-default to mainnet. Two flags must agree.
     if not sandbox and not allow_mainnet:
         raise PaperConfigError(
@@ -187,4 +214,6 @@ def load_paper_config() -> PaperConfig:
         request_timeout_ms=timeout_ms,
         retry_max_attempts=retry_max_attempts,
         retry_base_delay_s=retry_base_delay_s,
+        clock_skew_max_ms=clock_skew_max_ms,
+        recv_window_ms=recv_window_ms,
     )
