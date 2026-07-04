@@ -123,6 +123,24 @@ def render_metrics(reader, now: datetime) -> str:
             f"max cycle duration over the last {_RECENT} cycles",
             [(None, ds["max"])])
 
+    # --- exchange round-trip latency (most recent cycle) -----------------
+    exch = ((last or {}).get("context") or {}).get("exchange_latency")
+    if isinstance(exch, dict) and exch.get("count"):
+        fam("tradelab_exchange_requests", "gauge",
+            "exchange round-trips in the most recent cycle",
+            [(None, exch.get("count", 0))])
+        fam("tradelab_exchange_errors", "gauge",
+            "failed exchange round-trips in the most recent cycle",
+            [(None, exch.get("errors", 0))])
+        if exch.get("max_ms") is not None:
+            fam("tradelab_exchange_request_ms_max", "gauge",
+                "slowest exchange round-trip (ms) in the most recent cycle",
+                [(None, exch["max_ms"])])
+        if exch.get("p95_ms") is not None:
+            fam("tradelab_exchange_request_ms", "gauge",
+                "exchange round-trip p95 (ms) in the most recent cycle",
+                [({"quantile": "0.95"}, exch["p95_ms"])])
+
     # --- open incidents / drift / business -------------------------------
     fam("tradelab_open_order_incidents", "gauge",
         "executed orders not in a resolved terminal state (recent window)",

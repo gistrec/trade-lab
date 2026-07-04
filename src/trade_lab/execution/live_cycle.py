@@ -183,6 +183,10 @@ def run_live_cycle(
             order_results.append(result)
 
         outcome = _determine_outcome(order_results)
+        # Snapshot this cycle's exchange round-trip latency into the journal
+        # (read-only telemetry; the /metrics exporter surfaces it). Metadata
+        # only — no effect on the orders just placed.
+        context["exchange_latency"] = broker.exchange_call_stats()
         _write_main_cycle(
             journal=journal,
             cycle_id=main_cycle_id,
@@ -207,6 +211,7 @@ def run_live_cycle(
         )
 
     except Exception as exc:
+        context["exchange_latency"] = broker.exchange_call_stats()
         _write_failed_cycle(
             journal=journal,
             cycle_id=main_cycle_id,

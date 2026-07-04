@@ -176,3 +176,21 @@ def test_nan_weight_fails_loud_through_dry_cycle(tmp_path, monkeypatch):
     cycle = json.loads(lines[-1])
     assert cycle["outcome"] == "failed"
     assert cycle["error"]["type"] == "ValueError"
+
+
+def test_dry_run_records_exchange_latency_in_journal(tmp_path):
+    """A successful dry cycle stamps context.exchange_latency — read-only
+    telemetry the /metrics exporter surfaces. Metadata only."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+
+    broker = Broker(_config(), _StubExchange())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+    run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    lat = cycle["context"]["exchange_latency"]
+    assert lat["count"] > 0  # fetch_balance / ticker / ohlcv / markets were timed
+    assert lat["errors"] == 0
+    assert set(lat) >= {"count", "errors", "max_ms", "p95_ms", "by_endpoint"}

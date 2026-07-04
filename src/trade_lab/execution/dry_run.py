@@ -148,10 +148,13 @@ def run_dry_cycle(
         )
     except Exception as exc:
         if journal is not None:
+            context["exchange_latency"] = broker.exchange_call_stats()
             _try_write(journal, _failed_cycle(cycle_id, started_at, context, exc))
         raise
 
     if journal is not None:
+        # Read-only exchange round-trip telemetry for the /metrics exporter.
+        context["exchange_latency"] = broker.exchange_call_stats()
         _try_write(
             journal,
             _success_cycle(

@@ -23,9 +23,12 @@ NOW = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
 
 def _entry(*, ended_at, outcome="success", live, cycle_id="c1",
            duration_ms=1000, mode=None, equity=None, ladder=None,
-           sma_gate=True):
+           sma_gate=True, exchange_latency=None):
     if mode is None:
         mode = "live" if live else "dry_run"
+    context = {"mode": mode, "exchange": "binance", "sandbox": True}
+    if exchange_latency is not None:
+        context["exchange_latency"] = exchange_latency
     e = {
         "schema_version": 2,
         "cycle_id": cycle_id,
@@ -33,7 +36,7 @@ def _entry(*, ended_at, outcome="success", live, cycle_id="c1",
         "ended_at": ended_at.isoformat(),
         "duration_ms": duration_ms,
         "outcome": outcome,
-        "context": {"mode": mode, "exchange": "binance", "sandbox": True},
+        "context": context,
         "orders_executed": [] if live else None,
     }
     if equity is not None:
@@ -126,6 +129,30 @@ def test_no_nan_or_inf_in_output(tmp_path):
     text = metrics.render_metrics(reader, NOW)
     low = text.lower()
     assert "nan" not in low and "inf" not in low
+
+
+def test_exchange_latency_metrics(tmp_path):
+    lat = {"count": 12, "errors": 1, "max_ms": 11973.0, "p95_ms": 4200.0,
+           "total_ms": 20000.0, "by_endpoint": {}}
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(minutes=10), outcome="success",
+               live=True, exchange_latency=lat),
+    ])
+    text = metrics.render_metrics(reader, NOW)
+    m = _parse(text)
+    assert m["tradelab_exchange_requests"] == 12
+    assert m["tradelab_exchange_errors"] == 1
+    assert m["tradelab_exchange_request_ms_max"] == 11973
+    assert 'tradelab_exchange_request_ms{quantile="0.95"} 4200' in text
+
+
+def test_exchange_latency_absent_when_no_stats(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(minutes=10), outcome="success",
+               live=True),  # no exchange_latency in context
+    ])
+    m = _parse(metrics.render_metrics(reader, NOW))
+    assert "tradelab_exchange_requests" not in m
 
 
 def test_metrics_endpoint_end_to_end(tmp_path):
