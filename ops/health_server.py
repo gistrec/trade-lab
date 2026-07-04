@@ -51,6 +51,8 @@ from trade_lab.monitoring.data_source import (
     parse_iso,
 )
 
+import metrics  # sibling module in ops/ (Prometheus exposition for /metrics)
+
 logger = logging.getLogger("trade_lab.health")
 
 DEFAULT_JOURNAL_PATH = "data/journal/cycles.jsonl"
@@ -259,6 +261,9 @@ class _HealthHandler(BaseHTTPRequestHandler):
             self._respond(r.status_code,
                           {"ok": r.ok, "check": "daily_live",
                            "reason": r.reason, **r.detail})
+        elif path == "/metrics":
+            self._respond_raw(200, metrics.render_metrics(reader, now),
+                              metrics.CONTENT_TYPE)
         elif path == "/":
             hb = evaluate_heartbeat(reader, now, cfg.heartbeat_max_age_s)
             dl = evaluate_daily(reader, now, cfg.daily_max_age_s)
@@ -272,9 +277,12 @@ class _HealthHandler(BaseHTTPRequestHandler):
             self._respond(404, {"ok": False, "reason": f"unknown path {path}"})
 
     def _respond(self, code: int, body: dict) -> None:
-        payload = json.dumps(body, default=str).encode("utf-8")
+        self._respond_raw(code, json.dumps(body, default=str), "application/json")
+
+    def _respond_raw(self, code: int, text: str, content_type: str) -> None:
+        payload = text.encode("utf-8")
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

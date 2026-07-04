@@ -1,0 +1,16 @@
+# Netdata go.d/prometheus scraper for the trade-lab metrics exporter.
+# The health server (ops/health_server.py) serves /metrics; ops/metrics.py
+# renders it read-only from the journal.
+#
+# Install:
+#   sudo cp ops/netdata/go.d/prometheus.conf.example /etc/netdata/go.d/prometheus.conf
+#   # (if the file already exists, MERGE this job into its `jobs:` list)
+#   sudo systemctl restart netdata   # go.d JOB changes need a restart, NOT
+#                                    # just `netdatacli reload-health`
+#
+# Netdata auto-charts every tradelab_* series it scrapes, under the job name
+# `trade_lab` (chart context prometheus.*). No per-metric config needed — the
+# exporter emits only tradelab_* families.
+jobs:
+  - name: trade_lab
+    url: http://127.0.0.1:7001/metrics

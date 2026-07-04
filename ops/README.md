@@ -103,6 +103,37 @@ The trade-lab alarms scope by `_collect_job` (verified present on this box's
 go.d httpcheck charts), so each attaches to exactly its own job. Then
 `sudo netdatacli reload-health`.
 
+## Metrics (Prometheus → Netdata)
+
+The health server also serves `GET /metrics` in Prometheus text format
+(`ops/metrics.py`), read-only from the journal. Netdata's go.d/prometheus
+scraper turns every series into a time-series chart:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `tradelab_up` | gauge | 1 when the exporter served the scrape |
+| `tradelab_journal_read_error` | gauge | 1 if the journal was unreadable |
+| `tradelab_journal_valid_cycles` / `_corrupt_lines` / `_unknown_version_lines` | gauge | journal-parse self-instrumentation |
+| `tradelab_last_cycle_age_seconds` / `_timestamp_seconds` | gauge | freshness of the most recent cycle |
+| `tradelab_last_live_cycle_age_seconds` / `_timestamp_seconds` | gauge | freshness of the most recent live order cycle |
+| `tradelab_cycles_total{outcome=...}` | counter | cycles by outcome over the whole journal |
+| `tradelab_cycle_duration_ms{quantile="0.5"\|"0.95"}` / `_max` | gauge | recent cycle duration (last 200) |
+| `tradelab_open_order_incidents` | gauge | executed orders not in a resolved terminal state |
+| `tradelab_cumulative_skipped_drift_usd` | gauge | cumulative quote drift skipped |
+| `tradelab_equity_usd` | gauge | latest paper equity from a successful cycle |
+| `tradelab_last_signal_ladder_value` / `tradelab_sma_gate_open` | gauge | latest signal state |
+
+Wire it:
+
+```bash
+sudo cp ops/netdata/go.d/prometheus.conf.example /etc/netdata/go.d/prometheus.conf   # merge if it exists
+sudo systemctl restart netdata   # go.d job changes need a restart
+```
+
+Charts appear under the `trade_lab` job. The exporter is **total**: a corrupt
+or missing journal degrades individual metrics (or sets
+`tradelab_journal_read_error 1`) rather than failing the scrape.
+
 ## Known limitation (by design)
 
 On-host Netdata can't alert if the **whole VPS** dies — the agent dies with
