@@ -15,9 +15,6 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# MkDocs build output (research site)
-/site/
-
 # Editors / OS
 .idea/
 .vscode/

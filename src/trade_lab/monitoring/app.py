@@ -44,6 +44,7 @@ from trade_lab.monitoring.data_source import (
     open_order_incidents, parse_iso, recent_incidents,
 )
 from trade_lab.uikit import render_tab_safely
+from trade_lab.monitoring import research
 
 
 JOURNAL_PATH = os.environ.get(
@@ -1363,6 +1364,61 @@ def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Research corpus (read-only) — Research tab + About modal
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=300)
+def _research_doc(relpath: str) -> str:
+    """Cached read of one writeup's markdown (ttl so a deploy shows through)."""
+    return research.read_markdown(relpath)
+
+
+@st.cache_data(ttl=300)
+def _research_title(relpath: str) -> str:
+    return research.doc_title(relpath)
+
+
+def _render_research() -> None:
+    """Research tab: the master results index + a picker to read any writeup.
+
+    Reads the repo markdown corpus — no journal, no exchange, no credentials.
+    """
+    st.markdown(
+        "The full research corpus behind the deployable strategy — every "
+        "writeup, shown net-of-cost and out-of-sample, including the rejected "
+        "and inconclusive ideas."
+    )
+    with st.expander("Master results index — all strategies at a glance",
+                     expanded=True):
+        st.markdown(_research_doc(research.RESULTS_INDEX))
+
+    st.divider()
+    st.markdown("#### Read a full writeup")
+    left, right = st.columns(2)
+    group = left.selectbox(
+        "Section", list(research.GROUPS.keys()), key="research_group")
+    labels = {_research_title(p): p for p in research.GROUPS[group]}
+    title = right.selectbox("Document", list(labels), key="research_doc")
+    st.markdown(_research_doc(labels[title]))
+
+
+@st.dialog("What trade-lab is", width="large")
+def _about_dialog() -> None:
+    """Modal overview: what the project is + the master results index."""
+    st.markdown(
+        "**trade-lab** backtests crypto-spot strategies with a **layered-"
+        "honesty** stack — every edge is shown net-of-cost, then out-of-"
+        "sample, then as a Deflated Sharpe Ratio at a fixed budget (N=500). "
+        "One strategy survived every layer and is **paper-trading live on "
+        "Binance testnet** — that is what this dashboard shows.\n\n"
+        "Below is the master results index; full writeups are in the "
+        "**Research** tab."
+    )
+    st.markdown(_research_doc(research.RESULTS_INDEX))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1441,8 +1497,9 @@ def _render_dashboard() -> None:
     _render_top_banner(latest)
     _render_tab_safely("Health", lambda: _render_health_line(reader))
 
-    tab_status, tab_signal, tab_portfolio, tab_cycles, tab_validation = st.tabs(
-        ["Status", "Signal", "Portfolio", "Cycles", "Validation"]
+    (tab_status, tab_signal, tab_portfolio, tab_cycles,
+     tab_validation, tab_research) = st.tabs(
+        ["Status", "Signal", "Portfolio", "Cycles", "Validation", "📚 Research"]
     )
     with tab_status:
         _render_tab_safely("Status", lambda: _render_status(reader))
@@ -1454,6 +1511,8 @@ def _render_dashboard() -> None:
         _render_tab_safely("Cycles", lambda: _render_cycles(reader))
     with tab_validation:
         _render_tab_safely("Validation", _render_validation)
+    with tab_research:
+        _render_tab_safely("Research", _render_research)
 
     _render_footer()
 
@@ -1465,10 +1524,20 @@ def main() -> None:
     )
     # Static header rendered once; the dynamic body lives in an auto-rerunning
     # fragment (no skeleton-flashing autorefresh iframe).
-    st.title("trade-lab monitoring")
+    title_col, about_col = st.columns([4, 1])
+    title_col.title("trade-lab monitoring")
+    with about_col:
+        st.write("")  # nudge the button down toward the title baseline
+        if st.button(
+            "📖 What's inside", use_container_width=True,
+            help="Project overview + the master results index "
+                 "(full writeups live in the Research tab).",
+        ):
+            _about_dialog()
     st.caption(
-        f"Read-only dashboard for the paper-trading bot. "
-        f"Auto-refreshes every {REFRESH_SECONDS}s. Journal: `{JOURNAL_PATH}`."
+        f"Read-only dashboard for the paper-trading bot. Auto-refreshes every "
+        f"{REFRESH_SECONDS}s — see the **📚 Research** tab for all findings & "
+        f"results. Journal: `{JOURNAL_PATH}`."
     )
     _render_dashboard()
 
