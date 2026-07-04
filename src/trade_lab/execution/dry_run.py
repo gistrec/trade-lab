@@ -30,6 +30,7 @@ from .journal import (
     new_cycle_id,
 )
 from .signal import SignalSnapshot, compute_live_signal
+from ..logging_setup import set_cycle_id
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ def run_dry_cycle(
     or replace the operational outcome of the cycle itself.
     """
     cycle_id = new_cycle_id()
+    set_cycle_id(cycle_id)  # tag every log line in this cycle with the id
     started_at = datetime.now(timezone.utc)
     context = _build_context(broker)
 

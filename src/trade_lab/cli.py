@@ -1348,6 +1348,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Structured logging first, so every command emits parseable JSON lines
+    # (TRADE_LAB_LOG_JSON=false for a human format).
+    from trade_lab.logging_setup import setup_logging
+    setup_logging()
     # .env support lives here, at the process entrypoint — importing
     # trade_lab.* modules (e.g. from the credential-free monitoring
     # dashboard) must never pull API keys into the process env.

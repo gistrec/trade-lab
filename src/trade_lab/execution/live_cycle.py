@@ -58,6 +58,7 @@ from .orders import (
     sort_orders_for_placement,
 )
 from .signal import SignalSnapshot, compute_live_signal
+from ..logging_setup import set_cycle_id
 
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ def run_live_cycle(
     started_at = datetime.now(timezone.utc)
     context = _build_context(broker)
     main_cycle_id = new_cycle_id()
+    set_cycle_id(main_cycle_id)  # tag every log line in this run with the id
 
     # Phase 1: Reconstruction. Always first — main phase's
     # fetch_balance depends on reconciled state.
