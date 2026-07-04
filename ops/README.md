@@ -143,6 +143,14 @@ targets a unique `prometheus.trade_lab.<metric>` context, so no scoping is
 needed. Install with `sudo cp ... && sudo netdatacli reload-health` (the
 metric charts already exist, so no restart).
 
+**Host clock alarms** (`ops/netdata/health.d/trade_lab_clock.conf`, → `botcrit`)
+are the infra-side twin of the broker's `_check_clock_skew()` pre-flight guard:
+`host_clock_unsynced` (NTP not disciplining the clock) and `host_clock_offset_high`
+(offset > 500ms/1s) on Netdata's internal `timex` charts. Clock drift is a
+silent-failure class here — the idempotency clientOrderId is UTC-date-derived
+and signed requests must be within `recvWindow` of exchange server time. Netdata
+ships a stock clock-sync alarm but as `to: silent`, so this routes it to botcrit.
+
 ## Known limitation (by design)
 
 On-host Netdata can't alert if the **whole VPS** dies — the agent dies with
