@@ -1499,7 +1499,7 @@ def _render_dashboard() -> None:
 
     (tab_status, tab_signal, tab_portfolio, tab_cycles,
      tab_validation, tab_research) = st.tabs(
-        ["Status", "Signal", "Portfolio", "Cycles", "Validation", "📚 Research"]
+        ["Status", "Signal", "Portfolio", "Cycles", "Validation", "Research"]
     )
     with tab_status:
         _render_tab_safely("Status", lambda: _render_status(reader))
@@ -1524,21 +1524,32 @@ def main() -> None:
     )
     # Static header rendered once; the dynamic body lives in an auto-rerunning
     # fragment (no skeleton-flashing autorefresh iframe).
-    # vertical_alignment="center" lines the button up with the title text
-    # instead of the old st.write("") spacer hack.
+    #
+    # st.title() ships an <h1> with asymmetric vertical padding (more on top
+    # than bottom), so the visible title text sits a few px below its box
+    # centre — leaving the center-aligned button looking slightly ABOVE the
+    # text. Equalising top/bottom padding makes the h1 box centre match its
+    # text centre, so vertical_alignment="center" lands the button exactly on
+    # the title line. Scoped to h1 — the only h1 on the page (tab and section
+    # headings are h2/h3).
+    st.markdown(
+        "<style>h1{padding-top:1rem;padding-bottom:1rem;}</style>",
+        unsafe_allow_html=True,
+    )
     title_col, about_col = st.columns([4, 1], vertical_alignment="center")
     title_col.title("trade-lab monitoring")
     with about_col:
         if st.button(
-            "📖 What's inside", use_container_width=True,
+            "What's inside", use_container_width=True,
             help="Project overview + the master results index "
                  "(full writeups live in the Research tab).",
         ):
             _about_dialog()
+    # Three tight lines (trailing double-space = markdown hard break).
     st.caption(
-        f"Read-only dashboard for the paper-trading bot. Auto-refreshes every "
-        f"{REFRESH_SECONDS}s — see the **📚 Research** tab for all findings & "
-        f"results. Journal: `{JOURNAL_PATH}`."
+        "Read-only dashboard for gistrec's paper-trading bot.  \n"
+        "See the **Research** tab for all findings & results.  \n"
+        f"Auto-refreshes every {REFRESH_SECONDS}s."
     )
     _render_dashboard()
 
