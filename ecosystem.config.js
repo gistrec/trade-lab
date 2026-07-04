@@ -21,6 +21,12 @@ module.exports = {
         "7000",
         "--server.address",
         "127.0.0.1",
+        // Served under /monitoring/ so the research site can own the domain
+        // root (nginx: / -> static site/, /monitoring/ -> this app). Streamlit
+        // then serves its app, assets, websocket AND /_stcore/health under
+        // /monitoring/ — the Netdata dashboard probe URL is updated to match.
+        "--server.baseUrlPath",
+        "/monitoring",
       ],
       env: {
         TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles.jsonl",

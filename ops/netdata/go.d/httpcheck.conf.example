@@ -24,8 +24,10 @@ jobs:
     status_accepted: [200]
 
   # Bonus (zero extra code): liveness of the read-only Streamlit dashboard
-  # itself, via Streamlit's built-in health endpoint.
+  # itself, via Streamlit's built-in health endpoint. The dashboard runs under
+  # --server.baseUrlPath=/monitoring, so the health endpoint is served at
+  # /monitoring/_stcore/health (NOT /_stcore/health).
   - name: trade_lab_dashboard
-    url: http://127.0.0.1:7000/_stcore/health
+    url: http://127.0.0.1:7000/monitoring/_stcore/health
     timeout: 2
     status_accepted: [200]
