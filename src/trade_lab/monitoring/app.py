@@ -1524,10 +1524,11 @@ def main() -> None:
     )
     # Static header rendered once; the dynamic body lives in an auto-rerunning
     # fragment (no skeleton-flashing autorefresh iframe).
-    title_col, about_col = st.columns([4, 1])
+    # vertical_alignment="center" lines the button up with the title text
+    # instead of the old st.write("") spacer hack.
+    title_col, about_col = st.columns([4, 1], vertical_alignment="center")
     title_col.title("trade-lab monitoring")
     with about_col:
-        st.write("")  # nudge the button down toward the title baseline
         if st.button(
             "📖 What's inside", use_container_width=True,
             help="Project overview + the master results index "
