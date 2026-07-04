@@ -380,6 +380,27 @@ def test_timed_call_records_failure_and_reraises():
     assert stats["by_endpoint"]["fetch_ticker"]["errors"] == 1
 
 
+def test_order_not_found_is_not_counted_as_error():
+    # A query-before-place OrderNotFound is a definitive "no such order", not a
+    # failure — it must not inflate the error tally (a clean live cycle fires
+    # one fetch_order per placed order). See orders.place_order.
+    exch = _MockExchange()
+
+    def not_found(*a, **k):
+        raise ccxt.OrderNotFound("unknown order")
+
+    exch.fetch_order = not_found
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.OrderNotFound):
+        broker.fetch_order_by_coid("coid-1", "BTC/USDT")
+
+    stats = broker.exchange_call_stats()
+    assert stats["count"] == 1            # the round-trip is still counted
+    assert stats["errors"] == 0           # ...but not as an error
+    fo = stats["by_endpoint"]["fetch_order"]
+    assert fo["count"] == 1 and fo["errors"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Read-only retry on transient network errors (#2b). _config() leaves the
 # dataclass default retry_base_delay_s=0.0, so retries are instant in tests.

@@ -203,16 +203,30 @@ class Broker:
         is logged structured — WARNING when a call is slow, else DEBUG. Otherwise
         identical to calling ``fn`` directly: result and exception pass straight
         through, so this changes no control flow.
+
+        A raised ``ccxt.OrderNotFound`` is recorded as ``errored=False``: it is
+        a *successful* round-trip returning a definitive "no such order", which
+        ``place_order``'s query-before-place relies on as control flow (a clean
+        cycle fires one per order). Counting it as an error would inflate the
+        error tally the /metrics exporter and any alarm read. Every other
+        exception is a real failure (``errored=True``).
         """
         start = time.perf_counter()
         ok = False
+        errored = False
         try:
             result = fn(*args, **kwargs)
             ok = True
             return result
+        except ccxt.OrderNotFound:
+            raise  # expected negative answer, not a failure — errored stays False
+        except Exception:
+            errored = True
+            raise
         finally:
             ms = (time.perf_counter() - start) * 1000.0
-            self._calls.append({"endpoint": endpoint, "ms": ms, "ok": ok})
+            self._calls.append({"endpoint": endpoint, "ms": ms, "ok": ok,
+                                "errored": errored})
             level = logging.WARNING if ms >= SLOW_CALL_MS else logging.DEBUG
             logger.log(
                 level, "exchange call %s %.0fms ok=%s", endpoint, ms, ok,
@@ -259,13 +273,20 @@ class Broker:
         ``{count, errors, max_ms, p95_ms, total_ms, by_endpoint}`` — a read-only
         telemetry view a caller can journal or log at cycle end. ``count`` is
         round-trips (a retried read counts each attempt, since each is a real
-        round-trip that consumed wall-clock time); ``errors`` counts the failed
-        attempts. The shape is stable even for a zero-call cycle.
+        round-trip that consumed wall-clock time); ``errors`` counts real
+        failures only — a query-before-place ``OrderNotFound`` is a definitive
+        answer, not a failure, so it is excluded (see :meth:`_timed_call`). The
+        shape is stable even for a zero-call cycle.
         """
         calls = self._calls
         if not calls:
             return {"count": 0, "errors": 0, "max_ms": 0.0, "p95_ms": 0.0,
                     "total_ms": 0.0, "by_endpoint": {}}
+
+        def _is_error(c) -> bool:
+            # Fall back to the pre-``errored`` semantics if the flag is absent.
+            return c.get("errored", not c.get("ok", True))
+
         durs = sorted(c["ms"] for c in calls)
         by_ep: dict[str, dict] = {}
         for c in calls:
@@ -274,10 +295,10 @@ class Broker:
             )
             e["count"] += 1
             e["max_ms"] = max(e["max_ms"], c["ms"])
-            e["errors"] += 0 if c["ok"] else 1
+            e["errors"] += 1 if _is_error(c) else 0
         return {
             "count": len(calls),
-            "errors": sum(1 for c in calls if not c["ok"]),
+            "errors": sum(1 for c in calls if _is_error(c)),
             "max_ms": round(durs[-1], 1),
             "p95_ms": round(_pctl(durs, 95), 1),
             "total_ms": round(sum(durs), 1),
