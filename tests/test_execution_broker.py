@@ -340,3 +340,36 @@ def test_constraints_non_power_of_ten_step_maps_to_none():
     c = Broker(_config(), exch).fetch_market_constraints("X/USDT")
     assert c.amount_precision is None
     assert c.raw["precision"]["amount"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Exchange round-trip instrumentation (#2a latency)
+# ---------------------------------------------------------------------------
+
+
+def test_exchange_call_stats_starts_empty():
+    broker = Broker(_config(), _MockExchange())
+    assert broker.exchange_call_stats() == {"count": 0, "errors": 0}
+
+
+def test_timed_calls_accumulate_stats():
+    broker = Broker(_config(), _MockExchange())
+    broker.fetch_balance_snapshot()
+    broker.fetch_ticker_price("BTC/USDT")
+    stats = broker.exchange_call_stats()
+    assert stats["count"] == 2
+    assert stats["errors"] == 0
+    assert set(stats["by_endpoint"]) == {"fetch_balance", "fetch_ticker"}
+    assert stats["max_ms"] >= 0.0
+    assert stats["by_endpoint"]["fetch_ticker"]["count"] == 1
+
+
+def test_timed_call_records_failure_and_reraises():
+    # A failing call is still timed (ok=False) and the exception passes through
+    # unchanged — the wrapper adds no control flow.
+    broker = Broker(_config(), _MockExchange())
+    with pytest.raises(ccxt.BadSymbol):
+        broker.fetch_ticker_price("NOPE/USDT")
+    stats = broker.exchange_call_stats()
+    assert stats["errors"] == 1
+    assert stats["by_endpoint"]["fetch_ticker"]["errors"] == 1

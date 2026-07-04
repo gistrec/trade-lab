@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -32,6 +33,22 @@ from .config import PaperConfig
 
 
 logger = logging.getLogger(__name__)
+
+# A single exchange round-trip slower than this logs at WARNING (else DEBUG).
+SLOW_CALL_MS = 3000.0
+
+
+def _pctl(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolated percentile over a pre-sorted, non-empty list."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    idx = (len(sorted_vals) - 1) * q / 100.0
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = idx - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
 
 
 class BrokerError(RuntimeError):
@@ -167,6 +184,68 @@ class Broker:
     ) -> None:
         self.config = config
         self.exchange = exchange
+        # Per-instance accumulator of exchange round-trip timings. A Broker is
+        # built fresh per cycle, so this covers exactly one cycle's calls.
+        self._calls: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Exchange round-trip instrumentation
+    # ------------------------------------------------------------------
+
+    def _timed_call(self, endpoint: str, fn, *args, **kwargs):
+        """Time one CCXT round-trip, record it, and re-raise on failure.
+
+        Latency lands in ``self._calls`` (see :meth:`exchange_call_stats`) and
+        is logged structured — WARNING when a call is slow, else DEBUG. Otherwise
+        identical to calling ``fn`` directly: result and exception pass straight
+        through, so this changes no control flow.
+        """
+        start = time.perf_counter()
+        ok = False
+        try:
+            result = fn(*args, **kwargs)
+            ok = True
+            return result
+        finally:
+            ms = (time.perf_counter() - start) * 1000.0
+            self._calls.append({"endpoint": endpoint, "ms": ms, "ok": ok})
+            level = logging.WARNING if ms >= SLOW_CALL_MS else logging.DEBUG
+            logger.log(
+                level, "exchange call %s %.0fms ok=%s", endpoint, ms, ok,
+                extra={"endpoint": endpoint, "latency_ms": round(ms, 1),
+                       "ok": ok, "slow": ms >= SLOW_CALL_MS},
+            )
+
+    def exchange_call_stats(self) -> dict:
+        """Summary of this cycle's exchange round-trips.
+
+        ``{count, errors, max_ms, p95_ms, total_ms, by_endpoint}`` — a read-only
+        telemetry view a caller can journal or log at cycle end.
+        """
+        calls = self._calls
+        if not calls:
+            return {"count": 0, "errors": 0}
+        durs = sorted(c["ms"] for c in calls)
+        by_ep: dict[str, dict] = {}
+        for c in calls:
+            e = by_ep.setdefault(
+                c["endpoint"], {"count": 0, "max_ms": 0.0, "errors": 0},
+            )
+            e["count"] += 1
+            e["max_ms"] = max(e["max_ms"], c["ms"])
+            e["errors"] += 0 if c["ok"] else 1
+        return {
+            "count": len(calls),
+            "errors": sum(1 for c in calls if not c["ok"]),
+            "max_ms": round(durs[-1], 1),
+            "p95_ms": round(_pctl(durs, 95), 1),
+            "total_ms": round(sum(durs), 1),
+            "by_endpoint": {
+                k: {"count": v["count"], "max_ms": round(v["max_ms"], 1),
+                    "errors": v["errors"]}
+                for k, v in by_ep.items()
+            },
+        }
 
     # ------------------------------------------------------------------
     # Construction
@@ -230,7 +309,7 @@ class Broker:
         try:
             # fetch_balance is the standard "are we connected and
             # authenticated?" probe. Most exchanges return immediately.
-            balance = self.exchange.fetch_balance()
+            balance = self._timed_call("fetch_balance", self.exchange.fetch_balance)
         except ccxt.AuthenticationError as exc:
             raise BrokerError(
                 f"Authentication failed for {self.config.exchange_id} "
@@ -268,7 +347,7 @@ class Broker:
         is on purpose: a testnet balance reset, a partial-fill update,
         or a manual deposit must all be visible immediately.
         """
-        raw = self.exchange.fetch_balance()
+        raw = self._timed_call("fetch_balance", self.exchange.fetch_balance)
         if not isinstance(raw, dict):
             raise BrokerError("fetch_balance did not return a dict.")
         quote = self.config.quote_currency
@@ -296,7 +375,7 @@ class Broker:
 
     def fetch_ticker_price(self, symbol: str) -> float:
         """Latest last-trade price for ``symbol`` (CCXT format BASE/QUOTE)."""
-        ticker = self.exchange.fetch_ticker(symbol)
+        ticker = self._timed_call("fetch_ticker", self.exchange.fetch_ticker, symbol)
         if not isinstance(ticker, dict):
             raise BrokerError(f"fetch_ticker did not return a dict for {symbol}.")
         last = ticker.get("last")
@@ -324,7 +403,7 @@ class Broker:
         (skip the order, round up to min, etc.). For Binance: cost.min
         is usually populated; for Kraken: amount.min and precision.
         """
-        markets = self.exchange.load_markets()
+        markets = self._timed_call("load_markets", self.exchange.load_markets)
         if symbol not in markets:
             raise BrokerError(
                 f"Market {symbol!r} not found on {self.config.exchange_id}. "
@@ -371,7 +450,11 @@ class Broker:
             raise ValueError(f"side must be buy or sell, got {side!r}")
         if amount <= 0:
             raise ValueError(f"amount must be positive, got {amount}")
-        return self.exchange.create_order(
+        # NOTE: create_order is timed but deliberately NOT retried here — a
+        # transient failure is resolved by the reconstruction path (query by
+        # clientOrderId next cycle), which keeps placement idempotency-safe.
+        return self._timed_call(
+            "create_order", self.exchange.create_order,
             symbol, "market", side, amount, None,
             {"newClientOrderId": client_order_id},
         )
@@ -392,7 +475,8 @@ class Broker:
         record of the ID — the caller turns that into a "needs
         placement" decision.
         """
-        return self.exchange.fetch_order(
+        return self._timed_call(
+            "fetch_order", self.exchange.fetch_order,
             client_order_id, symbol,
             {"origClientOrderId": client_order_id},
         )
@@ -405,7 +489,8 @@ class Broker:
         the state file was wiped or a previous cycle crashed before
         persisting.
         """
-        return self.exchange.fetch_open_orders(symbol)
+        return self._timed_call(
+            "fetch_open_orders", self.exchange.fetch_open_orders, symbol)
 
     def fetch_my_trades_since(
         self,
@@ -418,7 +503,8 @@ class Broker:
         lets the exchange decide the default window (Binance returns
         the last 24h by default).
         """
-        return self.exchange.fetch_my_trades(symbol, since_ms)
+        return self._timed_call(
+            "fetch_my_trades", self.exchange.fetch_my_trades, symbol, since_ms)
 
     # ------------------------------------------------------------------
     # Equity estimate
