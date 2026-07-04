@@ -81,3 +81,27 @@ jobs:
         # --output-format=github annotates offending lines inline in the
         # PR diff. Rule set + per-file-ignores live in pyproject.toml.
         run: ruff check --output-format=github .
+
+  docs:
+    name: docs (mkdocs build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install docs deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
+      - name: Build the research site (strict)
+        # --strict fails on broken internal links / files-not-in-nav, so a
+        # docs regression blocks the deploy (deploy.sh gates on ci.yml green).
+        # The site is served from the VPS, not GitHub Pages, so no deploy here.
+        run: mkdocs build --strict

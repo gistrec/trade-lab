@@ -1,0 +1,107 @@
+site_name: trade-lab research
+site_description: Backtesting research & results for a crypto-spot trading framework
+site_url: https://trade-lab.gistrec.cloud/
+repo_url: https://github.com/gistrec/trade-lab
+repo_name: gistrec/trade-lab
+
+# Root-level findings/*.md and RESULTS.md are injected by this hook (they live
+# outside docs/ and must not be moved). See scripts/mkdocs_hooks.py.
+hooks:
+  - scripts/mkdocs_hooks.py
+
+# systems_visibility_roadmap.md is a private (gitignored) draft that happens to
+# sit in docs/ locally — never publish it, even from a local build.
+exclude_docs: |
+  systems_visibility_roadmap.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.highlight
+
+nav:
+  - Home: index.md
+  - Master results index: RESULTS.md
+  - Research findings:
+      - Deployable strategy:
+          - findings/han_28d_tsmom.md
+          - findings/market_basket_tsmom.md
+          - findings/cluster_stability.md
+          - findings/production_config_v1.md
+      - Overlays & wrappers:
+          - findings/vol_targeting_regime_gate.md
+          - findings/breadth_filter.md
+          - findings/ensemble_portfolio.md
+      - Rejected / inconclusive:
+          - findings/cross_sectional_reversal.md
+          - findings/ctrend_proxy_price_only.md
+          - findings/mvrv_overlay.md
+          - findings/hmm_regime_overlay.md
+          - findings/buy_and_hold_cost_symmetry.md
+      - Validation:
+          - findings/validation_multiexchange.md
+          - findings/validation_execution.md
+          - findings/validation_behavioral_fingerprint.md
+          - findings/validation_lookahead_audit.md
+          - findings/validation_universe_bias.md
+      - Literature & sessions:
+          - findings/literature_review_v1.md
+          - findings/literature_review_v2.md
+          - findings/literature_review_v3.md
+          - findings/strategy_test_session_2026_05_29.md
+  - Strategy reference:
+      - strategies/tsmom.md
+      - strategies/sma_cross.md
+      - strategies/regime_sma_cross.md
+      - strategies/regime_only.md
+      - strategies/donchian_trend.md
+      - strategies/pma_ratio.md
+      - strategies/rsi.md
+      - strategies/cross_sectional_momentum.md
+  - Results analyses:
+      - results/strategy_comparison.md
+      - results/walk_forward_btc.md
+      - results/walk_forward_priority5.md
+      - results/dsr_in_walk_forward.md
+      - results/vol_targeting.md
+      - results/multi_asset.md
+      - results/pit_universe.md
+      - results/yearly_btc.md
+  - Methodology:
+      - article_validation_methodology_draft.md
+      - backtest_validation.md
+
+strict: true
