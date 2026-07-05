@@ -1370,8 +1370,13 @@ def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
 
 @st.cache_data(ttl=300)
 def _research_doc(relpath: str) -> str:
-    """Cached read of one writeup's markdown (ttl so a deploy shows through)."""
-    return research.read_markdown(relpath)
+    """Cached read of one writeup's markdown (ttl so a deploy shows through).
+
+    Backtick doc-path references (e.g. ``findings/foo.md``) are linkified to
+    the file on GitHub so a reviewer can open the source in one click; the
+    monospace look is preserved (see ``research.with_github_links``).
+    """
+    return research.with_github_links(research.read_markdown(relpath), REPO_URL)
 
 
 @st.cache_data(ttl=300)

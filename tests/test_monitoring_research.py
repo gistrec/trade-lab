@@ -55,6 +55,53 @@ def test_doc_title_reads_first_heading():
 
 
 # --------------------------------------------------------------------------
+# with_github_links — backtick doc-path references become GitHub links
+# --------------------------------------------------------------------------
+
+_REPO_URL = "https://github.com/gistrec/trade-lab"
+
+
+def test_with_github_links_linkifies_allowlisted_path():
+    out = research.with_github_links(
+        "see `findings/han_28d_tsmom.md` for detail", _REPO_URL)
+    assert ("[`findings/han_28d_tsmom.md`]"
+            "(https://github.com/gistrec/trade-lab/blob/main/"
+            "findings/han_28d_tsmom.md)") in out
+
+
+def test_with_github_links_linkifies_results_index_and_nested_docs():
+    out = research.with_github_links(
+        "`RESULTS.md` and `docs/results/yearly_btc.md`", _REPO_URL)
+    assert "/blob/main/RESULTS.md)" in out
+    assert "/blob/main/docs/results/yearly_btc.md)" in out
+
+
+def test_with_github_links_leaves_unknown_or_private_path_as_code():
+    # gitignored/private and non-corpus paths must NOT become dead links.
+    for path in ["docs/systems_visibility_roadmap.md", "docs/SLO.md",
+                 "findings/does_not_exist.md"]:
+        src = f"note `{path}` here"
+        assert research.with_github_links(src, _REPO_URL) == src
+
+
+def test_with_github_links_ignores_paths_without_backticks():
+    src = "a bare findings/han_28d_tsmom.md mention in prose"
+    assert research.with_github_links(src, _REPO_URL) == src
+
+
+def test_with_github_links_noop_without_repo_url():
+    src = "see `findings/han_28d_tsmom.md`"
+    assert research.with_github_links(src, "") == src
+
+
+def test_with_github_links_respects_ref_and_trailing_slash():
+    out = research.with_github_links(
+        "`RESULTS.md`", _REPO_URL + "/", ref="abc123")
+    assert "https://github.com/gistrec/trade-lab/blob/abc123/RESULTS.md)" in out
+    assert "/blob/abc123//" not in out  # trailing slash stripped, no double //
+
+
+# --------------------------------------------------------------------------
 # App smoke — the app still runs headlessly with the new tab/modal
 # --------------------------------------------------------------------------
 

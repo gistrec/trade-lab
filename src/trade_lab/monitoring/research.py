@@ -9,6 +9,7 @@ degrades to a friendly note rather than raising.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # app.py is src/trade_lab/monitoring/app.py; parents[3] is the repo root, where
@@ -112,3 +113,32 @@ def doc_title(relpath: str) -> str:
 def results_markdown() -> str:
     """The RESULTS.md master-index markdown."""
     return read_markdown(RESULTS_INDEX)
+
+
+# Backtick-wrapped repo-relative doc paths, e.g. `findings/foo.md` or
+# `RESULTS.md`. The char class excludes backticks/spaces so a match can't span
+# code fences or run past the closing backtick.
+_DOC_PATH_RE = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.md)`")
+
+
+def with_github_links(md: str, repo_url: str, ref: str = "main") -> str:
+    """Turn backtick doc-path references into links to the file on GitHub.
+
+    ```findings/foo.md``` becomes ``[`findings/foo.md`](repo/blob/main/findings/foo.md)`` —
+    the text stays inline code (monospace, unchanged look), only now it's a
+    link. Only **allow-listed** research docs are linked, so a private /
+    gitignored / nonexistent path (e.g. ``systems_visibility_roadmap.md``)
+    stays plain code rather than becoming a dead link. A no-op when
+    ``repo_url`` is empty (links are opt-in, same as the commit links).
+    """
+    if not repo_url:
+        return md
+    base = repo_url.rstrip("/")
+
+    def repl(m: "re.Match[str]") -> str:
+        path = m.group(1)
+        if path not in _ALLOWED:
+            return m.group(0)  # unknown/private path — leave as plain code
+        return f"[`{path}`]({base}/blob/{ref}/{path})"
+
+    return _DOC_PATH_RE.sub(repl, md)
