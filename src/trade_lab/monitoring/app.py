@@ -1525,22 +1525,36 @@ def main() -> None:
     # Static header rendered once; the dynamic body lives in an auto-rerunning
     # fragment (no skeleton-flashing autorefresh iframe).
     #
-    # st.title() ships an <h1> with asymmetric vertical padding (more on top
-    # than bottom), so the visible title text sits a few px below its box
-    # centre — leaving the center-aligned button looking slightly ABOVE the
-    # text. Equalising top/bottom padding makes the h1 box centre match its
-    # text centre, so vertical_alignment="center" lands the button exactly on
-    # the title line. Scoped to h1 — the only h1 on the page (tab and section
-    # headings are h2/h3).
+    # Align the "What's inside" button with the title text. Two things fight
+    # us, so the fix has two parts (both measured headlessly with Playwright —
+    # see the header-alignment note below):
+    #
+    #  1. st.title()'s <h1> ships ASYMMETRIC padding (more on top). Streamlit
+    #     sets it via a runtime emotion class that a bare `h1` selector can't
+    #     beat on specificity, so we override the stable `stHeading` test-id
+    #     with !important and force the padding symmetric.
+    #  2. Even then the h1's line box overflows the flex row, so the
+    #     center-aligned button still sits ~8px above the title's optical
+    #     centre. A 0.95rem top-margin on the button lands it exactly on the
+    #     text line (button.centreY - textCentreY measured to ~0px). Scoped to
+    #     the button's own `st-key-about_btn` class so no other widget moves.
     st.markdown(
-        "<style>h1{padding-top:1rem;padding-bottom:1rem;}</style>",
+        """
+        <style>
+        [data-testid="stHeading"] { padding-top: 0 !important;
+                                    padding-bottom: 0 !important; }
+        [data-testid="stHeading"] h1 { padding-top: 0.75rem !important;
+                                       padding-bottom: 0.75rem !important; }
+        .st-key-about_btn .stButton { margin-top: 0.95rem; }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
     title_col, about_col = st.columns([4, 1], vertical_alignment="center")
     title_col.title("trade-lab monitoring")
     with about_col:
         if st.button(
-            "What's inside", use_container_width=True,
+            "What's inside", use_container_width=True, key="about_btn",
             help="Project overview + the master results index "
                  "(full writeups live in the Research tab).",
         ):
