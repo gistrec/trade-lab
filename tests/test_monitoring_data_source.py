@@ -19,10 +19,11 @@ from pathlib import Path
 import pytest
 
 from trade_lab.monitoring.data_source import (
-    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, as_float,
+    JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, TradeEvent, as_float,
     cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
-    duration_stats, equity_series, is_live_cycle, max_inter_cycle_gap_seconds,
-    open_order_incidents, parse_iso, recent_incidents,
+    duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
+    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
+    recent_incidents, trade_events,
 )
 
 
@@ -541,6 +542,50 @@ def test_latest_live_cycle_none_when_only_dry_runs(tmp_path):
     assert reader.latest_live_cycle() is None
 
 
+# ---------------------------------------------------------------------------
+# first_live_cycle_time — chart marker for "live execution began"
+# ---------------------------------------------------------------------------
+
+_EXEC_T0 = datetime(2026, 7, 4, 0, 15, tzinfo=timezone.utc)
+
+
+def _exec_at(hours: float) -> str:
+    return (_EXEC_T0 + timedelta(hours=hours)).isoformat()
+
+
+def test_first_live_cycle_time_none_when_only_dry_runs():
+    cycles = [_cycle_entry("d1", ended_at=_exec_at(0)),
+              _cycle_entry("d2", ended_at=_exec_at(1))]
+    assert first_live_cycle_time(cycles) is None
+
+
+def test_first_live_cycle_time_returns_earliest_live_cycle():
+    cycles = [
+        _cycle_entry("dry0", ended_at=_exec_at(0)),
+        _live_cycle("live1", ended_at=_exec_at(2)),   # first execution
+        _cycle_entry("dry1", ended_at=_exec_at(3)),
+        _live_cycle("live2", ended_at=_exec_at(4)),
+    ]
+    assert first_live_cycle_time(cycles) == parse_iso(_exec_at(2))
+
+
+def test_first_live_cycle_time_is_order_independent():
+    # the earliest live cycle appears LATER in the list — must still win.
+    cycles = [
+        _live_cycle("late", ended_at=_exec_at(5)),
+        _live_cycle("early", ended_at=_exec_at(1)),
+        _cycle_entry("dry", ended_at=_exec_at(0)),
+    ]
+    assert first_live_cycle_time(cycles) == parse_iso(_exec_at(1))
+
+
+def test_first_live_cycle_time_skips_unparseable_timestamp():
+    bad = _live_cycle("bad", ended_at=_exec_at(0))
+    bad["ended_at"] = None
+    good = _live_cycle("good", ended_at=_exec_at(3))
+    assert first_live_cycle_time([bad, good]) == parse_iso(_exec_at(3))
+
+
 def test_recent_incidents_scans_window_not_just_latest():
     """A failed LIVE cycle followed by dry-run successes is invisible to a
     latest-only check but must appear in the incident scan."""
@@ -740,3 +785,145 @@ def test_signal_history_skips_null_asof(tmp_path):
     hist = reader.signal_history(days=10**6)
     assert len(hist) == 1
     assert hist[0][1] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# trade_events — classify filled cycles into entry / exit / rebalance so the
+# equity/drift charts can mark real buys and sells.
+# ---------------------------------------------------------------------------
+
+
+def _order(side, symbol="BTC/USDT", filled=0.01, notional=100.0,
+           terminal_status="closed"):
+    """One orders_executed row, only the fields trade_events reads."""
+    return {
+        "side": side, "symbol": symbol,
+        "filled_amount": filled, "filled_notional_quote": notional,
+        "terminal_status": terminal_status,
+    }
+
+
+def test_trade_events_all_buys_is_entry():
+    cycle = _live_cycle("entry", orders_executed=[
+        _order("buy", "BTC/USDT", notional=120.0),
+        _order("buy", "ETH/USDT", notional=80.0),
+    ])
+    events = trade_events([cycle])
+    assert len(events) == 1
+    assert events[0].kind == "entry"
+    assert events[0].net_quote == pytest.approx(200.0)
+
+
+def test_trade_events_all_sells_is_exit():
+    """The risk-off case: signal -> 0 sells the whole book to cash."""
+    cycle = _live_cycle("exit", orders_executed=[
+        _order("sell", "BTC/USDT", notional=300.0),
+        _order("sell", "ETH/USDT", notional=240.0),
+    ])
+    events = trade_events([cycle])
+    assert len(events) == 1
+    assert events[0].kind == "exit"
+    assert events[0].net_quote == pytest.approx(-540.0)
+
+
+def test_trade_events_mixed_sides_is_rebalance():
+    cycle = _live_cycle("rebal", orders_executed=[
+        _order("sell", "BTC/USDT", notional=100.0),
+        _order("buy", "ETH/USDT", notional=60.0),
+    ])
+    events = trade_events([cycle])
+    assert len(events) == 1
+    assert events[0].kind == "rebalance"
+    assert events[0].net_quote == pytest.approx(-40.0)
+
+
+def test_trade_events_per_symbol_signed_and_sorted_by_magnitude():
+    cycle = _live_cycle("r", orders_executed=[
+        _order("buy", "ETH/USDT", notional=60.0),
+        _order("sell", "BTC/USDT", notional=100.0),
+    ])
+    ev = trade_events([cycle])[0]
+    # Largest magnitude first; buys positive, sells negative.
+    assert ev.per_symbol == [("BTC/USDT", -100.0), ("ETH/USDT", 60.0)]
+
+
+def test_trade_events_nets_repeated_symbol():
+    """Two fills of one symbol/side accumulate into a single signed entry."""
+    cycle = _live_cycle("r", orders_executed=[
+        _order("buy", "BTC/USDT", notional=40.0),
+        _order("buy", "BTC/USDT", notional=60.0),
+    ])
+    ev = trade_events([cycle])[0]
+    assert ev.per_symbol == [("BTC/USDT", 100.0)]
+    assert ev.kind == "entry"
+
+
+def test_trade_events_zero_fill_orders_are_not_events():
+    """rejected / lost_track / zero-fill did not move the book — no event."""
+    cycle = _live_cycle("noop", orders_executed=[
+        _order("buy", filled=0.0, notional=0.0, terminal_status="rejected"),
+        _order("sell", filled=0.0, notional=0.0, terminal_status="lost_track"),
+    ])
+    assert trade_events([cycle]) == []
+
+
+def test_trade_events_partial_fill_counts():
+    """A partial fill still moved the book — it is a real trade event."""
+    cycle = _live_cycle("p", orders_executed=[
+        _order("buy", filled=0.005, notional=25.0, terminal_status="partial"),
+    ])
+    ev = trade_events([cycle])
+    assert len(ev) == 1
+    assert ev[0].kind == "entry"
+    assert ev[0].net_quote == pytest.approx(25.0)
+
+
+def test_trade_events_dry_run_cycle_skipped():
+    """Planning-only (orders_executed=None) is not a trade event."""
+    cycle = _cycle_entry("dry", schema_version=2)
+    cycle["orders_executed"] = None
+    assert trade_events([cycle]) == []
+
+
+def test_trade_events_v1_cycle_skipped():
+    """v1 cycles predate orders_executed — never a trade event."""
+    cycle = _cycle_entry("v1", schema_version=1)
+    assert "orders_executed" not in cycle
+    assert trade_events([cycle]) == []
+
+
+def test_trade_events_non_success_cycle_skipped():
+    cycle = _live_cycle("f", outcome="failed", orders_executed=[
+        _order("buy", notional=100.0),
+    ])
+    assert trade_events([cycle]) == []
+
+
+def test_trade_events_corrupt_order_degrades_not_raises():
+    """A non-dict order row drops that one order without raising."""
+    cycle = _live_cycle("c", orders_executed=[
+        "garbage",
+        _order("buy", "BTC/USDT", notional=50.0),
+    ])
+    ev = trade_events([cycle])
+    assert len(ev) == 1
+    assert ev[0].kind == "entry"
+    assert ev[0].per_symbol == [("BTC/USDT", 50.0)]
+
+
+def test_trade_events_bad_ended_at_skipped():
+    cycle = _live_cycle("bad", orders_executed=[_order("buy", notional=100.0)])
+    cycle["ended_at"] = "not-a-timestamp"
+    assert trade_events([cycle]) == []
+
+
+def test_trade_events_preserves_chronological_order():
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    c1 = _live_cycle("a", ended_at=base.isoformat(),
+                     orders_executed=[_order("buy", notional=100.0)])
+    c2 = _live_cycle("b", ended_at=(base + timedelta(days=30)).isoformat(),
+                     orders_executed=[_order("sell", notional=100.0)])
+    events = trade_events([c1, c2])
+    assert [e.kind for e in events] == ["entry", "exit"]
+    assert events[0].at < events[1].at
+    assert isinstance(events[0], TradeEvent)

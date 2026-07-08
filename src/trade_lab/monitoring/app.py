@@ -40,8 +40,9 @@ import streamlit as st
 from trade_lab.monitoring.data_source import (
     DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER, Staleness,
     as_float, cycle_orders_executed, drift_series, duration_series,
-    duration_stats, equity_series, is_live_cycle, max_inter_cycle_gap_seconds,
-    open_order_incidents, parse_iso, recent_incidents,
+    duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
+    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
+    recent_incidents, TradeEvent, trade_events,
 )
 from trade_lab.uikit import render_tab_safely
 from trade_lab.monitoring import research
@@ -802,6 +803,18 @@ def _signal_history_figure(
     return fig
 
 
+# Trade-event marker styling, keyed by ``TradeEvent.kind``. Shared by both
+# time-series charts so a buy-only "entry", a sell-only "exit", and a mixed
+# "rebalance" read identically on the equity and drift curves. Order fixes the
+# legend order regardless of which kinds happen to appear in the window.
+_TRADE_MARKER_STYLE: dict[str, dict[str, str]] = {
+    "entry": {"symbol": "triangle-up", "color": "#2ca02c", "name": "entry (buy)"},
+    "exit": {"symbol": "triangle-down", "color": "#d62728", "name": "exit (sell)"},
+    "rebalance": {"symbol": "diamond", "color": "#7f7f7f", "name": "rebalance"},
+}
+_TRADE_MARKER_ORDER = ("entry", "exit", "rebalance")
+
+
 def _timeseries_figure(
     points: list[tuple[datetime, float]],
     *,
@@ -810,26 +823,99 @@ def _timeseries_figure(
     fill: Optional[str] = None,
     hline: Optional[float] = None,
     hline_label: Optional[str] = None,
+    vline: Optional[datetime] = None,
+    vline_label: Optional[str] = None,
+    markers: Optional[list[tuple[datetime, str, str]]] = None,
 ) -> go.Figure:
-    """Generic (time, value) line chart with UTC x-axis and titled axes."""
+    """Generic (time, value) line chart with UTC x-axis and titled axes.
+
+    ``vline`` (a datetime) draws a dashed vertical reference line — used to mark
+    when live order execution began. It is only drawn when it falls inside the
+    plotted time range, so an off-window marker never adds a stray edge line.
+
+    ``markers`` overlays trade events as ``(at, kind, hovertext)`` triples,
+    styled by :data:`_TRADE_MARKER_STYLE`. Each marker sits on the curve's own
+    value at that instant (a trade event shares its cycle's timestamp), so a
+    marker whose ``at`` is not a plotted point — e.g. a cycle whose equity or
+    drift did not parse — is dropped rather than floated at zero.
+    """
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=xs, y=ys, mode="lines+markers",
         line=dict(color=color, width=2), fill=fill,
+        showlegend=False,
     ))
     if hline is not None:
         fig.add_hline(
             y=hline, line_dash="dot", line_color="gray",
             annotation_text=hline_label or "",
         )
+    if vline is not None and xs and min(xs) <= vline <= max(xs):
+        # NOT add_vline: with a datetime axis + annotation it raises inside
+        # plotly (it means-averages the x's, summing datetimes). add_shape +
+        # add_annotation is the datetime-safe equivalent.
+        fig.add_shape(
+            type="line", x0=vline, x1=vline, xref="x",
+            y0=0, y1=1, yref="paper",
+            line=dict(color="#d62728", dash="dash", width=2),
+        )
+        if vline_label:
+            fig.add_annotation(
+                x=vline, xref="x", y=1, yref="paper",
+                text=vline_label, showarrow=False,
+                xanchor="left", yanchor="bottom",
+                font=dict(color="#d62728", size=12),
+            )
+    if markers:
+        # A trade event shares its cycle's timestamp, so the marker's y is the
+        # curve's value at that instant — look it up rather than recompute.
+        y_by_x = {p[0]: p[1] for p in points}
+        for kind in _TRADE_MARKER_ORDER:
+            group = [
+                (at, hov) for (at, k, hov) in markers
+                if k == kind and at in y_by_x
+            ]
+            if not group:
+                continue
+            style = _TRADE_MARKER_STYLE[kind]
+            fig.add_trace(go.Scatter(
+                x=[at for at, _ in group],
+                y=[y_by_x[at] for at, _ in group],
+                mode="markers",
+                marker=dict(
+                    symbol=style["symbol"], color=style["color"],
+                    size=12, line=dict(color="white", width=1),
+                ),
+                name=style["name"],
+                hovertext=[hov for _, hov in group],
+                hovertemplate="%{hovertext}<extra></extra>",
+                showlegend=True,
+            ))
     fig.update_layout(
         height=320, margin=dict(t=10, b=10, l=10, r=10),
         hovermode="x unified",
         yaxis_title=y_title, xaxis_title="date (UTC)",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1,
+        ),
     )
     return fig
+
+
+def _trade_hover(ev: "TradeEvent", quote: str) -> str:
+    """One trade marker's hover text: header + per-symbol signed notional + net.
+
+    Buys are positive, sells negative, quoted in ``quote``; lines are joined
+    with plotly's ``<br>`` so the tooltip renders multi-line.
+    """
+    lines = [f"<b>{ev.kind}</b> · {ev.at:%Y-%m-%d %H:%M} UTC"]
+    for symbol, signed in ev.per_symbol:
+        lines.append(f"{symbol} {signed:+,.2f} {quote}")
+    lines.append(f"net {ev.net_quote:+,.2f} {quote}")
+    return "<br>".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -927,14 +1013,40 @@ def _render_portfolio(reader: JournalReader) -> None:
     )
 
     window = reader.cycles(n=500)
+    # When the daily paper-place-orders cron first ran: before it the journal
+    # is dry-run-only (planning, no trades), so both charts mark this instant
+    # with a dashed line to separate "no execution cron yet" from live trading.
+    exec_started = first_live_cycle_time(window)
+    exec_note = (
+        " The dashed line marks when live order execution began — before it, "
+        "cycles were dry-run planning only (no execution cron yet)."
+        if exec_started is not None else ""
+    )
+
+    # Trade markers, shared by both charts: cycles that actually filled,
+    # classified entry (all-buy) / exit (all-sell) / rebalance (both sides).
+    events = trade_events(window)
+    markers = [(ev.at, ev.kind, _trade_hover(ev, quote)) for ev in events]
+    marker_note = (
+        " Markers flag cycles that filled: ▲ entry (all-buy), ▼ exit "
+        "(all-sell), ◆ rebalance (both sides) — hover for per-symbol amounts."
+        if markers else ""
+    )
 
     st.subheader("Paper equity over time")
     eq = equity_series(window)
     if len(eq) >= 2:
         st.plotly_chart(
-            _timeseries_figure(eq, y_title=f"equity ({quote})", color="#1f77b4"),
+            _timeseries_figure(
+                eq, y_title=f"equity ({quote})", color="#1f77b4",
+                vline=exec_started, vline_label="live execution started",
+                markers=markers,
+            ),
             width="stretch",
         )
+        cap = (exec_note + marker_note).strip()
+        if cap:
+            st.caption(cap)
     else:
         st.info("Not enough successful cycles yet to chart equity.")
 
@@ -945,6 +1057,8 @@ def _render_portfolio(reader: JournalReader) -> None:
             _timeseries_figure(
                 dr, y_title=f"total drift ({quote})",
                 color="#9467bd", fill="tozeroy",
+                vline=exec_started, vline_label="live execution started",
+                markers=markers,
             ),
             width="stretch",
         )
@@ -952,6 +1066,7 @@ def _render_portfolio(reader: JournalReader) -> None:
             "Sum of |target − current| per cycle. By design a sawtooth that "
             "resets on the monthly rebalance (the drifted-weight profile from "
             "C3); a steady monotonic climb would flag a problem."
+            + marker_note + exec_note
         )
     else:
         st.info("Not enough successful cycles yet to chart drift.")

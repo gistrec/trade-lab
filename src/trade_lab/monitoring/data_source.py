@@ -94,6 +94,29 @@ def is_live_cycle(cycle: dict) -> bool:
     return cycle.get("orders_executed") is not None
 
 
+def first_live_cycle_time(cycles: list[dict]) -> Optional[datetime]:
+    """``ended_at`` of the EARLIEST live cycle in the window, or ``None``.
+
+    Marks when real order execution first ran. Before it the journal is
+    dry-run-only — planning cycles with no trades, because there was no
+    ``paper-place-orders`` cron yet — so equity/drift up to this point reflect
+    a held balance that was never actually rebalanced. The charts draw a
+    reference line here to separate that pre-execution stretch from live
+    trading. Order-independent: scans all cycles and keeps the minimum
+    timestamp; ``None`` if the window holds only dry-runs.
+    """
+    best: Optional[datetime] = None
+    for c in cycles:
+        if not is_live_cycle(c):
+            continue
+        t = parse_iso(c.get("ended_at"))
+        if t is None:
+            continue
+        if best is None or t < best:
+            best = t
+    return best
+
+
 # Cycle-level outcomes that mean something went wrong and wants an operator's
 # eye. ``reconstructed`` is a *recovery* (an unknown-order state was resolved),
 # not an incident, so it is surfaced separately, not here.
@@ -252,6 +275,86 @@ def drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
         if drift is None:
             continue
         out.append((dt, drift))
+    return out
+
+
+@dataclass
+class TradeEvent:
+    """A successful cycle whose executed orders actually moved the book.
+
+    ``kind`` classifies the cycle by the mix of sides among *filled* orders
+    (``filled_amount > 0``):
+
+    * ``"entry"``     — only buys: cash deployed into the basket (e.g. the
+                        signal rose off zero, coming out of the SMA gate).
+    * ``"exit"``      — only sells: the book raised to cash / gone flat
+                        (e.g. the signal fell to zero — the risk-off case).
+    * ``"rebalance"`` — both sides: the monthly drifted-weight reset,
+                        trimming winners and topping up laggards.
+
+    ``per_symbol`` is ``(symbol, signed_notional_quote)`` with buys positive
+    and sells negative, largest magnitude first; ``net_quote`` is their sum.
+    A cycle with no real fill (all rejected / lost_track / zero-fill, or a
+    dry-run planning-only cycle) is not a trade event.
+    """
+
+    at: datetime
+    kind: str
+    per_symbol: list[tuple[str, float]]
+    net_quote: float
+
+
+def trade_events(cycles: list[dict]) -> list[TradeEvent]:
+    """Successful cycles with real fills, classified entry/exit/rebalance.
+
+    Total over external journal input: a corrupt order row (non-dict, garbage
+    numbers) degrades that one order, never raises. Cycles arrive chronological
+    (cache order), so the output is chronological — the same contract as
+    ``equity_series`` / ``drift_series`` so markers align with those curves.
+    """
+    out: list[TradeEvent] = []
+    for c in cycles:
+        if c.get("outcome") != "success":
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        if dt is None:
+            continue
+        per_symbol: dict[str, float] = {}
+        saw_buy = False
+        saw_sell = False
+        for o in cycle_orders_executed(c):
+            if not isinstance(o, dict):
+                # A corrupt cycle whose orders_executed holds a non-dict must
+                # degrade one order, not raise (same totality as the reader).
+                continue
+            # filled_amount, not terminal_status: a 'partial' fill still moved
+            # the book, and a 'closed' order that somehow filled zero did not.
+            if as_float(o.get("filled_amount")) <= 0.0:
+                continue  # rejected / lost_track / zero-fill: no real move
+            side = str(o.get("side") or "").lower()
+            symbol = str(o.get("symbol") or "?")
+            notional = as_float(o.get("filled_notional_quote"))
+            if side == "buy":
+                saw_buy = True
+                per_symbol[symbol] = per_symbol.get(symbol, 0.0) + notional
+            elif side == "sell":
+                saw_sell = True
+                per_symbol[symbol] = per_symbol.get(symbol, 0.0) - notional
+            # An unknown side with a fill is not a directional move we can
+            # place on a curve — drop it rather than guess a direction.
+        if not saw_buy and not saw_sell:
+            continue  # planning-only, or nothing actually filled
+        if saw_buy and saw_sell:
+            kind = "rebalance"
+        elif saw_buy:
+            kind = "entry"
+        else:
+            kind = "exit"
+        ordered = sorted(per_symbol.items(), key=lambda kv: -abs(kv[1]))
+        out.append(TradeEvent(
+            at=dt, kind=kind, per_symbol=ordered,
+            net_quote=sum(per_symbol.values()),
+        ))
     return out
 
 
