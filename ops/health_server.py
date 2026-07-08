@@ -11,12 +11,12 @@ so the existing Netdata ``httpcheck`` collector + ``botcrit`` notification
 path can consume it unchanged — a stale/failed cycle returns 503, exactly
 like a refused/timed-out endpoint.
 
-The system has two cadences (see ``execution/README.md``): an **hourly
+The system has two cadences (see ``execution/README.md``): a **6-hourly
 dry-run** keeps the journal warm, and the **daily live** run places real
 orders. One probe cannot separate "the whole bot died" from "today's real
 order cron didn't fire", so there are two endpoints:
 
-* ``GET /healthz``        heartbeat  — any cycle within ~2h (hourly dry-run).
+* ``GET /healthz``        heartbeat  — any cycle within ~12h (6-hourly dry-run).
                                        Catches a dead cron/process.
 * ``GET /healthz/daily``  daily_live — last *live* cycle within ~26h AND a
                                        healthy ``outcome``. Catches "today's
@@ -56,9 +56,9 @@ import metrics  # sibling module in ops/ (Prometheus exposition for /metrics)
 logger = logging.getLogger("trade_lab.health")
 
 DEFAULT_JOURNAL_PATH = "data/journal/cycles.jsonl"
-# The hourly dry-run keeps the journal warm; 2h covers one missed dry-run
-# plus grace before we call the heartbeat dead.
-DEFAULT_HEARTBEAT_MAX_AGE_S = 7200
+# The 6-hourly dry-run keeps the journal warm; 12h covers one fully missed
+# dry-run cycle plus grace before we call the heartbeat dead.
+DEFAULT_HEARTBEAT_MAX_AGE_S = 43200
 # Live orders are placed once a day; 26h = one day + a 2h grace window.
 DEFAULT_DAILY_MAX_AGE_S = 93600
 
@@ -68,8 +68,8 @@ DEFAULT_DAILY_MAX_AGE_S = 93600
 # so it is excluded from the daily clock entirely (see evaluate_daily).
 HEALTHY_MAIN_LIVE_OUTCOMES = frozenset({"success"})
 
-# How many trailing cycles to scan for the daily check. The hourly dry-run +
-# daily live share the journal, so ~200 cycles covers well over a week — more
+# How many trailing cycles to scan for the daily check. The 6-hourly dry-run +
+# daily live share the journal, so ~200 cycles covers well over a month — more
 # than enough to find the last live run and anything that failed after it.
 DAILY_WINDOW_CYCLES = 200
 
@@ -120,7 +120,7 @@ def _is_live_attempt(cycle: dict) -> bool:
 def evaluate_heartbeat(
     reader: JournalReader, now: datetime, max_age_s: float,
 ) -> HealthResult:
-    """Is the bot writing to the journal at all (hourly dry-run cadence)?"""
+    """Is the bot writing to the journal at all (6-hourly dry-run cadence)?"""
     last = reader.latest_cycle()
     read_error = reader.stats().read_error
     if read_error:
@@ -152,7 +152,7 @@ def evaluate_daily(
     """Did the daily LIVE order cycle run recently and succeed?
 
     Scans a trailing window rather than trusting the single latest entry, so
-    the signal is durable against the hourly dry-run overwriting it. See
+    the signal is durable against the 6-hourly dry-run overwriting it. See
     ``ops/README.md`` for the two false-negative paths this closes.
     """
     cycles = reader.cycles(DAILY_WINDOW_CYCLES)  # also forces the refresh
@@ -165,7 +165,7 @@ def evaluate_daily(
     # still counted (and its failure caught below). Reconstruction cycles
     # (outcome=="reconstructed") are excluded: they only prove a PRIOR cycle's
     # open orders were reconciled, not that today's placement ran. Dry-run
-    # cycles (mode=='dry_run') are excluded entirely, so a benign hourly
+    # cycles (mode=='dry_run') are excluded entirely, so a benign 6-hourly
     # dry-run failure never pages this endpoint.
     main_live = [
         c for c in cycles

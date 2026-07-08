@@ -81,7 +81,7 @@ def is_live_cycle(cycle: dict) -> bool:
 
     ``run_live_cycle`` always writes ``orders_executed`` as a list — even an
     empty one for a signal=0 no-op or a reconstruction. Dry-run (planning-
-    only) cycles write ``None`` (or omit the field on schema v1). The hourly
+    only) cycles write ``None`` (or omit the field on schema v1). The 6-hourly
     dry-run and the daily live run share one journal, so this predicate is
     what separates 'the real order cron ran' from 'a dry-run kept the
     journal warm'.
@@ -460,7 +460,7 @@ class JournalReader:
     def latest_live_cycle(self) -> Optional[dict]:
         """Most recent cycle that placed real orders, or None.
 
-        The hourly dry-run and the daily live run share one journal, so
+        The 6-hourly dry-run and the daily live run share one journal, so
         :meth:`latest_cycle` is almost always a dry-run — a dead daily order
         cron stays invisible while dry-runs keep the journal fresh. This is
         the clock that answers 'is the real order cron still alive?'. See

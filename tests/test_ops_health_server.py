@@ -79,7 +79,7 @@ def test_heartbeat_fresh_dry_run_ok(tmp_path):
 
 def test_heartbeat_stale_fails(tmp_path):
     reader = _journal(tmp_path, [
-        _entry(ended_at=NOW - timedelta(hours=5), live=False),
+        _entry(ended_at=NOW - timedelta(hours=13), live=False),
     ])
     r = hs.evaluate_heartbeat(reader, NOW, hs.DEFAULT_HEARTBEAT_MAX_AGE_S)
     assert not r.ok and r.status_code == 503
@@ -100,7 +100,7 @@ def test_heartbeat_unreadable_journal_is_a_directory(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_daily_dry_run_only_has_no_live_cycle(tmp_path):
-    # Hourly dry-runs keep the journal warm but no live order cron ran.
+    # 6-hourly dry-runs keep the journal warm but no live order cron ran.
     reader = _journal(tmp_path, [
         _entry(ended_at=NOW - timedelta(minutes=10), live=False),
     ])
@@ -209,7 +209,7 @@ def test_daily_catches_fresh_failure_before_placement(tmp_path):
 
 
 def test_daily_dry_run_failure_does_not_page(tmp_path):
-    # The mode marker's payoff: a benign hourly DRY-RUN failure after a healthy
+    # The mode marker's payoff: a benign 6-hourly DRY-RUN failure after a healthy
     # live run must NOT page /daily (it is not a live-order failure).
     reader = _journal(tmp_path, [
         _entry(ended_at=NOW - timedelta(hours=3), outcome="success",

@@ -24,8 +24,9 @@ module.exports = {
         TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles.jsonl",
         TRADE_LAB_HEALTH_HOST: "127.0.0.1",
         TRADE_LAB_HEALTH_PORT: "7001",
-        // Heartbeat: hourly dry-run + grace. Daily: 24h + 2h grace.
-        TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "7200",
+        // Heartbeat: 6h dry-run cadence + grace = 12h (tolerates one fully
+        // missed cycle before paging). Daily: 24h + 2h grace.
+        TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "43200",
         TRADE_LAB_HEALTH_DAILY_MAX_AGE_S: "93600",
       },
       autorestart: true,

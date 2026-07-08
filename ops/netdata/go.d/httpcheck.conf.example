@@ -9,8 +9,8 @@
 # 503 when a cycle is stale or a live outcome failed, so a plain "is it 200?"
 # check doubles as a dead-man's-switch — no special logic needed on this side.
 jobs:
-  # Heartbeat: is the bot writing to the journal at all? (hourly dry-run
-  # cadence). Goes 503 when nothing has been written for ~2h.
+  # Heartbeat: is the bot writing to the journal at all? (6-hourly dry-run
+  # cadence). Goes 503 when nothing has been written for ~12h.
   - name: trade_lab_heartbeat
     url: http://127.0.0.1:7001/healthz
     timeout: 2

@@ -24,7 +24,10 @@ module.exports = {
       ],
       env: {
         TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles.jsonl",
-        MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS: "3600",
+        // Must match the dry-run heartbeat cron cadence (6h). Dashboard
+        // staleness is computed as multiples of this, so a mismatch flags a
+        // perfectly healthy bot as stale. Was 3600 (hourly cadence).
+        MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS: "21600",
       },
       autorestart: true,
       // Streamlit watches its own files; don't let pm2 also watch.

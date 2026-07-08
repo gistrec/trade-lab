@@ -28,13 +28,13 @@ job that merely "didn't run" and nobody notices.
 
 ## Two cadences ⇒ two endpoints
 
-The bot runs an **hourly dry-run** (keeps the journal warm) and a **daily
+The bot runs a **6-hourly dry-run** (keeps the journal warm) and a **daily
 live** order cycle (see `execution/README.md`). One probe cannot separate
 "the whole bot died" from "today's real order cron didn't fire", so:
 
 | Endpoint | Question | 200 when | 503 when |
 |---|---|---|---|
-| `GET /healthz` | heartbeat | a cycle within `HEARTBEAT_MAX_AGE_S` (default 2h) | journal unreadable/empty, or no cycle in ~2h |
+| `GET /healthz` | heartbeat | a cycle within `HEARTBEAT_MAX_AGE_S` (default 12h) | journal unreadable/empty, or no cycle in ~12h |
 | `GET /healthz/daily` | daily live health | last **main** live cycle (identified by `context.mode=='live'`; reconstruction excluded) within `DAILY_MAX_AGE_S` (26h) with outcome `success` | no live cycle in window, stale >26h, or live outcome not `success` — including a live run that failed even before placing an order (see note) |
 | `GET /` | human summary | always (informational, not an alarm target) | — |
 
@@ -55,7 +55,7 @@ Every cycle carries a durable `context.mode` (`'live'` / `'dry_run'`), set in
    but only proves a *prior* cycle's orders were reconciled, so it is
    **excluded** from the daily clock.
 
-Because the marker is exact, a benign hourly **dry-run** failure
+Because the marker is exact, a benign 6-hourly **dry-run** failure
 (`mode=='dry_run'`) never pages `/daily` — no false positive. (Pre-marker
 journal entries fall back to the `orders_executed` heuristic, which cannot see
 a fail-before-placement live cycle; this only affects history written before
@@ -68,7 +68,7 @@ the marker shipped.)
 | `TRADE_LAB_MONITORING_JOURNAL_PATH` | `data/journal/cycles.jsonl` | journal to read (shared with the dashboard) |
 | `TRADE_LAB_HEALTH_HOST` | `127.0.0.1` | bind address (localhost only — Netdata is on-host) |
 | `TRADE_LAB_HEALTH_PORT` | `7001` | listen port |
-| `TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S` | `7200` | heartbeat staleness limit |
+| `TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S` | `43200` | heartbeat staleness limit |
 | `TRADE_LAB_HEALTH_DAILY_MAX_AGE_S` | `93600` | daily-live staleness limit |
 
 ## Run it

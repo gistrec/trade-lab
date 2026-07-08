@@ -12,7 +12,7 @@ Configuration via environment variables:
   the bot writes to. Mounted read-only into this process via Unix
   permissions (group-readable to the ``monitoring`` user only).
 * ``MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS`` — used to bucket
-  staleness. 3600 (one hour) for daily candles is a generous floor;
+  staleness. 21600 (6h) for daily candles is a generous floor;
   a true daily run misses ≥1 day if STALE triggers.
 * ``MONITORING_REFRESH_SECONDS`` — HTML meta-refresh interval. 30s
   default; the underlying data only updates once per bot cycle, so
@@ -53,10 +53,10 @@ JOURNAL_PATH = os.environ.get(
     "data/journal/cycles.jsonl",
 )
 EXPECTED_INTERVAL_S = int(
-    os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "3600")
+    os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "21600")
 )
 REFRESH_SECONDS = int(os.environ.get("MONITORING_REFRESH_SECONDS", "30"))
-# The daily `paper-place-orders` cron is the LIVE order path; the hourly
+# The daily `paper-place-orders` cron is the LIVE order path; the 6-hourly
 # dry-run shares the same journal. This is the expected spacing of LIVE
 # cycles (one calendar day) used to flag a silently-dead order cron that
 # the overall (dry-run-dominated) staleness cannot see.
@@ -123,7 +123,7 @@ def _cycle_context(cycle: Optional[dict]) -> dict:
 def _cycle_mode(cycle: Optional[dict]) -> str:
     """'LIVE' if the cycle placed real orders, else 'DRY'.
 
-    The journal is dominated ~24:1 by hourly dry-runs, so the operator needs
+    The journal is dominated ~4:1 by 6-hourly dry-runs, so the operator needs
     to know at a glance whether what they are looking at is the real daily
     rebalance or a planning-only heartbeat.
     """
@@ -279,7 +279,7 @@ def _render_status(reader: JournalReader) -> None:
         if mode == "DRY":
             st.caption(
                 "Latest journal cycle is a **DRY-RUN** (planning only) — the "
-                "hourly heartbeat. Real orders run once daily; see 'Live "
+                "6-hourly heartbeat. Real orders run once daily; see 'Live "
                 "order cron' below for the last REAL cycle."
             )
         else:
@@ -357,7 +357,7 @@ def _render_live_cron_health(reader: JournalReader) -> None:
     """Freshness clock for the LIVE order cron specifically.
 
     The overall Staleness metric buckets on the last cycle of *any* type, so
-    the hourly dry-run keeps it FRESH even if the daily `paper-place-orders`
+    the 6-hourly dry-run keeps it FRESH even if the daily `paper-place-orders`
     cron has been dead for days. This surfaces the last REAL-order cycle on
     its own ~daily clock and fires loud when overdue.
     """
@@ -378,7 +378,7 @@ def _render_live_cron_health(reader: JournalReader) -> None:
     cols[2].metric("LIVE cycle", (live.get("cycle_id") or "?")[:8])
     st.caption(
         f"Last LIVE cycle ended at {_humanize_iso(ended)}. The Staleness "
-        f"metric above tracks the hourly dry-run heartbeat, not this."
+        f"metric above tracks the 6-hourly dry-run heartbeat, not this."
     )
 
     dt = parse_iso(ended)
@@ -390,7 +390,7 @@ def _render_live_cron_health(reader: JournalReader) -> None:
                 f"{_humanize_relative(ended)} "
                 f"(threshold = {STALE_MULTIPLIER:g}× expected "
                 f"{EXPECTED_LIVE_INTERVAL_S}s). "
-                f"The hourly dry-run may be masking a dead daily cron; "
+                f"The 6-hourly dry-run may be masking a dead daily cron; "
                 f"check the `paper-place-orders` cron on the VPS."
             )
 
@@ -690,8 +690,8 @@ def _commit_link(sha: str) -> str:
 def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
     """Distinct signal *days* since the most recent OPEN gate.
 
-    Counts dates (signal ``asof``), not cycles: with the hourly
-    dry-run sharing the journal, one closed day produces ~24 cycles
+    Counts dates (signal ``asof``), not cycles: with the 6-hourly
+    dry-run sharing the journal, one closed day produces ~4 cycles
     and a per-cycle count overstates by that factor. Cycles without a
     signal (failed, reconstruction) say nothing about the gate and are
     skipped. Walks newest-first across up to 500 cycles; returns None
@@ -956,7 +956,7 @@ def _unfilled_order_count(cycle: dict) -> Optional[int]:
     ``None`` to ``[]``, which cannot distinguish "no execution attempted"
     from "execution attempted, nothing closed" — so counting off it fires
     a false "planned orders did not fully close" warning on every dry-run
-    cycle (the hourly dry-run shares the monitored journal with the daily
+    cycle (the 6-hourly dry-run shares the monitored journal with the daily
     live run). Gate on the raw field: return ``None`` for planning-only
     cycles so the caller suppresses the partial-fill warning.
     """

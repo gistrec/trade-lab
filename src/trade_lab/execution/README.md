@@ -237,17 +237,19 @@ is refused unconditionally.
 
 00:05 UTC gives the daily candle a few minutes to settle in
 Binance's API before the strategy reads it. Same minute pattern as
-the hourly dry-run cron — they don't conflict because they share
+the 6-hourly dry-run cron — they don't conflict because they share
 the journal file but use different state and `clientOrderId`
 namespaces (`tsmom_` for both production and dry-run, `smoke_` for
 smoke tests).
 
-### Why dry-run is hourly but live is daily
+### Why dry-run is 6-hourly but live is daily
 
 Dry-run can run as often as you like — it never sends an order.
-Hourly gives monitoring a fresh staleness signal every hour, surfaces
-testnet balance wipes or manual deposits within the hour, and catches
-bot failures (network, revoked key) before the next live cycle.
+Every 6h gives monitoring a fresh staleness signal, surfaces testnet
+balance wipes or manual deposits within a few hours, and catches bot
+failures (network, revoked key) before the next live cycle. (The
+cadence was hourly; the freshness thresholds in `ops/` and the
+dashboard are pinned to this interval and must move with it.)
 
 Live placement is exactly daily, no more often. The backtest computed
 the signal at daily resolution against daily candles; placing orders
