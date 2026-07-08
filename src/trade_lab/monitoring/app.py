@@ -805,12 +805,16 @@ def _signal_history_figure(
 
 # Trade-event marker styling, keyed by ``TradeEvent.kind``. Shared by both
 # time-series charts so a buy-only "entry", a sell-only "exit", and a mixed
-# "rebalance" read identically on the equity and drift curves. Order fixes the
-# legend order regardless of which kinds happen to appear in the window.
+# "rebalance" read identically on the equity and drift curves. ``glyph`` is the
+# unicode marker echoed in the hover header and the caption (single source, so
+# the legend-less chart stays self-explanatory). Order fixes marker draw order.
 _TRADE_MARKER_STYLE: dict[str, dict[str, str]] = {
-    "entry": {"symbol": "triangle-up", "color": "#2ca02c", "name": "entry (buy)"},
-    "exit": {"symbol": "triangle-down", "color": "#d62728", "name": "exit (sell)"},
-    "rebalance": {"symbol": "diamond", "color": "#7f7f7f", "name": "rebalance"},
+    "entry": {"symbol": "triangle-up", "color": "#2ca02c",
+              "name": "entry (buy)", "glyph": "▲"},
+    "exit": {"symbol": "triangle-down", "color": "#d62728",
+             "name": "exit (sell)", "glyph": "▼"},
+    "rebalance": {"symbol": "diamond", "color": "#7f7f7f",
+                  "name": "rebalance", "glyph": "◆"},
 }
 _TRADE_MARKER_ORDER = ("entry", "exit", "rebalance")
 
@@ -846,6 +850,11 @@ def _timeseries_figure(
         x=xs, y=ys, mode="lines+markers",
         line=dict(color=color, width=2), fill=fill,
         showlegend=False,
+        # Own hovertemplate + empty <extra>: otherwise plotly labels the line
+        # "trace 0" in the tooltip. y_title carries the metric + unit.
+        hovertemplate=(
+            "%{x|%Y-%m-%d %H:%M} UTC<br>" + y_title + ": %{y:,.2f}<extra></extra>"
+        ),
     ))
     if hline is not None:
         fig.add_hline(
@@ -891,30 +900,37 @@ def _timeseries_figure(
                 name=style["name"],
                 hovertext=[hov for _, hov in group],
                 hovertemplate="%{hovertext}<extra></extra>",
-                showlegend=True,
+                showlegend=False,
             ))
     fig.update_layout(
         height=320, margin=dict(t=10, b=10, l=10, r=10),
-        hovermode="x unified",
+        # "closest" (not "x unified"): each element gets its own clean tooltip,
+        # so hovering a marker shows only its trade detail — no line value or
+        # trace label bleeding in. No legend; the caption + glyphs explain it.
+        hovermode="closest",
+        showlegend=False,
         yaxis_title=y_title, xaxis_title="date (UTC)",
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="right", x=1,
-        ),
     )
     return fig
 
 
 def _trade_hover(ev: "TradeEvent", quote: str) -> str:
-    """One trade marker's hover text: header + per-symbol signed notional + net.
+    """One trade marker's hover text: bold header, per-symbol rows, bold net.
 
-    Buys are positive, sells negative, quoted in ``quote``; lines are joined
-    with plotly's ``<br>`` so the tooltip renders multi-line.
+    Layout keeps the three parts visually distinct so the net total does not
+    read as just another sold asset: a bold ``glyph + kind`` header, a plain
+    date line, one row per symbol (signed: buy +, sell -), a blank spacer,
+    then the bold net. Lines join with plotly's ``<br>``.
     """
-    lines = [f"<b>{ev.kind}</b> · {ev.at:%Y-%m-%d %H:%M} UTC"]
+    glyph = _TRADE_MARKER_STYLE.get(ev.kind, {}).get("glyph", "")
+    lines = [
+        f"<b>{glyph} {ev.kind}</b>",
+        f"{ev.at:%Y-%m-%d %H:%M} UTC",
+    ]
     for symbol, signed in ev.per_symbol:
-        lines.append(f"{symbol} {signed:+,.2f} {quote}")
-    lines.append(f"net {ev.net_quote:+,.2f} {quote}")
+        lines.append(f"{symbol}  {signed:+,.2f}")
+    lines.append("")  # blank spacer so the net stands apart from the rows
+    lines.append(f"<b>net  {ev.net_quote:+,.2f} {quote}</b>")
     return "<br>".join(lines)
 
 
@@ -1027,8 +1043,10 @@ def _render_portfolio(reader: JournalReader) -> None:
     # classified entry (all-buy) / exit (all-sell) / rebalance (both sides).
     events = trade_events(window)
     markers = [(ev.at, ev.kind, _trade_hover(ev, quote)) for ev in events]
+    # Rendered on its own caption line under each chart (no legend on the
+    # figure), so the marker key stays separate from the chart's own note.
     marker_note = (
-        " Markers flag cycles that filled: ▲ entry (all-buy), ▼ exit "
+        "Markers flag cycles that filled: ▲ entry (all-buy), ▼ exit "
         "(all-sell), ◆ rebalance (both sides) — hover for per-symbol amounts."
         if markers else ""
     )
@@ -1044,9 +1062,10 @@ def _render_portfolio(reader: JournalReader) -> None:
             ),
             width="stretch",
         )
-        cap = (exec_note + marker_note).strip()
-        if cap:
-            st.caption(cap)
+        if exec_note.strip():
+            st.caption(exec_note.strip())
+        if marker_note:
+            st.caption(marker_note)
     else:
         st.info("Not enough successful cycles yet to chart equity.")
 
@@ -1065,9 +1084,10 @@ def _render_portfolio(reader: JournalReader) -> None:
         st.caption(
             "Sum of |target − current| per cycle. By design a sawtooth that "
             "resets on the monthly rebalance (the drifted-weight profile from "
-            "C3); a steady monotonic climb would flag a problem."
-            + marker_note + exec_note
+            "C3); a steady monotonic climb would flag a problem." + exec_note
         )
+        if marker_note:
+            st.caption(marker_note)
     else:
         st.info("Not enough successful cycles yet to chart drift.")
 
