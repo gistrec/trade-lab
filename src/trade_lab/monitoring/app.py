@@ -807,7 +807,7 @@ def _signal_history_figure(
 # time-series charts so a buy-only "entry", a sell-only "exit", and a mixed
 # "rebalance" read identically on the equity and drift curves. ``glyph`` is the
 # unicode marker echoed in the hover header and the caption (single source, so
-# the legend-less chart stays self-explanatory). Order fixes marker draw order.
+# the legend-less chart stays self-explanatory).
 _TRADE_MARKER_STYLE: dict[str, dict[str, str]] = {
     "entry": {"symbol": "triangle-up", "color": "#2ca02c",
               "name": "entry (buy)", "glyph": "▲"},
@@ -816,7 +816,6 @@ _TRADE_MARKER_STYLE: dict[str, dict[str, str]] = {
     "rebalance": {"symbol": "diamond", "color": "#7f7f7f",
                   "name": "rebalance", "glyph": "◆"},
 }
-_TRADE_MARKER_ORDER = ("entry", "exit", "rebalance")
 
 
 def _timeseries_figure(
@@ -837,24 +836,53 @@ def _timeseries_figure(
     when live order execution began. It is only drawn when it falls inside the
     plotted time range, so an off-window marker never adds a stray edge line.
 
-    ``markers`` overlays trade events as ``(at, kind, hovertext)`` triples,
-    styled by :data:`_TRADE_MARKER_STYLE`. Each marker sits on the curve's own
-    value at that instant (a trade event shares its cycle's timestamp), so a
-    marker whose ``at`` is not a plotted point — e.g. a cycle whose equity or
-    drift did not parse — is dropped rather than floated at zero.
+    ``markers`` are trade events as ``(at, kind, hovertext)`` triples, styled by
+    :data:`_TRADE_MARKER_STYLE`. They are NOT a separate overlay trace: each is
+    folded into the single line trace as a per-point style override on the
+    cycle it shares a timestamp with. That avoids two hoverable points stacked
+    at the same x — with an overlay, the line's own dense vertices win "closest"
+    hover and the marker only responds at its exact centre. As one trace, the
+    enlarged trade point owns a real hover hitbox. An event whose ``at`` is not
+    a plotted point (e.g. a cycle whose value did not parse) is dropped.
     """
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
+    n = len(points)
+    # Per-point marker style: small plain dots on ordinary cycles, an enlarged
+    # coloured glyph on trade cycles. Per-point hovertext too, so every cycle
+    # shows its value and trade cycles show the trade detail instead.
+    sizes = [5] * n
+    symbols = ["circle"] * n
+    m_colors = [color] * n
+    line_widths = [0.0] * n
+    hovertexts = [
+        f"{ts:%Y-%m-%d %H:%M} UTC<br>{y_title}: {y:,.2f}"
+        for ts, y in points
+    ]
+    if markers:
+        idx_by_x = {x: i for i, x in enumerate(xs)}
+        for at, kind, hov in markers:
+            i = idx_by_x.get(at)
+            if i is None or kind not in _TRADE_MARKER_STYLE:
+                continue
+            style = _TRADE_MARKER_STYLE[kind]
+            sizes[i] = 15
+            symbols[i] = style["symbol"]
+            m_colors[i] = style["color"]
+            line_widths[i] = 1.5
+            hovertexts[i] = hov
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=xs, y=ys, mode="lines+markers",
         line=dict(color=color, width=2), fill=fill,
         showlegend=False,
-        # Own hovertemplate + empty <extra>: otherwise plotly labels the line
-        # "trace 0" in the tooltip. y_title carries the metric + unit.
-        hovertemplate=(
-            "%{x|%Y-%m-%d %H:%M} UTC<br>" + y_title + ": %{y:,.2f}<extra></extra>"
+        marker=dict(
+            size=sizes, symbol=symbols, color=m_colors,
+            line=dict(color="white", width=line_widths),
         ),
+        hovertext=hovertexts,
+        # Empty <extra> drops the "trace 0" box; hovertext carries the label.
+        hovertemplate="%{hovertext}<extra></extra>",
     ))
     if hline is not None:
         fig.add_hline(
@@ -880,31 +908,6 @@ def _timeseries_figure(
                 xanchor="left", yanchor="bottom", yshift=6,
                 font=dict(color="#d62728", size=12),
             )
-    if markers:
-        # A trade event shares its cycle's timestamp, so the marker's y is the
-        # curve's value at that instant — look it up rather than recompute.
-        y_by_x = {p[0]: p[1] for p in points}
-        for kind in _TRADE_MARKER_ORDER:
-            group = [
-                (at, hov) for (at, k, hov) in markers
-                if k == kind and at in y_by_x
-            ]
-            if not group:
-                continue
-            style = _TRADE_MARKER_STYLE[kind]
-            fig.add_trace(go.Scatter(
-                x=[at for at, _ in group],
-                y=[y_by_x[at] for at, _ in group],
-                mode="markers",
-                marker=dict(
-                    symbol=style["symbol"], color=style["color"],
-                    size=12, line=dict(color="white", width=1),
-                ),
-                name=style["name"],
-                hovertext=[hov for _, hov in group],
-                hovertemplate="%{hovertext}<extra></extra>",
-                showlegend=False,
-            ))
     fig.update_layout(
         # Taller top margin so the vline label (drawn just above the frame)
         # is not clipped to half-height.
