@@ -871,10 +871,13 @@ def _timeseries_figure(
             line=dict(color="#d62728", dash="dash", width=2),
         )
         if vline_label:
+            # Sit the label in the top margin (yshift lifts it clear of the
+            # plot frame). Needs a taller top margin below or it clips — the
+            # default t=10 hid the upper half of the text.
             fig.add_annotation(
                 x=vline, xref="x", y=1, yref="paper",
                 text=vline_label, showarrow=False,
-                xanchor="left", yanchor="bottom",
+                xanchor="left", yanchor="bottom", yshift=6,
                 font=dict(color="#d62728", size=12),
             )
     if markers:
@@ -903,7 +906,9 @@ def _timeseries_figure(
                 showlegend=False,
             ))
     fig.update_layout(
-        height=320, margin=dict(t=10, b=10, l=10, r=10),
+        # Taller top margin so the vline label (drawn just above the frame)
+        # is not clipped to half-height.
+        height=320, margin=dict(t=34, b=10, l=10, r=10),
         # "closest" (not "x unified"): each element gets its own clean tooltip,
         # so hovering a marker shows only its trade detail — no line value or
         # trace label bleeding in. No legend; the caption + glyphs explain it.
