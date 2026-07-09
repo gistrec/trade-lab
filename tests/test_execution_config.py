@@ -114,6 +114,47 @@ def test_mainnet_allowed_with_both_flags_true(monkeypatch):
     assert cfg.allow_mainnet is True
 
 
+def test_mainnet_live_orders_defaults_false(monkeypatch):
+    """Two flags unlock read paths only — the live-orders flag must stay
+    False unless set explicitly. The CLI keys its order gate on it."""
+    env = {
+        **_DEFAULT_ENV,
+        "TRADE_LAB_PAPER_SANDBOX": "false",
+        "TRADE_LAB_PAPER_ALLOW_MAINNET": "true",
+    }
+    _apply_env(monkeypatch, env,
+               clear=["TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS"])
+    cfg = load_paper_config()
+    assert cfg.mainnet_live_orders is False
+
+
+def test_mainnet_live_orders_with_three_flags(monkeypatch):
+    """The full three-flag mainnet order config parses cleanly."""
+    env = {
+        **_DEFAULT_ENV,
+        "TRADE_LAB_PAPER_SANDBOX": "false",
+        "TRADE_LAB_PAPER_ALLOW_MAINNET": "true",
+        "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS": "true",
+    }
+    _apply_env(monkeypatch, env)
+    cfg = load_paper_config()
+    assert cfg.sandbox is False
+    assert cfg.allow_mainnet is True
+    assert cfg.mainnet_live_orders is True
+
+
+def test_live_orders_flag_on_sandbox_config_raises(monkeypatch):
+    """live-orders flag on a sandbox config = copy-pasted mainnet env
+    file — refuse the inconsistent combination instead of ignoring it."""
+    env = {
+        **_DEFAULT_ENV,
+        "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS": "true",
+    }
+    _apply_env(monkeypatch, env)
+    with pytest.raises(PaperConfigError, match="MAINNET_LIVE_ORDERS"):
+        load_paper_config()
+
+
 def test_kraken_with_sandbox_true_raises(monkeypatch):
     """Kraken has no CCXT sandbox — sandbox=true must refuse explicitly
     (CLAUDE.md hard rule), never rely on CCXT to crash or ignore it."""

@@ -159,13 +159,101 @@ def _args(
 
 
 def test_refuses_mainnet(monkeypatch, tmp_path):
+    """Two flags without MAINNET_LIVE_ORDERS=true → refuse."""
     _patch_config_and_broker(
         monkeypatch,
         config=_config(sandbox=False),
         exchange=_FakeExchange(),
     )
-    with pytest.raises(SystemExit, match="mainnet"):
+    with pytest.raises(SystemExit, match="MAINNET_LIVE_ORDERS"):
         cmd_paper_place_test_order(_args(tmp_path))
+
+
+def _mainnet_live_config() -> PaperConfig:
+    return PaperConfig(
+        exchange_id="binance", sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=True, mainnet_live_orders=True,
+        quote_currency="USDT", basket=("BTC", "ETH"),
+        request_timeout_ms=5000,
+    )
+
+
+def test_mainnet_smoke_notional_capped(monkeypatch, tmp_path):
+    """Even with all three flags, a fat-fingered --notional must never
+    reach the exchange through the smoke path."""
+    exch = _FakeExchange()
+    _patch_config_and_broker(
+        monkeypatch, config=_mainnet_live_config(), exchange=exch,
+    )
+    with pytest.raises(SystemExit, match="safety cap"):
+        cmd_paper_place_test_order(_args(tmp_path, notional=26.0))
+    assert exch.create_order_calls == []
+
+
+def test_mainnet_smoke_runs_with_three_flags(monkeypatch, tmp_path):
+    """The deliberate go-live validation path: three flags + tiny
+    notional → the order is placed."""
+    exch = _FakeExchange()
+    _patch_config_and_broker(
+        monkeypatch, config=_mainnet_live_config(), exchange=exch,
+    )
+    cmd_paper_place_test_order(_args(tmp_path, notional=20.0))
+    assert len(exch.create_order_calls) == 1
+
+
+def test_nan_notional_refused(monkeypatch, tmp_path):
+    """argparse type=float accepts 'nan', and NaN slides through every
+    `>` comparison — including the mainnet cap. Must refuse up front."""
+    exch = _FakeExchange()
+    _patch_config_and_broker(
+        monkeypatch, config=_mainnet_live_config(), exchange=exch,
+    )
+    with pytest.raises(SystemExit, match="finite positive"):
+        cmd_paper_place_test_order(_args(tmp_path, notional=float("nan")))
+    assert exch.create_order_calls == []
+
+
+def test_smoke_journal_env_guard(monkeypatch, tmp_path):
+    """A smoke log holding the other environment's records refuses
+    BEFORE any order — same guard as the cycle commands."""
+    journal_path = tmp_path / "smoke_log.jsonl"
+    journal_path.write_text(json.dumps({
+        "kind": "smoke_test",
+        "context": {"mode": "smoke_test", "exchange": "binance",
+                    "sandbox": True},
+    }) + "\n")
+
+    exch = _FakeExchange()
+    _patch_config_and_broker(
+        monkeypatch, config=_mainnet_live_config(), exchange=exch,
+    )
+    with pytest.raises(SystemExit, match="never share a journal"):
+        cmd_paper_place_test_order(
+            _args(tmp_path, notional=20.0, journal=str(journal_path)),
+        )
+    assert exch.create_order_calls == []
+
+
+def test_smoke_journal_record_carries_context(monkeypatch, tmp_path):
+    """The appended record duplicates env fields under 'context' so
+    assert_journal_env can see smoke records."""
+    from trade_lab.execution.journal import (
+        JournalEnvMismatch, assert_journal_env,
+    )
+
+    exch = _FakeExchange()
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+    journal_path = tmp_path / "smoke_log.jsonl"
+    cmd_paper_place_test_order(_args(tmp_path, journal=str(journal_path)))
+
+    record = json.loads(journal_path.read_text().splitlines()[0])
+    assert record["context"] == {
+        "mode": "smoke_test", "exchange": "binance", "sandbox": True,
+    }
+    # And the guard actually keys on it:
+    assert_journal_env(journal_path, exchange_id="binance", sandbox=True)
+    with pytest.raises(JournalEnvMismatch):
+        assert_journal_env(journal_path, exchange_id="binance", sandbox=False)
 
 
 # ---------------------------------------------------------------------------

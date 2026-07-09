@@ -810,14 +810,25 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     notional, print the plan. NO orders sent.
     """
     from .execution import (
-        Broker, BrokerError, JournalWriter, load_paper_config,
-        PaperConfigError, print_dry_run, run_dry_cycle,
+        Broker, BrokerError, JournalEnvMismatch, JournalWriter,
+        PaperConfigError, assert_journal_env, load_paper_config,
+        print_dry_run, run_dry_cycle,
     )
 
     try:
         config = load_paper_config()
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
+
+    if args.journal:
+        try:
+            assert_journal_env(
+                args.journal, exchange_id=config.exchange_id,
+                sandbox=config.sandbox,
+            )
+        except JournalEnvMismatch as exc:
+            raise SystemExit(f"REFUSED: {exc}")
+
     try:
         broker = Broker.connect(config)
     except BrokerError as exc:
@@ -830,24 +841,33 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     print_dry_run(result, quote=config.quote_currency)
 
 
+# A mainnet smoke test moves real money by design (tiny, deliberate,
+# pre-go-live validation of the order path). Cap it so a fat-fingered
+# --notional can never place a large real order through the smoke path.
+MAINNET_SMOKE_MAX_NOTIONAL = 25.0
+
+
 def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
     """Place one test order through orders.py, bypassing strategy.
 
-    Smoke test for the CCXT integration on testnet. Independent of
-    whether TSMOM is currently producing a non-zero ladder — exercises
-    the order-placement plumbing directly. Refuses to run against
-    mainnet even with TRADE_LAB_PAPER_ALLOW_MAINNET=true.
+    Smoke test for the CCXT integration. Independent of whether TSMOM
+    is currently producing a non-zero ladder — exercises the
+    order-placement plumbing directly. On mainnet it requires the same
+    three-flag gate as ``paper-place-orders`` and caps ``--notional``
+    at :data:`MAINNET_SMOKE_MAX_NOTIONAL` quote units.
     """
     from datetime import datetime, timezone
     import json
+    import math
     from pathlib import Path
 
     from .execution import (
-        Broker, BrokerError, load_paper_config, PaperConfigError,
+        Broker, BrokerError, JournalEnvMismatch, PaperConfigError,
+        assert_journal_env, load_paper_config,
     )
     from .execution.clientorder import normalize_symbol
     from .execution.delta import OrderIntent
-    from .execution.order_state import OrderStateStore
+    from .execution.order_state import OrderStateEnvMismatch, OrderStateStore
     from .execution.orders import place_order
 
     try:
@@ -855,11 +875,41 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
 
-    if not config.sandbox:
+    # Validate the operator input once, up front. argparse's type=float
+    # happily accepts 'nan' and 'inf', and NaN slides through every `>`
+    # comparison downstream — including the mainnet cap below.
+    notional = float(args.notional)
+    if not math.isfinite(notional) or notional <= 0:
         raise SystemExit(
-            "Smoke test refuses to run against mainnet. "
-            "Set TRADE_LAB_PAPER_SANDBOX=true."
+            f"REFUSED: --notional must be a finite positive number, "
+            f"got {args.notional!r}."
         )
+
+    if not config.sandbox:
+        if not config.mainnet_live_orders:
+            raise SystemExit(
+                "REFUSED: mainnet smoke test requires "
+                "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true on top of the "
+                "two-flag gate. It places a REAL order with real money."
+            )
+        if notional > MAINNET_SMOKE_MAX_NOTIONAL:
+            raise SystemExit(
+                f"REFUSED: mainnet smoke test notional "
+                f"{notional:.2f} exceeds the safety cap of "
+                f"{MAINNET_SMOKE_MAX_NOTIONAL:.2f} {config.quote_currency}. "
+                f"The smoke path is for tiny go-live validation orders only."
+            )
+
+    # Same environment guard as the cycle commands: a smoke log already
+    # holding the other environment's records refuses BEFORE any order.
+    if args.journal:
+        try:
+            assert_journal_env(
+                args.journal, exchange_id=config.exchange_id,
+                sandbox=config.sandbox,
+            )
+        except JournalEnvMismatch as exc:
+            raise SystemExit(f"REFUSED: {exc}")
 
     try:
         broker = Broker.connect(config)
@@ -871,7 +921,6 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
     except BrokerError as exc:
         raise SystemExit(f"Could not fetch ticker for {args.symbol}: {exc}")
 
-    notional = float(args.notional)
     base_amount = notional / price
 
     # Sub-minimum pre-flight: replicate the constraint check from
@@ -911,7 +960,20 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
         price_used=price,
         reason="smoke_test",
     )
-    state = OrderStateStore(args.state)
+    state_path = args.state or (
+        "data/state/orders.json" if config.sandbox
+        else "data/state/orders_mainnet.json"
+    )
+    try:
+        state = OrderStateStore(
+            state_path,
+            expected_env={
+                "exchange": config.exchange_id, "sandbox": config.sandbox,
+            },
+        )
+        state.all_entries()  # force the env check before placing anything
+    except OrderStateEnvMismatch as exc:
+        raise SystemExit(f"REFUSED: {exc}")
 
     print(f"Smoke test: {args.side.upper()} {args.symbol} "
           f"for {notional:.2f} {config.quote_currency}")
@@ -949,6 +1011,14 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
             "asof": datetime.now(timezone.utc).isoformat(),
             "exchange": config.exchange_id,
             "sandbox": config.sandbox,
+            # Duplicate the env fields under "context" in the Cycle shape
+            # so assert_journal_env can see smoke records too — top-level
+            # fields stay for older readers of the smoke log.
+            "context": {
+                "mode": "smoke_test",
+                "exchange": config.exchange_id,
+                "sandbox": config.sandbox,
+            },
             "result": result.to_dict(),
         }
         path = Path(args.journal)
@@ -961,16 +1031,18 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
 def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     """Production daily cycle: reconstruct, plan, place real orders, journal.
 
-    Hard-refuses to run when ``sandbox=false`` — even with
-    ``TRADE_LAB_PAPER_ALLOW_MAINNET=true``. Mainnet migration is a
-    deliberate engineering step (Kraken account, market-constraint
-    validation, dedicated review — see CLAUDE.md), not a flag flip;
-    this command runs under cron where a printed warning protects
-    nobody.
+    Mainnet requires THREE flags: ``TRADE_LAB_PAPER_SANDBOX=false`` +
+    ``TRADE_LAB_PAPER_ALLOW_MAINNET=true`` (read paths) +
+    ``TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true`` (this command). The
+    command runs under cron where a printed warning protects nobody, so
+    each missing flag is a hard exit before the broker is constructed.
+    Journal and state files are environment-checked so testnet and
+    mainnet runs can never interleave in the same files.
     """
     from .execution import (
-        Broker, BrokerError, JournalWriter, load_paper_config,
-        OrderStateStore, PaperConfigError, run_live_cycle,
+        Broker, BrokerError, JournalEnvMismatch, JournalWriter,
+        OrderStateEnvMismatch, OrderStateStore, PaperConfigError,
+        assert_journal_env, load_paper_config, run_live_cycle,
     )
 
     try:
@@ -978,13 +1050,34 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
 
-    if not config.sandbox:
+    if not config.sandbox and not config.mainnet_live_orders:
         raise SystemExit(
-            "REFUSED: paper-place-orders does not support mainnet order "
-            "placement, even with TRADE_LAB_PAPER_ALLOW_MAINNET=true. "
-            "Mainnet migration requires a dedicated code path and review "
-            "(see CLAUDE.md). Set TRADE_LAB_PAPER_SANDBOX=true."
+            "REFUSED: mainnet order placement is disabled. SANDBOX=false + "
+            "ALLOW_MAINNET=true only unlock read paths (paper-status, "
+            "paper-dry-run); placing real orders additionally requires "
+            "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true. Complete the mainnet "
+            "dry-run observation period before enabling it "
+            "(see src/trade_lab/execution/README.md)."
         )
+
+    try:
+        assert_journal_env(
+            args.journal, exchange_id=config.exchange_id,
+            sandbox=config.sandbox,
+        )
+    except JournalEnvMismatch as exc:
+        raise SystemExit(f"REFUSED: {exc}")
+
+    state_path = args.state or (
+        "data/state/orders.json" if config.sandbox
+        else "data/state/orders_mainnet.json"
+    )
+    expected_env = {"exchange": config.exchange_id, "sandbox": config.sandbox}
+    try:
+        state = OrderStateStore(state_path, expected_env=expected_env)
+        state.all_entries()  # force the env check before any exchange call
+    except OrderStateEnvMismatch as exc:
+        raise SystemExit(f"REFUSED: {exc}")
 
     try:
         broker = Broker.connect(config)
@@ -992,7 +1085,6 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         raise SystemExit(f"Broker connection failed: {exc}")
 
     journal = JournalWriter(args.journal)
-    state = OrderStateStore(args.state)
 
     result = run_live_cycle(
         broker,
@@ -1291,38 +1383,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_xs.set_defaults(func=cmd_xsmom)
 
+    def _add_env_file_flag(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--env-file", dest="env_file", default=None,
+            help="Per-environment dotenv file: .env.testnet (default) or "
+                 ".env.mainnet. The testnet/mainnet switch. A missing "
+                 "file is an error, not a silent fallback; the file "
+                 "overrides ambient shell vars.",
+        )
+
     p_ps = sub.add_parser(
         "paper-status",
         help="Connect to the configured exchange (CCXT) and print live balance.",
     )
+    _add_env_file_flag(p_ps)
     p_ps.set_defaults(func=cmd_paper_status)
 
     p_pd = sub.add_parser(
         "paper-dry-run",
         help="Compute the deployable signal + plan orders WITHOUT sending them.",
     )
+    _add_env_file_flag(p_pd)
     p_pd.add_argument("--candles", type=int, default=400,
                        help="Daily candles fetched per asset (default 400).")
     p_pd.add_argument(
         "--journal", default=None,
         help="Path to append-only JSON Lines journal. If set, one Cycle entry "
-             "is written per call. Read-only consumer: monitoring dashboard.",
+             "is written per call. Read-only consumer: monitoring dashboard. "
+             "One journal per environment — never share between testnet and "
+             "mainnet (enforced).",
     )
     p_pd.set_defaults(func=cmd_paper_dry_run)
 
     p_smoke = sub.add_parser(
         "paper-place-test-order",
         help="Place one test order via orders.py, bypassing strategy. "
-             "Smoke test for the CCXT integration on testnet.",
+             "Smoke test for the CCXT integration.",
     )
+    _add_env_file_flag(p_smoke)
     p_smoke.add_argument("--symbol", required=True,
                           help='Trading pair, e.g. "BTC/USDT".')
     p_smoke.add_argument("--side", required=True, choices=["buy", "sell"],
                           help="Order side.")
     p_smoke.add_argument("--notional", type=float, required=True,
                           help="Order size in quote-currency units (e.g. USDT).")
-    p_smoke.add_argument("--state", default="data/state/orders.json",
-                          help="Path to order-state JSON (default: data/state/orders.json).")
+    p_smoke.add_argument("--state", default=None,
+                          help="Path to order-state JSON (default: "
+                               "data/state/orders.json on testnet, "
+                               "data/state/orders_mainnet.json on mainnet).")
     p_smoke.add_argument("--journal", default=None,
                           help="Optional: append the result as a JSON line to this "
                                "smoke-test log file (separate from cycles.jsonl).")
@@ -1334,10 +1442,14 @@ def build_parser() -> argparse.ArgumentParser:
         "paper-place-orders",
         help="Production daily cycle: signal -> plan -> place real orders -> journal.",
     )
+    _add_env_file_flag(p_live)
     p_live.add_argument("--journal", required=True,
-                         help="Path to cycles.jsonl (one Cycle entry per run).")
-    p_live.add_argument("--state", default="data/state/orders.json",
-                         help="Path to order-state JSON (default: data/state/orders.json).")
+                         help="Path to cycles.jsonl (one Cycle entry per run). "
+                              "One journal per environment (enforced).")
+    p_live.add_argument("--state", default=None,
+                         help="Path to order-state JSON (default: "
+                              "data/state/orders.json on testnet, "
+                              "data/state/orders_mainnet.json on mainnet).")
     p_live.add_argument("--candles", type=int, default=400,
                          help="Daily candles fetched per asset (default 400).")
     p_live.add_argument("--timeout-s", dest="timeout_s", type=float, default=300.0,
@@ -1352,12 +1464,36 @@ def main(argv: list[str] | None = None) -> None:
     # (TRADE_LAB_LOG_JSON=false for a human format).
     from trade_lab.logging_setup import setup_logging
     setup_logging()
+    parser = build_parser()
+    args = parser.parse_args(argv)
     # .env support lives here, at the process entrypoint — importing
     # trade_lab.* modules (e.g. from the credential-free monitoring
     # dashboard) must never pull API keys into the process env.
-    load_dotenv()
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    #
+    # Paper subcommands use symmetric per-environment files:
+    # `.env.testnet` (the default) and `.env.mainnet` (explicit via
+    # --env-file). A missing file is a hard error — no silent fallback
+    # to a legacy `.env`, whose environment would be anyone's guess.
+    # Non-paper commands (fetch, backtest, ...) keep the plain `.env`.
+    if hasattr(args, "env_file"):
+        env_file = args.env_file or ".env.testnet"
+        if not Path(env_file).is_file():
+            raise SystemExit(
+                f"env file not found: {env_file}. Paper commands read "
+                f".env.testnet by default and .env.mainnet via "
+                f"--env-file .env.mainnet (see paper.env.example). "
+                f"If you still have a legacy .env, rename it: "
+                f"mv .env .env.testnet"
+            )
+        # override=True: the selected file is the environment and must
+        # beat ambient process env. With the dotenv default
+        # (override=False), TRADE_LAB_PAPER_* vars lingering in the
+        # shell (e.g. from an earlier `source .env.mainnet`) would
+        # silently win over the file — a run labelled testnet could
+        # carry a mainnet config through the three-flag gate.
+        load_dotenv(env_file, override=True)
+    else:
+        load_dotenv()
     args.func(args)
 
 

@@ -40,6 +40,11 @@ class PaperConfig:
     quote_currency: str          # e.g. "USDT"
     basket: Tuple[str, ...]      # universe symbols, e.g. ("BTC","ETH",...)
     request_timeout_ms: int      # CCXT timeout
+    # Third mainnet flag: the two flags above only unlock READ paths
+    # (paper-status, paper-dry-run) on mainnet. Placing real orders
+    # additionally requires this to be true — three independent
+    # decisions before real money moves.
+    mainnet_live_orders: bool = False
     # Retry for READ-ONLY exchange calls on transient network errors. The bare
     # dataclass defaults are inert (base_delay 0 → instant) so unit tests that
     # build PaperConfig directly stay fast; load_paper_config sets the real
@@ -62,6 +67,7 @@ class PaperConfig:
             f"api_key='***{self.api_key[-4:] if len(self.api_key) >= 4 else ''}', "
             f"api_secret='***', "
             f"allow_mainnet={self.allow_mainnet}, "
+            f"mainnet_live_orders={self.mainnet_live_orders}, "
             f"quote_currency={self.quote_currency!r}, "
             f"basket={self.basket}, "
             f"request_timeout_ms={self.request_timeout_ms})"
@@ -111,7 +117,9 @@ def load_paper_config() -> PaperConfig:
     ``TRADE_LAB_PAPER_ALLOW_MAINNET=true`` is set in addition to
     ``TRADE_LAB_PAPER_SANDBOX=false``. The two-flag requirement makes
     it impossible to accidentally point at mainnet by flipping a
-    single env value.
+    single env value. Placing real orders on mainnet requires a third
+    flag on top: ``TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true`` —
+    enforced by the order-placing CLI commands, parsed here.
     """
     exchange_id = _require_env("TRADE_LAB_PAPER_EXCHANGE").lower()
     sandbox = _coerce_bool(
@@ -122,6 +130,10 @@ def load_paper_config() -> PaperConfig:
     allow_mainnet = _coerce_bool(
         os.getenv("TRADE_LAB_PAPER_ALLOW_MAINNET", "false"),
         "TRADE_LAB_PAPER_ALLOW_MAINNET",
+    )
+    mainnet_live_orders = _coerce_bool(
+        os.getenv("TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS", "false"),
+        "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS",
     )
     quote_currency = os.getenv("TRADE_LAB_PAPER_QUOTE", "USDT").strip().upper()
     basket = _parse_basket(os.getenv("TRADE_LAB_PAPER_BASKET"))
@@ -191,6 +203,16 @@ def load_paper_config() -> PaperConfig:
             "explicitly to leave the testnet."
         )
 
+    # The live-orders flag only makes sense on mainnet. On a sandbox
+    # config it signals a copy-paste from a mainnet env file — refuse
+    # rather than silently ignore an inconsistent, safety-relevant flag.
+    if sandbox and mainnet_live_orders:
+        raise PaperConfigError(
+            "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true with "
+            "TRADE_LAB_PAPER_SANDBOX=true is inconsistent: the flag only "
+            "applies to mainnet configs. Remove it from the testnet env file."
+        )
+
     # Kraken has no CCXT sandbox. Whether set_sandbox_mode crashes or
     # is silently ignored is a CCXT implementation detail per version;
     # a silently ignored sandbox flag would send live mainnet requests
@@ -209,6 +231,7 @@ def load_paper_config() -> PaperConfig:
         api_key=api_key,
         api_secret=api_secret,
         allow_mainnet=allow_mainnet,
+        mainnet_live_orders=mainnet_live_orders,
         quote_currency=quote_currency,
         basket=basket,
         request_timeout_ms=timeout_ms,

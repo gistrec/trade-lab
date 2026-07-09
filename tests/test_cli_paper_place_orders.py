@@ -1,13 +1,16 @@
-"""Mainnet refusal for the production ``paper-place-orders`` CLI.
+"""Mainnet gating for the production ``paper-place-orders`` CLI.
 
-CLAUDE.md hard rule: mainnet order placement is unsupported even when
-the two-flag gate (SANDBOX=false + ALLOW_MAINNET=true) is satisfied.
-The command runs under cron, so a printed warning protects nobody —
-it must exit before the broker is even constructed.
+CLAUDE.md hard rule: mainnet order placement requires THREE explicit
+flags — SANDBOX=false + ALLOW_MAINNET=true (read paths) +
+MAINNET_LIVE_ORDERS=true (this command). The command runs under cron,
+so a printed warning protects nobody — a missing flag must exit before
+the broker is even constructed. Journal and state files are
+environment-checked so testnet and mainnet can never share files.
 """
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -17,10 +20,11 @@ from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 
 
-def _mainnet_config() -> PaperConfig:
+def _mainnet_config(mainnet_live_orders: bool = False) -> PaperConfig:
     return PaperConfig(
         exchange_id="binance", sandbox=False, api_key="k", api_secret="s",
         allow_mainnet=True,
+        mainnet_live_orders=mainnet_live_orders,
         quote_currency="USDT",
         basket=("BTC", "ETH"),
         request_timeout_ms=5000,
@@ -36,7 +40,9 @@ def _args(tmp_path: Path) -> argparse.Namespace:
     )
 
 
-def test_refuses_mainnet_even_with_both_flags(monkeypatch, tmp_path):
+def test_refuses_mainnet_without_live_orders_flag(monkeypatch, tmp_path):
+    """Two flags are NOT enough: without MAINNET_LIVE_ORDERS=true the
+    command must exit before the broker is constructed."""
     connect_calls: list = []
     monkeypatch.setattr(
         "trade_lab.execution.load_paper_config", _mainnet_config,
@@ -46,10 +52,96 @@ def test_refuses_mainnet_even_with_both_flags(monkeypatch, tmp_path):
         classmethod(lambda cls, config: connect_calls.append(config)),
     )
 
-    with pytest.raises(SystemExit, match="mainnet"):
+    with pytest.raises(SystemExit, match="MAINNET_LIVE_ORDERS"):
         cmd_paper_place_orders(_args(tmp_path))
 
-    assert connect_calls == [], "broker must never be constructed on mainnet"
+    assert connect_calls == [], (
+        "broker must never be constructed without the third flag"
+    )
+
+
+def test_mainnet_runs_with_three_flags(monkeypatch, tmp_path):
+    """The full three-flag config reaches the live cycle."""
+    from trade_lab.execution.live_cycle import LiveCycleResult
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config",
+        lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(
+            lambda cls, config: connect_calls.append(config) or object()
+        ),
+    )
+    result = LiveCycleResult(
+        cycle_id="0" * 32, outcome="success", order_results=[],
+        reconstructed_count=0, error=None,
+    )
+    monkeypatch.setattr(
+        "trade_lab.execution.run_live_cycle",
+        lambda broker, **kwargs: result,
+    )
+
+    assert cmd_paper_place_orders(_args(tmp_path)) is None  # no SystemExit
+    assert len(connect_calls) == 1
+
+
+def test_mainnet_refuses_testnet_journal(monkeypatch, tmp_path):
+    """A journal already holding testnet cycles must never accept
+    mainnet cycles — exit before any exchange call."""
+    journal = tmp_path / "cycles.jsonl"
+    testnet_cycle = {
+        "cycle_id": "x", "outcome": "success",
+        "context": {"mode": "live", "exchange": "binance", "sandbox": True},
+    }
+    journal.write_text(json.dumps(testnet_cycle) + "\n")
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config",
+        lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(lambda cls, config: connect_calls.append(config)),
+    )
+
+    with pytest.raises(SystemExit, match="never share a journal"):
+        cmd_paper_place_orders(_args(tmp_path))
+
+    assert connect_calls == []
+
+
+def test_mainnet_refuses_unstamped_state_file(monkeypatch, tmp_path):
+    """A pre-existing unstamped state file is presumed testnet — a
+    mainnet run must not adopt it (clientOrderIds would collide)."""
+    state = tmp_path / "orders.json"
+    state.write_text(json.dumps({
+        "tsmom_20260709_BTCUSDT_buy": {
+            "client_order_id": "tsmom_20260709_BTCUSDT_buy",
+            "symbol": "BTC/USDT", "side": "buy", "intended_amount": 1.0,
+            "status": "closed", "exchange_order_id": "1",
+            "placed_at": "2026-07-09T00:05:00+00:00",
+            "last_seen_at": "2026-07-09T00:05:10+00:00",
+        },
+    }))
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config",
+        lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(lambda cls, config: connect_calls.append(config)),
+    )
+
+    with pytest.raises(SystemExit, match="environment stamp"):
+        cmd_paper_place_orders(_args(tmp_path))
+
+    assert connect_calls == []
 
 
 # ---------------------------------------------------------------------------

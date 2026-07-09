@@ -26,8 +26,13 @@ deploy.sh
 # Local owner-only personal / interview drafts — never committed
 docs/systems_visibility_roadmap.md
 
-# Local data and secrets
+# Local data and secrets (.env.mainnet holds the real-money API key).
+# paper.env* covers careless copies of paper.env.example ("cp X.example X").
 .env
+.env.*
+!.env.example
+paper.env*
+!paper.env.example
 /data/
 /outputs/
 *.parquet

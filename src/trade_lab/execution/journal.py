@@ -55,6 +55,18 @@ class JournalEntryTooLarge(RuntimeError):
     """
 
 
+class JournalEnvMismatch(RuntimeError):
+    """Raised when a journal file already contains cycles from a
+    different exchange/sandbox environment than the one about to write.
+
+    Testnet and mainnet must never interleave in one journal: the
+    monitoring dashboard, health server, and reconstruction logic all
+    treat a journal as a single-environment stream. The clientOrderId
+    scheme carries no environment component either, so mixing files is
+    exactly the silent-corruption failure mode CLAUDE.md forbids.
+    """
+
+
 @dataclass
 class Cycle:
     """One execution-loop cycle, serializable to a single JSON line.
@@ -135,6 +147,63 @@ def _encode_cycle(cycle: Cycle) -> bytes:
     data = asdict(cycle)
     line = json.dumps(data, separators=(",", ":"), default=str)
     return (line + "\n").encode("utf-8")
+
+
+def assert_journal_env(
+    path: Path | str, *, exchange_id: str, sandbox: bool,
+) -> None:
+    """Refuse to append cycles from one environment into another's journal.
+
+    Scans the existing file (if any) for the last valid cycle carrying a
+    ``context`` dict and compares its ``exchange`` / ``sandbox`` against
+    the current config. Corrupt lines and records without a usable
+    context (e.g. smoke-test entries) are skipped, matching the reader's
+    tolerance. A missing or empty file passes — a fresh journal adopts
+    whatever environment writes to it first.
+
+    Raises :class:`JournalEnvMismatch` on conflict.
+    """
+    p = Path(path)
+    if not p.exists():
+        return
+    last_ctx: Optional[dict] = None
+    try:
+        raw = p.read_bytes()
+    except OSError as exc:
+        # Unreadable-but-existing is its own loud failure: appending
+        # blind to a file we cannot inspect defeats the guard.
+        raise JournalEnvMismatch(
+            f"Journal {p} exists but cannot be read for the environment "
+            f"check: {exc}"
+        ) from exc
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        ctx = record.get("context")
+        if isinstance(ctx, dict) and isinstance(ctx.get("sandbox"), bool):
+            last_ctx = ctx
+    if last_ctx is None:
+        return
+    journal_exchange = str(last_ctx.get("exchange") or "").lower()
+    journal_sandbox = last_ctx.get("sandbox")
+    if journal_sandbox != sandbox or journal_exchange != exchange_id.lower():
+        def _env(ex: str, sb: object) -> str:
+            return f"{ex or 'unknown'}/{'testnet' if sb else 'MAINNET'}"
+        raise JournalEnvMismatch(
+            f"Journal {p} belongs to environment "
+            f"{_env(journal_exchange, journal_sandbox)} but the current "
+            f"config is {_env(exchange_id.lower(), sandbox)}. Testnet and "
+            f"mainnet cycles must never share a journal file — use a "
+            f"separate --journal path per environment "
+            f"(e.g. data/journal/cycles_mainnet.jsonl)."
+        )
 
 
 def get_git_commit_short() -> Optional[str]:

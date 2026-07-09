@@ -20,13 +20,13 @@ from .delta import (
     compute_delta_plan, total_skipped_quote_drift,
 )
 from .journal import (
-    Cycle, JournalEntryTooLarge, JournalWriter,
-    JOURNAL_SCHEMA_VERSION, MAX_LINE_BYTES,
+    Cycle, JournalEntryTooLarge, JournalEnvMismatch, JournalWriter,
+    JOURNAL_SCHEMA_VERSION, MAX_LINE_BYTES, assert_journal_env,
 )
 from .dry_run import DryRunResult, print_dry_run, run_dry_cycle
 from .live_cycle import LiveCycleResult, run_live_cycle
 from .order_state import (
-    OrderStateEntry, OrderStateStore,
+    OrderStateEntry, OrderStateEnvMismatch, OrderStateStore,
     TERMINAL_STATUSES, NON_TERMINAL_STATUSES,
 )
 from .orders import OrderResult, place_order, sort_orders_for_placement
@@ -40,6 +40,7 @@ __all__ = [
     "DryRunResult",
     "JOURNAL_SCHEMA_VERSION",
     "JournalEntryTooLarge",
+    "JournalEnvMismatch",
     "JournalWriter",
     "LiveCycleResult",
     "MAX_LINE_BYTES",
@@ -48,6 +49,7 @@ __all__ = [
     "OrderIntent",
     "OrderResult",
     "OrderStateEntry",
+    "OrderStateEnvMismatch",
     "OrderStateStore",
     "PaperConfig",
     "PaperConfigError",
@@ -56,6 +58,7 @@ __all__ = [
     "SkippedDelta",
     "TERMINAL_STATUSES",
     "TargetAllocation",
+    "assert_journal_env",
     "compute_delta_plan",
     "compute_live_signal",
     "compute_target_allocation",
