@@ -11,6 +11,10 @@ Configuration via environment variables:
 * ``TRADE_LAB_MONITORING_JOURNAL_PATH`` — path to the journal file
   the bot writes to. Mounted read-only into this process via Unix
   permissions (group-readable to the ``monitoring`` user only).
+* ``TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET`` — optional path to the
+  mainnet environment's journal. When set, the dashboard shows a
+  testnet/mainnet source switcher above the banner; each source keeps
+  its own reader. Unset → single-source page, exactly as before.
 * ``MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS`` — used to bucket
   staleness. 21600 (6h) for daily candles is a generous floor;
   a true daily run misses ≥1 day if STALE triggers.
@@ -52,6 +56,19 @@ JOURNAL_PATH = os.environ.get(
     "TRADE_LAB_MONITORING_JOURNAL_PATH",
     "data/journal/cycles.jsonl",
 )
+# Optional second journal for the mainnet environment. When set, the
+# dashboard grows a testnet/mainnet source switcher; when empty, the
+# page renders exactly as the single-source dashboard always has.
+MAINNET_JOURNAL_PATH = os.environ.get(
+    "TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET", ""
+).strip()
+# Ordered {label: path}. The label is an operator-facing claim about the
+# environment; the top banner still derives testnet/mainnet from journal
+# CONTENT (context.sandbox), and a label/content disagreement renders a
+# loud error rather than trusting either side.
+JOURNAL_SOURCES: dict[str, str] = {"testnet": JOURNAL_PATH}
+if MAINNET_JOURNAL_PATH:
+    JOURNAL_SOURCES["mainnet"] = MAINNET_JOURNAL_PATH
 EXPECTED_INTERVAL_S = int(
     os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "21600")
 )
@@ -101,11 +118,13 @@ VALIDATION_REFERENCE_PATH = Path(
 )
 
 
-# Single reader instance reused across reruns. JournalReader is
-# cache-aware (mtime-based), so this is safe and cheap.
+# One reader instance per journal path, reused across reruns.
+# JournalReader is cache-aware (mtime-based), so this is safe and cheap;
+# st.cache_resource keys on the argument, so the testnet and mainnet
+# readers coexist with independent mtime caches.
 @st.cache_resource
-def _get_reader() -> JournalReader:
-    return JournalReader(JOURNAL_PATH)
+def _get_reader(path: str) -> JournalReader:
+    return JournalReader(path)
 
 
 def _cycle_context(cycle: Optional[dict]) -> dict:
@@ -226,7 +245,10 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
             why.append(f"{len(incidents)} incident cycle(s) in window")
         return ("DEGRADED", "; ".join(why))
 
-    return ("HEALTHY", "heartbeat fresh · last live cycle OK · no open incidents")
+    # A dry-run-only journal (mainnet observation phase) has no live
+    # cycle to be "OK" — do not fabricate one in the verdict.
+    live_part = "last live cycle OK" if live is not None else "no live cycle yet"
+    return ("HEALTHY", f"heartbeat fresh · {live_part} · no open incidents")
 
 
 def _render_health_line(reader: JournalReader) -> None:
@@ -305,7 +327,7 @@ def _render_status(reader: JournalReader) -> None:
     elif staleness is Staleness.NO_DATA:
         st.info(
             "No valid cycles yet. If the bot has been started, "
-            f"check that it can write to: `{JOURNAL_PATH}`"
+            f"check that it can write to: `{reader.path}`"
         )
 
     if latest is not None and latest.get("outcome") == "failed":
@@ -350,7 +372,7 @@ def _render_status(reader: JournalReader) -> None:
             f"on tiny balances; investigate if it grows steadily."
         )
 
-    _render_read_stats(stats)
+    _render_read_stats(stats, reader.path)
 
 
 def _render_live_cron_health(reader: JournalReader) -> None:
@@ -505,16 +527,16 @@ def _render_incidents(reader: JournalReader) -> None:
             f"bars — currently {stall['bars']}{since}. SMA(200) stays undefined "
             f"→ gate CLOSED → ladder 0 → **no buy order is placed, regardless "
             f"of momentum.** This resolves only on a full-history exchange "
-            f"(e.g. Kraken mainnet), not by waiting."
+            f"(e.g. Binance mainnet), not by waiting."
         )
 
 
-def _render_read_stats(stats: ReadStats) -> None:
+def _render_read_stats(stats: ReadStats, journal_path: Path | str) -> None:
     if stats.read_error is not None:
         st.error(
             f"JOURNAL UNREADABLE — {stats.read_error}. The file exists but "
             f"this process cannot read it. Check the path and permissions "
-            f"(`{JOURNAL_PATH}`): the monitoring user needs group-read on the "
+            f"(`{journal_path}`): the monitoring user needs group-read on the "
             f"journal. Until fixed, the dashboard shows NO data."
         )
     # Corrupt lines are a data-integrity event (truncated write, disk glitch,
@@ -1685,7 +1707,20 @@ def _render_dashboard() -> None:
     page. Widget interactions here also rerun only this fragment, not the whole
     script.
     """
-    reader = _get_reader()
+    if len(JOURNAL_SOURCES) > 1:
+        source = st.radio(
+            "Environment",
+            options=list(JOURNAL_SOURCES),
+            horizontal=True,
+            key="journal_source",
+            help="Which environment's journal to display. Each environment "
+                 "writes its own journal file; the banner below is derived "
+                 "from journal content as a cross-check.",
+        )
+    else:
+        source = next(iter(JOURNAL_SOURCES))
+    journal_path = JOURNAL_SOURCES[source]
+    reader = _get_reader(journal_path)
     # The initial read and the safety banner run BEFORE the per-tab
     # containment, so an unexpected error here would blank the whole page —
     # including the mainnet banner. The reader is hardened to fail into a
@@ -1697,9 +1732,30 @@ def _render_dashboard() -> None:
         latest = None
         st.error(
             f"JOURNAL READ FAILED — {type(exc).__name__}: {exc}. Check the "
-            f"journal path and permissions (`{JOURNAL_PATH}`)."
+            f"journal path and permissions (`{journal_path}`)."
         )
     _render_top_banner(latest)
+    # Label vs content cross-check: the switcher label is operator config,
+    # the sandbox flag inside the journal is ground truth from the bot. A
+    # mismatch means the pm2 env points a label at the wrong file — surface
+    # it loudly instead of letting the operator trust the wrong page.
+    # Only in multi-source mode: with a single source there is no operator
+    # label claim (the "testnet" key is just the default), and the content-
+    # derived banner above already tells the truth.
+    content_sandbox = _cycle_context(latest).get("sandbox")
+    if len(JOURNAL_SOURCES) > 1 and isinstance(content_sandbox, bool):
+        if source == "testnet" and content_sandbox is False:
+            st.error(
+                f"SOURCE MISMATCH: this source is labelled 'testnet' but the "
+                f"journal content says MAINNET (`{journal_path}`). Check "
+                f"TRADE_LAB_MONITORING_JOURNAL_PATH*."
+            )
+        elif source == "mainnet" and content_sandbox is True:
+            st.error(
+                f"SOURCE MISMATCH: this source is labelled 'mainnet' but the "
+                f"journal content says testnet (`{journal_path}`). Check "
+                f"TRADE_LAB_MONITORING_JOURNAL_PATH*."
+            )
     _render_tab_safely("Health", lambda: _render_health_line(reader))
 
     (tab_status, tab_signal, tab_portfolio, tab_cycles,

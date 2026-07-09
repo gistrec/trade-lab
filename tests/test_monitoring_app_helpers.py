@@ -362,12 +362,14 @@ def test_render_read_stats_warns_on_corrupt_and_errors_on_read_error(monkeypatch
     _stub_st(monkeypatch, cap)
 
     app._render_read_stats(ReadStats(total_lines=10, valid_cycles=8,
-                                     corrupt_lines=2))
+                                     corrupt_lines=2),
+                           "data/journal/cycles.jsonl")
     assert cap["warning"]                       # corrupt → warning, not caption
 
     cap2 = {}
     _stub_st(monkeypatch, cap2)
-    app._render_read_stats(ReadStats(read_error="PermissionError: denied"))
+    app._render_read_stats(ReadStats(read_error="PermissionError: denied"),
+                           "data/journal/cycles.jsonl")
     assert cap2["error"]                        # unreadable journal → loud error
 
 
@@ -377,7 +379,8 @@ def test_render_read_stats_silent_when_clean(monkeypatch):
 
     cap = {}
     _stub_st(monkeypatch, cap)
-    app._render_read_stats(ReadStats(total_lines=5, valid_cycles=5))
+    app._render_read_stats(ReadStats(total_lines=5, valid_cycles=5),
+                           "data/journal/cycles.jsonl")
     assert not cap["warning"] and not cap["error"] and not cap["caption"]
 
 
@@ -425,6 +428,22 @@ def test_health_verdict_healthy():
     )
     level, _why = _health_verdict(reader)
     assert level == "HEALTHY"
+
+
+def test_health_verdict_healthy_without_live_cycle_says_so():
+    """A dry-run-only journal (mainnet observation phase) has no live
+    cycle — the HEALTHY verdict must not claim 'last live cycle OK'."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    reader = _HealthReader(
+        stats=_mk_stats(valid_cycles=5), staleness=Staleness.FRESH,
+        cycles=[{"outcome": "success", "orders_executed": None}], live=None,
+    )
+    level, why = _health_verdict(reader)
+    assert level == "HEALTHY"
+    assert "no live cycle yet" in why
+    assert "live cycle OK" not in why
 
 
 def test_health_verdict_down_on_read_error():
@@ -873,3 +892,41 @@ def test_render_incidents_shows_stall_banner_after_clean_success(monkeypatch):
     assert "No failed/partial cycles" in calls[0][1]
     assert "SMA(200)" in calls[1][1]
     assert "no buy order is placed" in calls[1][1]
+
+
+# ---------------------------------------------------------------------------
+# Testnet/mainnet journal sources (dashboard switcher)
+# ---------------------------------------------------------------------------
+
+
+def test_journal_sources_single_by_default(monkeypatch):
+    """Without the mainnet env var the dashboard stays single-source —
+    the switcher must not appear on existing deployments."""
+    import importlib
+    import trade_lab.monitoring.app as app
+
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+    try:
+        reloaded = importlib.reload(app)
+        assert list(reloaded.JOURNAL_SOURCES) == ["testnet"]
+    finally:
+        importlib.reload(app)
+
+
+def test_journal_sources_with_mainnet_env(monkeypatch):
+    import importlib
+    import trade_lab.monitoring.app as app
+
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       "data/journal/cycles_mainnet.jsonl")
+    try:
+        reloaded = importlib.reload(app)
+        assert reloaded.JOURNAL_SOURCES == {
+            "testnet": "data/journal/cycles.jsonl",
+            "mainnet": "data/journal/cycles_mainnet.jsonl",
+        }
+    finally:
+        monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                           raising=False)
+        importlib.reload(app)

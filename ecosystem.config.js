@@ -24,6 +24,10 @@ module.exports = {
       ],
       env: {
         TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles.jsonl",
+        // Mainnet journal → enables the testnet/mainnet source switcher.
+        // The mainnet bot crons write here (see execution/README.md).
+        TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET:
+          "data/journal/cycles_mainnet.jsonl",
         // Must match the dry-run heartbeat cron cadence (6h). Dashboard
         // staleness is computed as multiples of this, so a mismatch flags a
         // perfectly healthy bot as stale. Was 3600 (hourly cadence).
