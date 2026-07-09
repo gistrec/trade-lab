@@ -34,22 +34,23 @@ the example server block is in the section below.
 
 Monitoring runs as a dedicated system user that has **read access to
 the journal and nothing else** — in particular, no access to the bot's
-`.env` file with API keys.
+env files (`.env.testnet` / `.env.mainnet`) with API keys.
 
 ```bash
 # 1. Create the monitoring user. No shell, no home directory.
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin monitoring
 
-# 2. Bot's .env is owned by the bot user, mode 0600 — monitoring
-#    must NOT be able to read this. Replace `botuser` with whatever
-#    user owns the bot.
-sudo chown botuser:botuser /opt/trade-lab/.env
-sudo chmod 600 /opt/trade-lab/.env
+# 2. Bot env files are owned by the bot user, mode 0600 — monitoring
+#    must NOT be able to read them. Replace `botuser` with whatever
+#    user owns the bot. (.env.mainnet holds the real-money key.)
+sudo chown botuser:botuser /opt/trade-lab/.env.testnet /opt/trade-lab/.env.mainnet
+sudo chmod 600 /opt/trade-lab/.env.testnet /opt/trade-lab/.env.mainnet
 
 # 3. Journal: group-readable by monitoring, not world-readable.
 sudo chown -R botuser:monitoring /opt/trade-lab/data/journal
 sudo chmod 750 /opt/trade-lab/data/journal
 sudo chmod 640 /opt/trade-lab/data/journal/cycles.jsonl
+sudo chmod 640 /opt/trade-lab/data/journal/cycles_mainnet.jsonl  # once it exists
 ```
 
 After step 3, the bot user can read+write the journal, the monitoring
@@ -57,13 +58,14 @@ user can read but not write, and everyone else cannot see it at all.
 
 ### Critical verification — do NOT skip
 
-The `.env` file with API keys must remain unreadable to monitoring.
+The env files with API keys must remain unreadable to monitoring.
 
 ```bash
-sudo -u monitoring cat /opt/trade-lab/.env
+sudo -u monitoring cat /opt/trade-lab/.env.testnet
+sudo -u monitoring cat /opt/trade-lab/.env.mainnet
 ```
 
-**Expected:** `Permission denied`.
+**Expected:** `Permission denied` for both.
 
 **If you see the file contents:** the deployment is unsafe. The
 monitoring user can read your API keys. Fix step 2 above before
@@ -259,9 +261,10 @@ monitoring tool and an exposed read endpoint into your bot's behaviour.
       `0.0.0.0:7000` or `*:7000`).
 - [ ] Curl from a non-VPS machine to `http://<public-ip>:7000/`
       returns connection refused (not 200, not 301).
-- [ ] `sudo -u monitoring cat /opt/trade-lab/.env` returns
-      `Permission denied`. If it shows the file contents, the
-      monitoring user can read your API keys — **stop**.
+- [ ] `sudo -u monitoring cat /opt/trade-lab/.env.testnet` (and
+      `.env.mainnet`) returns `Permission denied`. If it shows the
+      file contents, the monitoring user can read your API keys —
+      **stop**.
 - [ ] Journal file is mode 0640 with group `monitoring`
       (`stat -c '%a %U %G' /opt/trade-lab/data/journal/cycles.jsonl`
       shows `640 botuser monitoring`).
@@ -278,10 +281,12 @@ monitoring tool and an exposed read endpoint into your bot's behaviour.
       dashboard loads once and never refreshes — visually confirmed
       by clicking a tab and watching nothing change.
 - [ ] Mainnet indicator is visibly RED and large in the dashboard.
-      Verify by temporarily setting the bot's `sandbox=false` and
-      `allow_mainnet=true` in a test config (NEVER on the production
-      .env), restarting against that config, and confirming the
-      banner. Restore the original config before any real trading.
+      Verify by temporarily setting `sandbox=false` and
+      `allow_mainnet=true` in a throwaway test config (NEVER in the
+      production `.env.testnet`), restarting against that config, and
+      confirming the banner. Restore the original config before any
+      real trading. (With the mainnet source configured this is
+      visible directly on the "mainnet" tab of the switcher.)
 
 ## Troubleshooting
 
@@ -293,4 +298,6 @@ monitoring tool and an exposed read endpoint into your bot's behaviour.
 | Dashboard loads once and then stops updating | WebSocket headers missing in nginx. | Add `proxy_http_version 1.1`, `proxy_set_header Upgrade`, `proxy_set_header Connection "upgrade"`. |
 | 502 Bad Gateway from nginx | Streamlit not running, or wrong upstream port. | `sudo systemctl status trade-lab-monitoring`. Confirm `127.0.0.1:7000` matches `proxy_pass`. |
 | Dashboard publicly reachable on :7000 (CRITICAL) | `--server.address 127.0.0.1` missing or unit not reloaded. | Restore the flag, `daemon-reload`, restart. Run the cross-machine curl check before declaring fixed. |
-| Mainnet banner where testnet expected (CRITICAL) | Bot is connecting to mainnet. | **Stop the bot immediately.** Check `.env` for `TRADE_LAB_PAPER_SANDBOX` and `TRADE_LAB_PAPER_ALLOW_MAINNET`. If both flags are set wrong, the bot is executing real orders. |
+| Mainnet banner on the **testnet** source (CRITICAL) | Testnet bot's `.env.testnet` flipped to mainnet, or the monitoring env points the testnet label at the mainnet journal. | If a SOURCE MISMATCH error is also shown, fix `TRADE_LAB_MONITORING_JOURNAL_PATH` / `TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET`. Otherwise **stop the bot immediately** and check `.env.testnet` for `TRADE_LAB_PAPER_SANDBOX` / `TRADE_LAB_PAPER_ALLOW_MAINNET` / `TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS` (real orders require all three). |
+| Mainnet banner on the **mainnet** source | Expected — that source watches `cycles_mainnet.jsonl` (env `TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET` enables the testnet/mainnet switcher). | Nothing to fix. The banner stays deliberately red as a constant real-money reminder. |
+| SOURCE MISMATCH error above the tabs | A source label points at the other environment's journal file. | Fix the `TRADE_LAB_MONITORING_JOURNAL_PATH*` values in `ecosystem.config.js` and `pm2 startOrReload ecosystem.config.js`. |

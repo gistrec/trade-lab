@@ -13,50 +13,52 @@ This is the *single most important* safety property of this layer:
 * `TRADE_LAB_PAPER_SANDBOX=true` → CCXT `set_sandbox_mode(True)` →
   testnet endpoints. **Safe.**
 * `TRADE_LAB_PAPER_SANDBOX=false` AND `TRADE_LAB_PAPER_ALLOW_MAINNET=true`
-  → mainnet endpoints. Requires both env flags set explicitly.
-* Any other combination → `PaperConfigError` at load time. The bot
-  refuses to start.
+  → mainnet endpoints, **read paths only** (`paper-status`,
+  `paper-dry-run`).
+* Placing real orders (`paper-place-orders`, `paper-place-test-order`)
+  additionally requires `TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true` —
+  see § "Mainnet (real money)" below.
+* Any other combination → `PaperConfigError` at load time (including
+  the live-orders flag on a sandbox config). The bot refuses to start.
 
-The two-flag requirement means flipping a single value cannot
-accidentally point you at mainnet. Two independent conscious decisions
-are required.
+Three independent conscious decisions are required before real money
+moves; flipping any single value cannot get you there.
 
 ## Environment variables
 
-See `paper.env.example` at the repo root. **Never commit a populated
-`.env`.** The repo's `.gitignore` already excludes it; check before
-pushing anyway.
+See `paper.env.example` at the repo root. Two symmetric files, one per
+venue: `.env.testnet` (default for every paper command) and
+`.env.mainnet` (explicit via `--env-file`). **Never commit a populated
+env file.** The repo's `.gitignore` already excludes them; check
+before pushing anyway.
 
 ## Quick start (Binance testnet)
 
 ```bash
 # 1. Generate testnet API key/secret at https://testnet.binance.vision/
-# 2. Add to .env:
+# 2. Add to .env.testnet:
 #    TRADE_LAB_PAPER_EXCHANGE=binance
 #    TRADE_LAB_PAPER_SANDBOX=true
 #    TRADE_LAB_PAPER_API_KEY=...
 #    TRADE_LAB_PAPER_API_SECRET=...
 #
-# 3. Verify connectivity + balances:
+# 3. Verify connectivity + balances (reads .env.testnet by default):
 trade-lab paper-status
 ```
 
-Switching to Kraken later (when you graduate from testnet to a real
-exchange that operates in your jurisdiction):
+Mainnet (real money) does **not** reuse this file. It lives in a
+separate `.env.mainnet`, selected explicitly per run:
 
 ```bash
-# 1. Generate Kraken API key/secret at https://www.kraken.com/
-# 2. Update .env:
-#    TRADE_LAB_PAPER_EXCHANGE=kraken
-#    TRADE_LAB_PAPER_SANDBOX=false
-#    TRADE_LAB_PAPER_ALLOW_MAINNET=true
-#    TRADE_LAB_PAPER_API_KEY=...
-#    TRADE_LAB_PAPER_API_SECRET=...
-# 3. Same command:
-trade-lab paper-status
+trade-lab paper-status --env-file .env.mainnet
 ```
 
-No code change. The whole point.
+Never rewrite `.env.testnet` into a mainnet config — every command
+that omits `--env-file` (including the deployed testnet crons) reads
+it, and the journal/state environment guards will refuse the
+mismatched files. A missing env file is a hard error; paper commands
+never fall back to a legacy `.env` (migration: `mv .env .env.testnet`).
+See § "Mainnet (real money)" below for the rollout ladder.
 
 ## What's built in step #1
 
@@ -221,19 +223,22 @@ What it does:
 5. Writes one Cycle entry (schema v2) with `outcome` ∈ {success,
    partial, unknown_orders, failed} and `orders_executed` populated.
 
-Hard-refuses to start when SANDBOX=false — even when
-ALLOW_MAINNET=true is also set. The two-flag gate (CLAUDE.md) only
-permits *connecting* to mainnet for read paths; production order
-placement on mainnet requires a dedicated code path and review and
-is refused unconditionally.
+Mainnet order placement sits behind a THREE-flag gate:
+`TRADE_LAB_PAPER_SANDBOX=false` + `TRADE_LAB_PAPER_ALLOW_MAINNET=true`
+unlock read paths only (paper-status, paper-dry-run);
+`paper-place-orders` and `paper-place-test-order` additionally require
+`TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true`. Each missing flag is a
+hard exit before the broker is constructed.
 
 ### Daily cron
 
 ```cron
-5 0 * * * /opt/trade-lab/.venv/bin/trade-lab paper-place-orders \
-    --journal /opt/trade-lab/data/journal/cycles.jsonl \
-    >> /opt/trade-lab/data/logs/paper-place-orders.log 2>&1
+5 0 * * * /opt/trade-lab/.venv/bin/trade-lab paper-place-orders --env-file /opt/trade-lab/.env.testnet --journal /opt/trade-lab/data/journal/cycles.jsonl >> /opt/trade-lab/data/logs/paper-place-orders.log 2>&1
 ```
+
+(One line — crontab has no backslash line continuation. The default
+`.env.testnet` resolves relative to the process CWD, and cron does not
+`cd` — always pass an absolute `--env-file` in crontab entries.)
 
 00:05 UTC gives the daily candle a few minutes to settle in
 Binance's API before the strategy reads it. Same minute pattern as
@@ -241,6 +246,71 @@ the 6-hourly dry-run cron — they don't conflict because they share
 the journal file but use different state and `clientOrderId`
 namespaces (`tsmom_` for both production and dry-run, `smoke_` for
 smoke tests).
+
+## Mainnet (real money)
+
+Two environments run side by side on the same host, isolated by
+construction:
+
+| | testnet | mainnet |
+|---|---|---|
+| env file | `.env.testnet` (default) | `.env.mainnet` via `--env-file` |
+| journal | `data/journal/cycles.jsonl` | `data/journal/cycles_mainnet.jsonl` |
+| state | `data/state/orders.json` | `data/state/orders_mainnet.json` |
+| dashboard | "testnet" source | "mainnet" source (`TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET`) |
+| health | port 7001 | port 7002 (`ops/ecosystem.health.config.js`) |
+
+Journal and state files are stamped/checked at runtime: pointing a
+mainnet run at a testnet file (or vice versa) raises before any
+exchange call. The `clientOrderId` scheme has no environment
+component, so this isolation is what prevents a same-day testnet
+entry from suppressing a real mainnet placement via the idempotency
+fast-path.
+
+### Rollout ladder
+
+1. **Read-only observation (no trading permission on the API key).**
+   `.env.mainnet` with SANDBOX=false + ALLOW_MAINNET=true, key with
+   *Enable Reading* only. 6-hourly dry-run cron:
+
+   ```cron
+   35 */6 * * * /opt/trade-lab/.venv/bin/trade-lab paper-dry-run --env-file /opt/trade-lab/.env.mainnet --journal /opt/trade-lab/data/journal/cycles_mainnet.jsonl >> /opt/trade-lab/data/logs/paper-dry-run-mainnet.log 2>&1
+   ```
+
+   (One line — crontab has no backslash line continuation.)
+
+   Mainnet has full kline history, so the SMA(200) gate warms up
+   properly — this phase validates the signal path the testnet
+   structurally cannot (see the testnet-reset caveat below). Observe
+   ≥ 1–2 weeks: ladder stability, basket weights, planned orders vs
+   min-notional skips.
+2. **Smoke test.** Add *Enable Spot & Margin Trading* to the key,
+   set `TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true`, place one tiny
+   order (capped at 25 USDT by the CLI):
+
+   ```bash
+   trade-lab paper-place-test-order --env-file .env.mainnet \
+       --symbol BTC/USDT --side buy --notional 10 \
+       --state data/state/orders_mainnet.json \
+       --journal data/journal/smoke_tests_mainnet.jsonl
+   ```
+
+   Then sell it back the same way. Validates fills, fees, precision
+   on the real venue.
+3. **Live daily cron.** Same shape as the testnet cron, with
+   `--env-file .env.mainnet`, the mainnet journal and state paths,
+   and a later minute so the two never poll the exchange
+   simultaneously. Flip `TRADE_LAB_HEALTH_DAILY_DISABLED` to `false`
+   for `trade-lab-health-mainnet` in the same commit.
+
+### Why testnet cannot validate order placement
+
+Binance Spot Testnet wipes kline history on a ~monthly reset, so the
+basket never accumulates the 200 daily bars the SMA gate needs —
+the ladder stays 0 and no buy order is ever placed there, no matter
+how long the cron runs. Testnet still validates cycle timing, journal
+integrity, idempotency, and network-error recovery; signal warm-up
+and real fills are what the mainnet observation phase adds.
 
 ### Why dry-run is 6-hourly but live is daily
 
