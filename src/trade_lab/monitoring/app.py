@@ -1760,9 +1760,16 @@ def _render_dashboard() -> None:
             unsafe_allow_html=True,
         )
         if source == "mainnet":
+            # A position:fixed overlay, NOT a box-shadow on the app
+            # container: Streamlit's fixed header paints over the
+            # container's top edge, which would leave the frame open at
+            # the top of the screen. The overlay covers the full
+            # viewport (header included), ignores scroll, and
+            # pointer-events:none keeps every control clickable.
             st.markdown(
-                "<style>[data-testid='stAppViewContainer'] "
-                "{ box-shadow: inset 0 0 0 4px #b71c1c; }</style>",
+                "<div style='position:fixed;inset:0;"
+                "border:4px solid #b71c1c;"
+                "pointer-events:none;z-index:999999;'></div>",
                 unsafe_allow_html=True,
             )
     else:

@@ -171,3 +171,7 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     assert "MAINNET — BINANCE — REAL MONEY" in page
     # No SOURCE MISMATCH: mainnet label points at a mainnet journal.
     assert "SOURCE MISMATCH" not in page
+    # The full-perimeter red frame is a fixed overlay (a box-shadow on
+    # the app container is painted over by Streamlit's fixed header).
+    assert "border:4px solid #b71c1c" in page
+    assert "position:fixed" in page
