@@ -279,6 +279,10 @@ class _LiveReader:
     def latest_live_cycle(self):
         return self._live
 
+    def latest_cycle(self):
+        # Mirror the real JournalReader: newest cached cycle, or None.
+        return self._cycles[-1] if self._cycles else None
+
     def cycles(self, n=20):
         return self._cycles[-n:]
 
@@ -775,3 +779,96 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
             return [cycle]
 
     app._render_portfolio(_Reader())   # must not raise
+
+
+# ---------------------------------------------------------------------------
+# _sma_warmup_stall — SMA(200) can-never-warm-up detector
+# ---------------------------------------------------------------------------
+
+
+def _stall_reader(*, sma_value, sandbox=True, exchange="binance",
+                  bars=36, start_ts="2026-06-03T00:00:00+00:00"):
+    """Minimal reader whose latest cycle carries a signal + context that
+    exercise the _sma_warmup_stall branches."""
+    cycle = {
+        "context": {"exchange": exchange, "sandbox": sandbox},
+        "signal": {"sma_value": sma_value, "sma_gate_open": False},
+        "basket_close_series": {
+            "values": [1.0] * bars,
+            "start_ts": start_ts,
+        },
+    }
+
+    class _R:
+        def latest_cycle(self):
+            return cycle
+
+    return _R()
+
+
+def test_sma_stall_fires_on_sandbox_with_no_sma():
+    from trade_lab.monitoring.app import _sma_warmup_stall
+    stall = _sma_warmup_stall(_stall_reader(sma_value=None, bars=36))
+    assert stall is not None
+    assert stall["exchange"] == "binance"
+    assert stall["bars"] == 36
+    assert stall["start_ts"] == "2026-06-03T00:00:00+00:00"
+
+
+def test_sma_stall_silent_when_gate_warmed():
+    """A present sma_value means the 200-bar window is warm — no banner."""
+    from trade_lab.monitoring.app import _sma_warmup_stall
+    assert _sma_warmup_stall(_stall_reader(sma_value=91.2)) is None
+
+
+def test_sma_stall_silent_on_mainnet_source():
+    """'Never warms up' is only honest where history is reset-capped. A
+    full-history mainnet exchange would warm up given time — don't claim
+    'never' there even while sma_value is still None early on."""
+    from trade_lab.monitoring.app import _sma_warmup_stall
+    assert _sma_warmup_stall(
+        _stall_reader(sma_value=None, sandbox=False, exchange="kraken")
+    ) is None
+
+
+def test_sma_stall_silent_without_latest_or_signal():
+    from trade_lab.monitoring.app import _sma_warmup_stall
+
+    class _Empty:
+        def latest_cycle(self):
+            return None
+
+    class _NoSignal:
+        def latest_cycle(self):
+            return {"context": {"sandbox": True}, "signal": None}
+
+    assert _sma_warmup_stall(_Empty()) is None
+    assert _sma_warmup_stall(_NoSignal()) is None
+
+
+def test_render_incidents_shows_stall_banner_after_clean_success(monkeypatch):
+    """On a clean window the banner renders AFTER the 'No failed/partial
+    cycles...' success line — the operational verdict first, the structural
+    SMA(200) notice below it — so a clean window still explains why no
+    trades ever happen."""
+    import trade_lab.monitoring.app as app
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(app.st, "subheader", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "error", lambda *a, **k: None)
+    monkeypatch.setattr(app.st, "dataframe", lambda *a, **k: None)
+    monkeypatch.setattr(
+        app.st, "success", lambda msg, *a, **k: calls.append(("success", msg)))
+    monkeypatch.setattr(
+        app.st, "info", lambda msg, *a, **k: calls.append(("info", msg)))
+
+    reader = _stall_reader(sma_value=None, bars=36)
+    reader.cycles = lambda n=500: []   # clean window: no incidents at all
+    app._render_incidents(reader)
+
+    kinds = [k for k, _ in calls]
+    assert kinds == ["success", "info"]      # verdict first, then the notice
+    assert "No failed/partial cycles" in calls[0][1]
+    assert "SMA(200)" in calls[1][1]
+    assert "no buy order is placed" in calls[1][1]

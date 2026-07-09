@@ -395,6 +395,40 @@ def _render_live_cron_health(reader: JournalReader) -> None:
             )
 
 
+def _sma_warmup_stall(reader: JournalReader) -> Optional[dict]:
+    """Detect the structural 'SMA(200) can never warm up' condition.
+
+    The deployable strategy's SMA(200) regime gate needs 200 daily basket
+    bars. Binance Spot Testnet wipes its candle history on the exchange's
+    ~monthly periodic reset, so the basket close series never reaches 200
+    bars: ``sma_value`` stays ``None`` → gate CLOSED → ladder 0 → no buy
+    order is ever placed. This is by design of the testnet, not an
+    incident — so surface it as context, not an alert.
+
+    Returns the facts to display, or ``None`` when the gate is (or could
+    become) warmed. The 'never' claim is only honest where history is
+    capped by periodic resets, so it fires only on the sandbox source; a
+    full-history mainnet exchange would warm up given time.
+    """
+    latest = reader.latest_cycle()
+    if not latest:
+        return None
+    sig = latest.get("signal") or {}
+    # A present sma_value means the gate is warmed — nothing to flag.
+    if not sig or sig.get("sma_value") is not None:
+        return None
+    ctx = latest.get("context") or {}
+    if not ctx.get("sandbox"):
+        return None
+    bcs = latest.get("basket_close_series") or {}
+    values = bcs.get("values") or []
+    return {
+        "exchange": ctx.get("exchange") or "the exchange",
+        "bars": len(values),
+        "start_ts": bcs.get("start_ts"),
+    }
+
+
 def _render_incidents(reader: JournalReader) -> None:
     """Window-level incident view: non-success cycles, unresolved orders,
     and cadence gaps that the latest-cycle-only alerts above cannot show."""
@@ -405,12 +439,15 @@ def _render_incidents(reader: JournalReader) -> None:
     gap_overdue = gap is not None and gap > EXPECTED_INTERVAL_S * STALE_MULTIPLIER
 
     st.subheader("Incidents (last 500 cycles)")
+
+    # No early return: the operational verdict (success / incidents) renders
+    # first, then the structural SMA(200) notice below it. The clean-window
+    # branch's if-guards below are all false here, so nothing else fires.
     if not incidents and not open_orders and not gap_overdue:
         st.success(
             "No failed/partial cycles, unresolved orders, or cadence gaps "
             "in the window."
         )
-        return
 
     if incidents:
         st.warning(
@@ -449,6 +486,25 @@ def _render_incidents(reader: JournalReader) -> None:
             f"(> {STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
             f"cycle may have been missed mid-window — the single-latest "
             f"Staleness check cannot see this."
+        )
+
+    # Structural notice, shown LAST — after the clean-window success line or
+    # the incident list. On the testnet the SMA(200) gate can never warm up,
+    # so a clean window would otherwise read as "all good" and hide why no
+    # trades ever happen.
+    stall = _sma_warmup_stall(reader)
+    if stall:
+        start = _humanize_iso(stall["start_ts"]) if stall["start_ts"] else None
+        since = f" (series starts {start})" if start else ""
+        st.info(
+            f"**SMA(200) regime gate will not warm up on {stall['exchange']} "
+            f"testnet — by design, not an incident.** The gate needs 200 daily "
+            f"basket bars, but Binance Spot Testnet wipes its candle history on "
+            f"its ~monthly periodic reset, so the basket never accumulates 200 "
+            f"bars — currently {stall['bars']}{since}. SMA(200) stays undefined "
+            f"→ gate CLOSED → ladder 0 → **no buy order is placed, regardless "
+            f"of momentum.** This resolves only on a full-history exchange "
+            f"(e.g. Kraken mainnet), not by waiting."
         )
 
 
