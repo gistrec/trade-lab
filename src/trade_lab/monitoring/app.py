@@ -160,14 +160,25 @@ def _cycle_mode(cycle: Optional[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# One typography for every banner state: the environment is encoded in
+# colour and wording (PAPER TRADING vs REAL MONEY), not in font size —
+# with the coloured switcher segment and the mainnet page frame, a
+# louder font bought nothing but inconsistency.
+_BANNER_STYLE = (
+    "color:white;padding:0.8rem;border-radius:0.5rem;text-align:center;"
+    "font-size:1.4rem;font-weight:bold;letter-spacing:0.05rem;"
+)
+
+
 def _render_top_banner(latest: Optional[dict]) -> None:
-    """Render the exchange/sandbox banner. Mainnet is RED and large by
-    design — accidental mainnet config must hit the operator visually."""
+    """Render the exchange/sandbox banner. Same typography for every
+    state; accidental mainnet config must still hit the operator
+    visually — via the red colour, the REAL MONEY wording, and the
+    page frame drawn by the switcher."""
     if latest is None:
         st.markdown(
-            "<div style='background:#37474f;color:white;padding:0.8rem;"
-            "border-radius:0.5rem;text-align:center;font-size:1.2rem;'>"
-            "NO JOURNAL DATA — bot has not started</div>",
+            f"<div style='background:#37474f;{_BANNER_STYLE}'>"
+            f"NO JOURNAL DATA — bot has not started</div>",
             unsafe_allow_html=True,
         )
         return
@@ -179,25 +190,20 @@ def _render_top_banner(latest: Optional[dict]) -> None:
     exchange = str(ctx.get("exchange") or "unknown").upper()
     if sandbox is True:
         st.markdown(
-            f"<div style='background:#1b5e20;color:white;padding:0.8rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:1.4rem;'>"
-            f"TESTNET — {exchange}</div>",
+            f"<div style='background:#1b5e20;{_BANNER_STYLE}'>"
+            f"TESTNET — {exchange} — PAPER TRADING</div>",
             unsafe_allow_html=True,
         )
     elif sandbox is not False:
         st.markdown(
-            f"<div style='background:#bf360c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:1.6rem;"
-            f"font-weight:bold;'>"
+            f"<div style='background:#bf360c;{_BANNER_STYLE}'>"
             f"SANDBOX FLAG UNKNOWN — {exchange} — verify config before "
             f"trusting this dashboard</div>",
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
-            f"<div style='background:#b71c1c;color:white;padding:1.2rem;"
-            f"border-radius:0.5rem;text-align:center;font-size:2rem;"
-            f"font-weight:bold;letter-spacing:0.1rem;'>"
+            f"<div style='background:#b71c1c;{_BANNER_STYLE}'>"
             f"MAINNET — {exchange} — REAL MONEY</div>",
             unsafe_allow_html=True,
         )
