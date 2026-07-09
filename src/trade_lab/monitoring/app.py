@@ -403,7 +403,8 @@ def _sma_warmup_stall(reader: JournalReader) -> Optional[dict]:
     ~monthly periodic reset, so the basket close series never reaches 200
     bars: ``sma_value`` stays ``None`` → gate CLOSED → ladder 0 → no buy
     order is ever placed. This is by design of the testnet, not an
-    incident — so surface it as context, not an alert.
+    incident — so surface it as a caveat (orange, like the redeploy-span
+    notice), not a failure.
 
     Returns the facts to display, or ``None`` when the gate is (or could
     become) warmed. The 'never' claim is only honest where history is
@@ -496,7 +497,7 @@ def _render_incidents(reader: JournalReader) -> None:
     if stall:
         start = _humanize_iso(stall["start_ts"]) if stall["start_ts"] else None
         since = f" (series starts {start})" if start else ""
-        st.info(
+        st.warning(
             f"**SMA(200) regime gate will not warm up on {stall['exchange']} "
             f"testnet — by design, not an incident.** The gate needs 200 daily "
             f"basket bars, but Binance Spot Testnet wipes its candle history on "

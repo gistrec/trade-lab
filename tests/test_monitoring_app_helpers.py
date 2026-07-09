@@ -855,20 +855,21 @@ def test_render_incidents_shows_stall_banner_after_clean_success(monkeypatch):
 
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(app.st, "subheader", lambda *a, **k: None)
-    monkeypatch.setattr(app.st, "warning", lambda *a, **k: None)
     monkeypatch.setattr(app.st, "error", lambda *a, **k: None)
     monkeypatch.setattr(app.st, "dataframe", lambda *a, **k: None)
     monkeypatch.setattr(
         app.st, "success", lambda msg, *a, **k: calls.append(("success", msg)))
     monkeypatch.setattr(
-        app.st, "info", lambda msg, *a, **k: calls.append(("info", msg)))
+        app.st, "warning", lambda msg, *a, **k: calls.append(("warning", msg)))
 
     reader = _stall_reader(sma_value=None, bars=36)
     reader.cycles = lambda n=500: []   # clean window: no incidents at all
     app._render_incidents(reader)
 
     kinds = [k for k, _ in calls]
-    assert kinds == ["success", "info"]      # verdict first, then the notice
+    # verdict first, then the orange SMA(200) caveat (st.warning, like the
+    # redeploy-span notice); no incident/gap warnings on a clean window.
+    assert kinds == ["success", "warning"]
     assert "No failed/partial cycles" in calls[0][1]
     assert "SMA(200)" in calls[1][1]
     assert "no buy order is placed" in calls[1][1]
