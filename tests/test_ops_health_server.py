@@ -258,3 +258,59 @@ def test_end_to_end_status_codes(tmp_path):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_daily_disabled_returns_ok_during_observation_phase(tmp_path):
+    """A mainnet journal fed only by dry-run crons (observation phase,
+    no live cron yet) must not keep /healthz/daily permanently 503 —
+    that trains the operator to ignore the endpoint. The disable is an
+    explicit config statement and self-describes in the reason."""
+    path = tmp_path / "cycles_mainnet.jsonl"
+    path.write_text(json.dumps(_entry(
+        ended_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+        outcome="success", live=False,
+    )) + "\n")
+    cfg = hs.Config(journal_path=str(path), host="127.0.0.1", port=0,
+                    daily_disabled=True)
+    httpd = hs.build_server(cfg)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        code, body = _get(port, "/healthz/daily")
+        assert code == 200 and body["ok"] is True
+        assert "disabled" in body["reason"]
+        # The heartbeat is NOT disabled — it still watches the dry-runs.
+        code, body = _get(port, "/healthz")
+        assert code == 200 and body["ok"] is True
+        # The human summary carries the same disabled marker.
+        code, body = _get(port, "/")
+        assert code == 200 and "disabled" in body["daily_live"]["reason"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_daily_disabled_self_invalidates_on_live_cycles(tmp_path):
+    """A stale DAILY_DISABLED flag must not mask a dead live cron: once
+    the journal contains main live cycles, the real verdict returns."""
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "cycles_mainnet.jsonl"
+    path.write_text(json.dumps(_entry(
+        ended_at=now - timedelta(days=3), outcome="success", live=True,
+    )) + "\n")
+    r = hs.evaluate_daily_disabled(
+        JournalReader(path), now, hs.DEFAULT_DAILY_MAX_AGE_S,
+    )
+    assert r.ok is False
+    assert "stale" in r.reason
+
+
+def test_daily_disabled_env_parsing(monkeypatch):
+    monkeypatch.setenv("TRADE_LAB_HEALTH_DAILY_DISABLED", "true")
+    assert hs.Config.from_env().daily_disabled is True
+    monkeypatch.setenv("TRADE_LAB_HEALTH_DAILY_DISABLED", "false")
+    assert hs.Config.from_env().daily_disabled is False
+    monkeypatch.delenv("TRADE_LAB_HEALTH_DAILY_DISABLED")
+    assert hs.Config.from_env().daily_disabled is False

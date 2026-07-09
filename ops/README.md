@@ -70,6 +70,14 @@ the marker shipped.)
 | `TRADE_LAB_HEALTH_PORT` | `7001` | listen port |
 | `TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S` | `43200` | heartbeat staleness limit |
 | `TRADE_LAB_HEALTH_DAILY_MAX_AGE_S` | `93600` | daily-live staleness limit |
+| `TRADE_LAB_HEALTH_DAILY_DISABLED` | `false` | when `true`, `/healthz/daily` returns 200 "disabled by config" — for a journal fed only by dry-run crons (mainnet observation phase, no live cron yet). Self-invalidating: if the journal already contains live cycles, the real verdict is returned instead. Flip to `false` in the same commit that enables the mainnet live cron. |
+
+**Two environments ⇒ two instances.** `ops/ecosystem.health.config.js`
+ships `trade-lab-health` (testnet journal, port 7001) and
+`trade-lab-health-mainnet` (`cycles_mainnet.jsonl`, port 7002, daily
+check disabled during the observation phase). A 200 from
+`/healthz/daily` can therefore also mean "disabled by config" — the
+JSON `reason` field distinguishes the two.
 
 ## Run it
 

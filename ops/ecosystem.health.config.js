@@ -34,5 +34,27 @@ module.exports = {
       // A tiny stdlib HTTP server; it should sit in the low tens of MB.
       max_memory_restart: "150M",
     },
+    {
+      // Second instance watching the MAINNET journal. Same read-only
+      // server, its own port. The daily check is disabled while the
+      // mainnet rollout is in the dry-run observation phase (no live
+      // order cron yet) — flip TRADE_LAB_HEALTH_DAILY_DISABLED to
+      // "false" in the same commit that enables the mainnet live cron.
+      name: "trade-lab-health-mainnet",
+      cwd: path.resolve(__dirname, ".."),
+      script: "ops/health_server.py",
+      interpreter: path.resolve(__dirname, "..", ".venv/bin/python"),
+      env: {
+        TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles_mainnet.jsonl",
+        TRADE_LAB_HEALTH_HOST: "127.0.0.1",
+        TRADE_LAB_HEALTH_PORT: "7002",
+        TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "43200",
+        TRADE_LAB_HEALTH_DAILY_MAX_AGE_S: "93600",
+        TRADE_LAB_HEALTH_DAILY_DISABLED: "true",
+      },
+      autorestart: true,
+      watch: false,
+      max_memory_restart: "150M",
+    },
   ],
 };

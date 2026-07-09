@@ -29,3 +29,21 @@ jobs:
     url: http://127.0.0.1:7000/_stcore/health
     timeout: 2
     status_accepted: [200]
+
+  # ── Mainnet instance (trade-lab-health-mainnet, port 7002) ────────────────
+  # Heartbeat for the mainnet journal (6-hourly mainnet dry-run cron).
+  - name: trade_lab_mainnet_heartbeat
+    url: http://127.0.0.1:7002/healthz
+    timeout: 2
+    status_accepted: [200]
+
+  # Daily live for mainnet. During the observation phase the server has
+  # TRADE_LAB_HEALTH_DAILY_DISABLED=true and answers 200 "disabled by
+  # config" — but the disable is self-invalidating: if live cycles appear
+  # in the journal while the flag is still set, the real verdict returns.
+  # Probing it from day one costs nothing and needs no config change when
+  # the live cron is enabled.
+  - name: trade_lab_mainnet_daily
+    url: http://127.0.0.1:7002/healthz/daily
+    timeout: 2
+    status_accepted: [200]

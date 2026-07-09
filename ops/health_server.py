@@ -146,6 +146,37 @@ def evaluate_heartbeat(
     return HealthResult(True, "ok", detail)
 
 
+def evaluate_daily_disabled(
+    reader: JournalReader, now: datetime, max_age_s: float,
+) -> HealthResult:
+    """Disabled-by-config path, self-invalidating.
+
+    The flag asserts "no live cron yet" (mainnet observation phase). If
+    the journal already contains main live cycles, that assertion is
+    stale — the operator enabled live orders but forgot to flip the
+    flag — and a stale disable on the real-money instance must page,
+    not mask a dead cron. Fail loud, not silent.
+    """
+    cycles = reader.cycles(DAILY_WINDOW_CYCLES)
+    has_main_live = any(
+        _is_live_attempt(c) and c.get("outcome") != "reconstructed"
+        for c in cycles
+    )
+    if has_main_live:
+        real = evaluate_daily(reader, now, max_age_s)
+        return HealthResult(
+            real.ok,
+            f"DAILY_DISABLED is set but the journal has live cycles — "
+            f"flag is stale, real verdict: {real.reason}",
+            real.detail,
+        )
+    return HealthResult(
+        True,
+        "disabled by config (TRADE_LAB_HEALTH_DAILY_DISABLED — "
+        "observation phase, no live cron)",
+    )
+
+
 def evaluate_daily(
     reader: JournalReader, now: datetime, max_age_s: float,
 ) -> HealthResult:
@@ -210,6 +241,11 @@ class Config:
     port: int = 7001
     heartbeat_max_age_s: float = DEFAULT_HEARTBEAT_MAX_AGE_S
     daily_max_age_s: float = DEFAULT_DAILY_MAX_AGE_S
+    # Observation-phase switch: a journal fed only by dry-run crons (no
+    # live order cron yet — the mainnet rollout starts that way) would
+    # keep /healthz/daily permanently 503 and train the operator to
+    # ignore it. Disabling it must be an explicit config statement.
+    daily_disabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -227,6 +263,9 @@ class Config:
             daily_max_age_s=float(os.environ.get(
                 "TRADE_LAB_HEALTH_DAILY_MAX_AGE_S", str(DEFAULT_DAILY_MAX_AGE_S),
             )),
+            daily_disabled=os.environ.get(
+                "TRADE_LAB_HEALTH_DAILY_DISABLED", "false",
+            ).strip().lower() in ("true", "1", "yes", "on"),
         )
 
 
@@ -257,7 +296,10 @@ class _HealthHandler(BaseHTTPRequestHandler):
                           {"ok": r.ok, "check": "heartbeat",
                            "reason": r.reason, **r.detail})
         elif path == "/healthz/daily":
-            r = evaluate_daily(reader, now, cfg.daily_max_age_s)
+            if cfg.daily_disabled:
+                r = evaluate_daily_disabled(reader, now, cfg.daily_max_age_s)
+            else:
+                r = evaluate_daily(reader, now, cfg.daily_max_age_s)
             self._respond(r.status_code,
                           {"ok": r.ok, "check": "daily_live",
                            "reason": r.reason, **r.detail})
@@ -266,7 +308,10 @@ class _HealthHandler(BaseHTTPRequestHandler):
                               metrics.CONTENT_TYPE)
         elif path == "/":
             hb = evaluate_heartbeat(reader, now, cfg.heartbeat_max_age_s)
-            dl = evaluate_daily(reader, now, cfg.daily_max_age_s)
+            if cfg.daily_disabled:
+                dl = evaluate_daily_disabled(reader, now, cfg.daily_max_age_s)
+            else:
+                dl = evaluate_daily(reader, now, cfg.daily_max_age_s)
             self._respond(200, {
                 "service": "trade-lab-health",
                 "journal_path": cfg.journal_path,
