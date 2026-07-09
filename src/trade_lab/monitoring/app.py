@@ -69,6 +69,12 @@ MAINNET_JOURNAL_PATH = os.environ.get(
 JOURNAL_SOURCES: dict[str, str] = {"testnet": JOURNAL_PATH}
 if MAINNET_JOURNAL_PATH:
     JOURNAL_SOURCES["mainnet"] = MAINNET_JOURNAL_PATH
+# Operator-facing labels for the environment switcher. MAINNET carries
+# the real-money warning right in the control, not just in the banner.
+_SOURCE_LABELS = {
+    "testnet": "🧪 TESTNET",
+    "mainnet": "🔴 MAINNET — REAL MONEY",
+}
 EXPECTED_INTERVAL_S = int(
     os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "21600")
 )
@@ -1708,15 +1714,57 @@ def _render_dashboard() -> None:
     script.
     """
     if len(JOURNAL_SOURCES) > 1:
-        source = st.radio(
+        source = st.segmented_control(
             "Environment",
             options=list(JOURNAL_SOURCES),
-            horizontal=True,
+            format_func=lambda s: _SOURCE_LABELS.get(s, s),
+            default=next(iter(JOURNAL_SOURCES)),
             key="journal_source",
+            label_visibility="collapsed",
             help="Which environment's journal to display. Each environment "
                  "writes its own journal file; the banner below is derived "
                  "from journal content as a cross-check.",
         )
+        # Single-select segmented controls allow DE-selecting the active
+        # segment (returns None) — fall back to the first source rather
+        # than blanking the page.
+        if source is None:
+            source = next(iter(JOURNAL_SOURCES))
+        # The switcher is a safety-relevant control: make the active
+        # environment unmissable. The selected segment is filled with the
+        # environment's colour (same palette as the banner), and on
+        # mainnet the whole page gets a thin red inset frame so the
+        # environment is visible even when scrolled past the banner.
+        # Selectors are scoped to this widget's key; if a future
+        # Streamlit renames the active-segment test-id, the control
+        # degrades to the default highlight — cosmetic only.
+        active_color = "#b71c1c" if source == "mainnet" else "#1b5e20"
+        st.markdown(
+            f"""
+            <style>
+            .st-key-journal_source button {{
+                font-size: 1.05rem; font-weight: 600;
+                padding: 0.45rem 1.4rem;
+            }}
+            .st-key-journal_source
+            [data-testid="stBaseButton-segmented_controlActive"] {{
+                background: {active_color} !important;
+                border-color: {active_color} !important;
+            }}
+            .st-key-journal_source
+            [data-testid="stBaseButton-segmented_controlActive"] p {{
+                color: white !important;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        if source == "mainnet":
+            st.markdown(
+                "<style>[data-testid='stAppViewContainer'] "
+                "{ box-shadow: inset 0 0 0 4px #b71c1c; }</style>",
+                unsafe_allow_html=True,
+            )
     else:
         source = next(iter(JOURNAL_SOURCES))
     journal_path = JOURNAL_SOURCES[source]

@@ -109,9 +109,65 @@ def test_dashboard_app_runs_headless(tmp_path, monkeypatch):
     at = pytest.importorskip("streamlit.testing.v1")
     monkeypatch.setenv(
         "TRADE_LAB_MONITORING_JOURNAL_PATH", str(tmp_path / "cycles.jsonl"))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
     app = at.AppTest.from_file(
         str(_REPO / "src" / "trade_lab" / "monitoring" / "app.py"), default_timeout=30)
     app.run()
     assert not app.exception, app.exception
     labels = [t.label for t in app.tabs]
     assert any("Research" in lbl for lbl in labels), labels
+    # Single-source mode: no environment switcher.
+    assert len(app.segmented_control) == 0
+
+
+def _cycle_line(sandbox: bool) -> str:
+    import json
+    return json.dumps({
+        "cycle_id": "x", "started_at": "2026-07-09T00:00:00+00:00",
+        "ended_at": "2026-07-09T00:00:05+00:00", "duration_ms": 5000,
+        "outcome": "success", "error": None, "git_commit": None,
+        "python_version": "3.11.0",
+        "context": {"mode": "dry_run", "exchange": "binance",
+                    "sandbox": sandbox, "quote_currency": "USDT",
+                    "basket": ["BTC"]},
+        "signal": None, "basket_close_series": None, "balance": None,
+        "equity_usd": None, "target_allocation": None,
+        "current_holdings_quote": None, "orders_planned": None,
+        "orders_skipped": None, "total_skipped_quote_drift": None,
+        "orders_executed": None, "schema_version": 2,
+    }) + "\n"
+
+
+def test_env_switcher_switches_journals(tmp_path, monkeypatch):
+    """Two configured sources -> segmented control renders, defaults to
+    testnet, and selecting mainnet swaps the journal (banner flips to
+    the content-derived MAINNET warning)."""
+    at = pytest.importorskip("streamlit.testing.v1")
+    testnet = tmp_path / "cycles.jsonl"
+    mainnet = tmp_path / "cycles_mainnet.jsonl"
+    testnet.write_text(_cycle_line(sandbox=True))
+    mainnet.write_text(_cycle_line(sandbox=False))
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(testnet))
+    monkeypatch.setenv(
+        "TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET", str(mainnet))
+
+    app = at.AppTest.from_file(
+        str(_REPO / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+
+    assert len(app.segmented_control) == 1
+    control = app.segmented_control[0]
+    assert control.value == "testnet"
+    page = " ".join(str(m.value) for m in app.markdown)
+    assert "TESTNET — BINANCE" in page
+
+    control.set_value("mainnet")
+    app.run()
+    assert not app.exception, app.exception
+    page = " ".join(str(m.value) for m in app.markdown)
+    assert "MAINNET — BINANCE — REAL MONEY" in page
+    # No SOURCE MISMATCH: mainnet label points at a mainnet journal.
+    assert "SOURCE MISMATCH" not in page
