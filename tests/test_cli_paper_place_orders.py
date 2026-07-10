@@ -193,6 +193,39 @@ def test_bad_outcome_exits_nonzero(monkeypatch, tmp_path, outcome):
     assert exc_info.value.code not in (0, None)
 
 
+def test_refuses_when_another_instance_holds_the_lock(
+    monkeypatch, tmp_path, capsys,
+):
+    """cron 00:05 + a manual run (H2): check-then-act idempotency
+    cannot stop a concurrent duplicate create_order, so the second
+    process must refuse loudly — exit 3, distinct from refusals (1)
+    and bad cycle outcomes (2) — BEFORE the broker is constructed."""
+    from trade_lab.execution.instance_lock import acquire_instance_lock
+
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config", _sandbox_config,
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(lambda cls, config: connect_calls.append(config)),
+    )
+
+    args = _args(tmp_path)
+    lock = acquire_instance_lock(args.state)  # the "cron" run
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_paper_place_orders(args)  # the "manual" run
+    finally:
+        lock.release()
+
+    assert exc_info.value.code == 3
+    assert "REFUSED" in capsys.readouterr().err
+    assert connect_calls == [], (
+        "the second instance must never even construct the broker"
+    )
+
+
 def test_lost_track_exits_nonzero_even_on_success(monkeypatch, tmp_path):
     """A lost_track surfaced by reconstruction must exit non-zero even
     when the MAIN cycle outcome is 'success' — cron alerting keys on the

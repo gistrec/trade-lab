@@ -256,6 +256,33 @@ def test_smoke_journal_record_carries_context(monkeypatch, tmp_path):
         assert_journal_env(journal_path, exchange_id="binance", sandbox=False)
 
 
+def test_refused_while_daily_cycle_holds_the_lock(
+    monkeypatch, tmp_path, capsys,
+):
+    """paper-place-test-order shares the per-environment lock with
+    paper-place-orders (same state file): a smoke test fired while the
+    daily cycle is mid-flight must refuse with exit 3 before any
+    exchange call — check-then-act idempotency cannot stop a
+    concurrent duplicate create_order (H2)."""
+    from trade_lab.execution.instance_lock import acquire_instance_lock
+
+    exch = _FakeExchange()
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+
+    args = _args(tmp_path)
+    lock = acquire_instance_lock(args.state)  # the "daily cycle"
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_paper_place_test_order(args)
+    finally:
+        lock.release()
+
+    assert exc_info.value.code == 3
+    assert "REFUSED" in capsys.readouterr().err
+    assert exch.create_order_calls == []
+    assert exch.fetch_order_calls == []
+
+
 # ---------------------------------------------------------------------------
 # Sub-minimum preflight
 # ---------------------------------------------------------------------------

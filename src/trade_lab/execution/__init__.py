@@ -24,6 +24,9 @@ from .journal import (
     JOURNAL_SCHEMA_VERSION, MAX_LINE_BYTES, assert_journal_env,
 )
 from .dry_run import DryRunResult, print_dry_run, run_dry_cycle
+from .instance_lock import (
+    InstanceLock, InstanceLockHeld, acquire_instance_lock,
+)
 from .live_cycle import LiveCycleResult, run_live_cycle
 from .order_state import (
     OrderStateEntry, OrderStateEnvMismatch, OrderStateStore,
@@ -38,6 +41,8 @@ __all__ = [
     "Cycle",
     "DeltaPlan",
     "DryRunResult",
+    "InstanceLock",
+    "InstanceLockHeld",
     "JOURNAL_SCHEMA_VERSION",
     "JournalEntryTooLarge",
     "JournalEnvMismatch",
@@ -58,6 +63,7 @@ __all__ = [
     "SkippedDelta",
     "TERMINAL_STATUSES",
     "TargetAllocation",
+    "acquire_instance_lock",
     "assert_journal_env",
     "compute_delta_plan",
     "compute_live_signal",

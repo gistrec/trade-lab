@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -862,8 +863,9 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
     from pathlib import Path
 
     from .execution import (
-        Broker, BrokerError, JournalEnvMismatch, PaperConfigError,
-        assert_journal_env, load_paper_config,
+        Broker, BrokerError, InstanceLockHeld, JournalEnvMismatch,
+        PaperConfigError, acquire_instance_lock, assert_journal_env,
+        load_paper_config,
     )
     from .execution.clientorder import normalize_symbol
     from .execution.delta import OrderIntent
@@ -910,6 +912,23 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
             )
         except JournalEnvMismatch as exc:
             raise SystemExit(f"REFUSED: {exc}")
+
+    state_path = args.state or (
+        "data/state/orders.json" if config.sandbox
+        else "data/state/orders_mainnet.json"
+    )
+    # Single-instance guard, shared with paper-place-orders: one
+    # exclusive per-environment lock next to the shared state file. A
+    # smoke test fired while the daily cycle is mid-flight (or vice
+    # versa) must refuse BEFORE any exchange call — the check-then-act
+    # idempotency in orders.py has no defense against a concurrent
+    # duplicate create. Held until process exit (the OS releases it
+    # even on a crash); exit 3 mirrors paper-place-orders.
+    try:
+        acquire_instance_lock(state_path)
+    except InstanceLockHeld as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        raise SystemExit(3)
 
     try:
         broker = Broker.connect(config)
@@ -973,10 +992,6 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
         notional_quote=effective_notional,
         price_used=price,
         reason="smoke_test",
-    )
-    state_path = args.state or (
-        "data/state/orders.json" if config.sandbox
-        else "data/state/orders_mainnet.json"
     )
     try:
         state = OrderStateStore(
@@ -1054,9 +1069,10 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     mainnet runs can never interleave in the same files.
     """
     from .execution import (
-        Broker, BrokerError, JournalEnvMismatch, JournalWriter,
-        OrderStateEnvMismatch, OrderStateStore, PaperConfigError,
-        assert_journal_env, load_paper_config, run_live_cycle,
+        Broker, BrokerError, InstanceLockHeld, JournalEnvMismatch,
+        JournalWriter, OrderStateEnvMismatch, OrderStateStore,
+        PaperConfigError, acquire_instance_lock, assert_journal_env,
+        load_paper_config, run_live_cycle,
     )
 
     try:
@@ -1086,6 +1102,24 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         "data/state/orders.json" if config.sandbox
         else "data/state/orders_mainnet.json"
     )
+    # Single-instance guard, BEFORE any exchange call. Idempotency in
+    # orders.py is check-then-act: two concurrent runs (cron at 00:05 +
+    # a manual invocation) both pass query-before-place with
+    # OrderNotFound and both create the same clientOrderId — Binance
+    # dedups newClientOrderId only against a live order, so a filled
+    # market order lets the duplicate through: doubled position. The
+    # lock is per environment (it lives next to the state file, which
+    # paper-place-test-order shares) and is held until the process
+    # exits; the OS releases it even on a crash.
+    try:
+        acquire_instance_lock(state_path)
+    except InstanceLockHeld as exc:
+        # Exit 3: distinct from refusals/config errors (1) and bad
+        # cycle outcomes (2), so cron alerting can tell "another run is
+        # still going" from a real incident.
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        raise SystemExit(3)
+
     expected_env = {"exchange": config.exchange_id, "sandbox": config.sandbox}
     try:
         state = OrderStateStore(state_path, expected_env=expected_env)
