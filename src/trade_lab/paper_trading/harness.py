@@ -8,10 +8,17 @@ Each invocation does, in this order:
    hash differs, *something* changed the canonical parameters since
    the test started, and the resulting log row would be measuring a
    different strategy. Raise loud.
-2. **Idempotency check.** If today's UTC date is already in the
-   journal, return that row without recomputing — the cron job can
-   be invoked multiple times per day safely.
-3. **Fetch candles** for the 7 frozen-basket assets.
+2. **Idempotency check.** If the cycle's signal date is already in
+   the journal, return that row without recomputing — the cron job
+   can be invoked multiple times per day safely.
+3. **Fetch candles** for the 7 frozen-basket assets: completed daily
+   bars up to and including the signal date, never beyond. The signal
+   date is ``asof`` for a backfill and ``today - 1`` for a same-day
+   run (the bar stamped today is still forming — the live path in
+   ``execution.signal.compute_live_signal`` drops it the same way).
+   A fetched bar dated after the signal date trips a hard look-ahead
+   guard: a backfilled row must equal what a same-day run would have
+   written, and both must equal the backtest's signal at that date.
 4. **Vintage snapshot.** Canonical-serialize the OHLCV bytes,
    content-hash, write immutably (no overwrite).
 5. **Compute signal** with the frozen strategy on the frozen basket
@@ -57,7 +64,16 @@ def run_paper_trading_cycle(
     candles_per_asset: int = 400,
     fetch_callable: Optional[Callable[[str, int, date], pd.DataFrame]] = None,
 ) -> HarnessLogRow:
-    """Run one cycle. Returns the written (or already-existing) row."""
+    """Run one cycle. Returns the written (or already-existing) row.
+
+    ``asof`` is the cycle date (default: today UTC). The row is keyed
+    and labeled by the cycle's *signal date* — the last completed daily
+    bar: ``asof`` itself for a backfill (``asof < today``), yesterday
+    for a same-day run (the bar stamped today is still forming). The
+    journal row dated ``T`` is therefore always the backtest's signal
+    at index ``T``, computed on closes up to and including the
+    completed ``close[T]``, regardless of when the cycle ran.
+    """
     log_path = Path(log_path)
     vintage_root = Path(vintage_root)
 
@@ -73,11 +89,28 @@ def run_paper_trading_cycle(
         )
 
     # --- Step 2: idempotency check ---
+    today_utc = datetime.now(tz=timezone.utc).date()
     if asof is None:
-        asof = datetime.now(tz=timezone.utc).date()
-    asof_str = asof.isoformat()
-    if is_already_logged(asof_str, log_path):
-        existing = get_row_for_date(asof_str, log_path)
+        asof = today_utc
+    if asof > today_utc:
+        raise HarnessError(
+            f"asof={asof.isoformat()} is in the future (today UTC is "
+            f"{today_utc.isoformat()}). A cycle can only be computed on "
+            f"completed daily bars — refusing."
+        )
+    # The signal date is the last COMPLETED daily bar as of ``asof``.
+    # Daily bars are stamped at their open (00:00 UTC), so the bar
+    # stamped today is still forming while a same-day cycle runs —
+    # using it would let intraday noise into signal/SMA and diverge
+    # from the live path (execution.signal.compute_live_signal drops
+    # the forming bar) and from the backtest (signal[T] is a function
+    # of the completed close[T]). A backfill (asof < today) uses the
+    # completed bar dated ``asof`` itself; the next-day bar never
+    # participates even if it already exists.
+    signal_date = asof if asof < today_utc else today_utc - timedelta(days=1)
+    signal_date_str = signal_date.isoformat()
+    if is_already_logged(signal_date_str, log_path):
+        existing = get_row_for_date(signal_date_str, log_path)
         # type guard — is_already_logged True implies a row exists
         assert existing is not None
         return existing
@@ -87,20 +120,35 @@ def run_paper_trading_cycle(
     asset_candles: dict[str, pd.DataFrame] = {}
     for sym in PRODUCTION_CONFIG.assets:
         try:
-            df = fetch(sym, candles_per_asset, asof)
+            df = fetch(sym, candles_per_asset, signal_date)
         except Exception as exc:
             raise HarnessError(
                 f"Could not fetch candles for {sym}: {exc}"
             ) from exc
         if df.empty:
             raise HarnessError(
-                f"Empty candles returned for {sym} at asof={asof_str}. "
+                f"Empty candles returned for {sym} at asof={signal_date_str}. "
                 "Failing loud rather than logging a row with a partial basket."
             )
         # Normalise tz so the canonical hash is stable
         if df.index.tz is None:
             df = df.copy()
             df.index = df.index.tz_localize("UTC")
+        # Hard look-ahead guard: no bar after the signal date may reach
+        # the vintage snapshot or the signal. Raise instead of silently
+        # clamping — a future bar here means the fetcher's window
+        # regressed (H5: `until = asof + 1 day` against fetch_ohlcv's
+        # INCLUSIVE bound let the completed T+1 bar into a backfill and
+        # the forming bar into a same-day run, so the "immutable" row
+        # for T was computed on data unavailable at T's close).
+        last_bar_date = df.index.max().date()
+        if last_bar_date > signal_date:
+            raise HarnessError(
+                f"Look-ahead guard tripped for {sym}: fetched candles end "
+                f"at {last_bar_date.isoformat()}, after the signal date "
+                f"{signal_date_str}. Fix the fetcher's window; refusing to "
+                f"journal a row computed on future bars."
+            )
         asset_candles[sym] = df
 
     # --- Step 4: immutable vintage snapshot ---
@@ -117,6 +165,15 @@ def run_paper_trading_cycle(
     )
     if basket.empty:
         raise HarnessError("Basket construction returned an empty frame.")
+    basket_last_date = basket.index[-1].date()
+    if basket_last_date != signal_date:
+        raise HarnessError(
+            f"Basket ends at {basket_last_date.isoformat()} but the "
+            f"cycle's signal date is {signal_date_str}. Journaling this "
+            f"row would silently mislabel a stale signal as "
+            f"{signal_date_str}'s (the date-join with the backtest would "
+            f"break) — refusing."
+        )
 
     strategy = TimeSeriesMomentumStrategy(
         lookbacks=cfg.lookbacks,
@@ -154,7 +211,7 @@ def run_paper_trading_cycle(
     target_per_asset = ladder_state / n_assets
     target_weights = {sym: target_per_asset for sym in cfg.assets}
 
-    prior_row = _prior_row(log_path, asof_str)
+    prior_row = _prior_row(log_path, signal_date_str)
     if prior_row is None:
         prior_ladder = 0.0
         current_weights = {sym: 0.0 for sym in cfg.assets}
@@ -201,7 +258,7 @@ def run_paper_trading_cycle(
 
     # --- Step 7: append row ---
     row = HarnessLogRow(
-        date=asof_str,
+        date=signal_date_str,
         config_hash=CANONICAL_HASH,
         vintage_content_hash=vintage_hash,
         basket_close=basket_close,
@@ -255,14 +312,24 @@ def _basket_close_on_date(close: pd.Series, date_str: str) -> Optional[float]:
 
 
 def _default_fetch(sym: str, n_bars: int, asof: date) -> pd.DataFrame:
-    """Default live fetch: paginated Binance daily OHLCV up to ``asof``.
+    """Default live fetch: paginated Binance daily OHLCV of completed
+    bars up to and including the bar dated ``asof``.
+
+    Daily bars are stamped at their open (00:00 UTC) and
+    ``fetch_ohlcv``'s ``until`` bound is INCLUSIVE, so the bound must
+    be midnight of ``asof`` itself. The previous ``asof + 1 day`` bound
+    also matched the bar stamped ``asof + 1`` — on a backfill that is
+    the completed next-day bar (a literal 1-bar look-ahead into signal,
+    SMA(200) and the immutable vintage), on a same-day run it is the
+    still-forming current bar. ``run_paper_trading_cycle`` only ever
+    passes a completed-bar date here (yesterday at the latest).
 
     A test or replay can pass a custom ``fetch_callable`` to bypass
     the live exchange (so tests don't hit the network).
     """
     since_date = asof - timedelta(days=int(n_bars * 1.2))
     since = datetime(since_date.year, since_date.month, since_date.day)
-    until = datetime(asof.year, asof.month, asof.day) + timedelta(days=1)
+    until = datetime(asof.year, asof.month, asof.day)
     df = fetch_ohlcv(
         "binance",
         f"{sym}/USDT",

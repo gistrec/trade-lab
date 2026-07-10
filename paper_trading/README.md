@@ -76,7 +76,12 @@ Hands-on operators can run interactively to debug:
 
 * `--log-path` (default `paper_trading/logs/journal.jsonl`).
 * `--vintage-root` (default `paper_trading/vintages`).
-* `--asof YYYY-MM-DD` (default: today UTC).
+* `--asof YYYY-MM-DD` (default: today UTC). The journal row is keyed
+  by the last **completed** daily bar: `asof` itself for a past date
+  (backfill of a missed cron day), yesterday for a same-day run —
+  today's bar is still forming and never participates, and a bar
+  after `asof` (e.g. the completed next-day bar during a backfill)
+  trips a hard look-ahead guard.
 * `--candles-per-asset` (default 400; ≥ 200 needed for SMA(200) warmup).
 
 ## Files in this directory

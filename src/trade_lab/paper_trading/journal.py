@@ -20,7 +20,11 @@ forward; old rows stay as they were.
 
 Row schema (v1)
 ===============
-``date``                       ISO YYYY-MM-DD (UTC date of the cycle)
+``date``                       ISO YYYY-MM-DD (UTC *signal date* — the
+                               last completed daily bar the signal was
+                               computed on: ``asof`` for a backfill,
+                               yesterday for a same-day run, since the
+                               bar stamped today is still forming)
 ``config_hash``                ``CANONICAL_HASH`` at write time
 ``vintage_content_hash``       SHA-256 of the OHLCV bytes used
 ``basket_close``               float — basket index close at as-of

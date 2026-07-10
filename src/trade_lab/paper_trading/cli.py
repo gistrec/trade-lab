@@ -50,7 +50,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--asof",
         default=None,
-        help="ISO date (YYYY-MM-DD) of the cycle. Default: today UTC.",
+        help="ISO date (YYYY-MM-DD) of the cycle. Default: today UTC. "
+             "The journal row is keyed by the last COMPLETED daily bar: "
+             "asof itself for a past date (backfill), yesterday for a "
+             "same-day run (today's bar is still forming).",
     )
     parser.add_argument(
         "--candles-per-asset",

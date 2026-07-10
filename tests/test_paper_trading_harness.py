@@ -4,7 +4,7 @@ same input.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -296,6 +296,188 @@ def test_target_weights_sum_equals_ladder(tmp_path):
     )
     assert pytest.approx(sum(row.target_weights.values()), rel=1e-9) == row.ladder_state
     assert sorted(row.target_weights.keys()) == sorted(PRODUCTION_CONFIG.assets)
+
+
+# ---------------------------------------------------------------------------
+# H5 — look-ahead window regressions: the fetch window must never include
+# a bar after the cycle's signal date (completed T+1 bar on a backfill,
+# the still-forming bar on a same-day run).
+# ---------------------------------------------------------------------------
+
+
+class _FrozenDatetime(datetime):
+    """``datetime`` replacement whose ``now()`` is pinned to
+    2024-06-05 12:00 UTC, so the same-day tests are deterministic and
+    immune to running across a real UTC midnight."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2024, 6, 5, 12, 0, tzinfo=tz)
+
+
+def _contract_fetcher(panel, seen: dict | None = None):
+    """A fetcher honoring the harness contract: bars up to and including
+    the ``asof`` argument the harness passes in. Optionally records that
+    argument in ``seen``."""
+
+    def fetch(sym: str, n_bars: int, asof: date) -> pd.DataFrame:
+        if seen is not None:
+            seen["cutoff"] = asof
+        df = panel[sym]
+        return df[df.index <= pd.Timestamp(asof, tz="UTC")].iloc[-n_bars:]
+
+    return fetch
+
+
+def test_default_fetch_window_excludes_bars_after_asof(monkeypatch):
+    """_default_fetch must bound the window at the completed bar dated
+    ``asof``. fetch_ohlcv's ``until`` filter is INCLUSIVE and daily bars
+    are stamped at their open, so the old ``until = asof + 1 day`` also
+    matched the bar stamped ``asof + 1`` — the H5 1-bar look-ahead."""
+
+    def fake_fetch_ohlcv(exchange_id, symbol, timeframe, since, until, limit):
+        # Bars past `asof` exist; replicate the real fetch_ohlcv's
+        # INCLUSIVE `until` cut so the test pins the composed semantics
+        # (bound value × inclusive filter).
+        idx = pd.date_range("2024-01-01", "2024-06-05", freq="D", tz="UTC")
+        close = np.linspace(100.0, 200.0, len(idx))
+        df = pd.DataFrame(
+            {
+                "open": close, "high": close * 1.001,
+                "low": close * 0.999, "close": close,
+                "volume": np.full(len(idx), 1.0e6),
+            },
+            index=idx,
+        ).rename_axis("timestamp")
+        return df[df.index <= pd.Timestamp(until, tz="UTC")]
+
+    monkeypatch.setattr(harness_mod, "fetch_ohlcv", fake_fetch_ohlcv)
+    asof = date(2024, 6, 1)
+    df = harness_mod._default_fetch("BTC", 10, asof)
+    assert df.index[-1].date() == asof            # completed bar T included
+    assert not (df.index.date > asof).any()       # nothing beyond T
+
+
+def test_backfill_with_completed_next_day_bar_excludes_it(tmp_path):
+    """--asof T backfill while the completed T+1 bar already exists (the
+    documented missed-cron recovery): T+1 must NOT participate — the row
+    (signal, vintage, basket_close) must be identical to one computed on
+    a panel that simply ends at T, and the guard must stay silent."""
+    asof = date(2024, 6, 1)
+    panel = _synthetic_candles(date(2024, 6, 2))  # ends at T+1
+    # Poison the T+1 bar so any leak flips lookbacks/SMA loudly.
+    for sym in panel:
+        panel[sym].iloc[-1] = panel[sym].iloc[-1] * 5.0
+
+    row = run_paper_trading_cycle(
+        log_path=tmp_path / "a.jsonl", vintage_root=tmp_path / "va",
+        asof=asof, fetch_callable=_contract_fetcher(panel),
+    )
+
+    ref_panel = {
+        s: df[df.index <= pd.Timestamp(asof, tz="UTC")]
+        for s, df in panel.items()
+    }
+    ref = run_paper_trading_cycle(
+        log_path=tmp_path / "b.jsonl", vintage_root=tmp_path / "vb",
+        asof=asof, fetch_callable=lambda s, n, _a: ref_panel[s].iloc[-n:],
+    )
+    assert row.date == "2024-06-01"
+    assert row.vintage_content_hash == ref.vintage_content_hash
+    assert row.ladder_state == ref.ladder_state
+    assert row.basket_close == ref.basket_close
+    assert row.per_lookback_returns == ref.per_lookback_returns
+
+
+def test_lookahead_guard_raises_on_bar_beyond_signal_date(tmp_path):
+    """A fetcher that bypasses the window and returns a bar dated after
+    the signal date must trip the hard guard BEFORE anything is
+    snapshotted or journaled (future filter regressions fail loud)."""
+    asof = date(2024, 6, 1)
+    panel = _synthetic_candles(date(2024, 6, 2))  # completed T+1 exists
+
+    def leaky_fetch(sym, n_bars, _asof):
+        return panel[sym].iloc[-n_bars:]  # ignores the cutoff → leaks T+1
+
+    log = tmp_path / "j.jsonl"
+    vroot = tmp_path / "v"
+    with pytest.raises(HarnessError, match="Look-ahead guard"):
+        run_paper_trading_cycle(
+            log_path=log, vintage_root=vroot, asof=asof,
+            fetch_callable=leaky_fetch,
+        )
+    assert not log.exists()                                   # no journal row
+    assert not vroot.exists() or not any(vroot.rglob("*"))    # no vintage
+
+
+def test_same_day_run_uses_last_completed_bar(tmp_path, monkeypatch):
+    """Default (cron) invocation during day D: the still-forming bar D
+    must not participate; the row is computed on — and dated by — the
+    last completed bar D-1. Same convention as the live path
+    (execution.signal drops the forming bar) and the backtest
+    (signal[T] is a function of the completed close[T])."""
+    monkeypatch.setattr(harness_mod, "datetime", _FrozenDatetime)
+    today = date(2024, 6, 5)
+    yesterday = date(2024, 6, 4)
+    panel = _synthetic_candles(today)  # last bar stamped today == forming
+    seen: dict = {}
+
+    log = tmp_path / "j.jsonl"
+    row = run_paper_trading_cycle(
+        log_path=log, vintage_root=tmp_path / "v", asof=None,
+        fetch_callable=_contract_fetcher(panel, seen),
+    )
+    assert seen["cutoff"] == yesterday            # forming bar cut at source
+    assert row.date == yesterday.isoformat()      # row keyed by signal date
+    # Idempotent re-run within the same UTC day returns the same row.
+    row2 = run_paper_trading_cycle(
+        log_path=log, vintage_root=tmp_path / "v", asof=None,
+        fetch_callable=_contract_fetcher(panel),
+    )
+    assert row2.date == row.date
+    assert len(read_log(log)) == 1
+
+
+def test_same_day_forming_bar_leak_trips_guard(tmp_path, monkeypatch):
+    """If a fetcher leaks the forming current-day bar on a same-day run,
+    the guard must raise rather than let intraday noise into the row."""
+    monkeypatch.setattr(harness_mod, "datetime", _FrozenDatetime)
+    panel = _synthetic_candles(date(2024, 6, 5))  # forming bar included
+
+    def leaky_fetch(sym, n_bars, _asof):
+        return panel[sym].iloc[-n_bars:]
+
+    with pytest.raises(HarnessError, match="Look-ahead guard"):
+        run_paper_trading_cycle(
+            log_path=tmp_path / "j.jsonl", vintage_root=tmp_path / "v",
+            asof=None, fetch_callable=leaky_fetch,
+        )
+
+
+def test_future_asof_raises(tmp_path, monkeypatch):
+    """A future --asof cannot be computed on completed bars — hard error,
+    not a silent window into whatever the fetcher returns."""
+    monkeypatch.setattr(harness_mod, "datetime", _FrozenDatetime)
+    tomorrow = date(2024, 6, 6)
+    with pytest.raises(HarnessError, match="future"):
+        run_paper_trading_cycle(
+            log_path=tmp_path / "j.jsonl", vintage_root=tmp_path / "v",
+            asof=tomorrow, fetch_callable=_stub_fetcher(tomorrow),
+        )
+
+
+def test_stale_candles_raise_instead_of_mislabeling(tmp_path):
+    """Candles ending BEFORE the signal date must raise: journaling a row
+    dated T computed on older bars would silently break the date-join
+    with the backtest (fail loud, not silent)."""
+    asof = date(2024, 6, 5)
+    panel = _synthetic_candles(date(2024, 6, 1))  # 4 days stale
+
+    with pytest.raises(HarnessError, match="Basket ends"):
+        run_paper_trading_cycle(
+            log_path=tmp_path / "j.jsonl", vintage_root=tmp_path / "v",
+            asof=asof, fetch_callable=lambda s, n, _a: panel[s].iloc[-n:],
+        )
 
 
 def test_journal_row_round_trips_through_disk(tmp_path):
