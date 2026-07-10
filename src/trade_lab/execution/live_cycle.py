@@ -306,6 +306,12 @@ def _reconstruct_open_orders(
             terminal = "closed" if filled >= entry.intended_amount * 0.9999 else "partial"
         elif status_str == "canceled":
             terminal = "canceled"
+        elif status_str in ("expired", "rejected"):
+            # Exchange-terminal without a (full) fill: ccxt maps Binance
+            # EXPIRED / EXPIRED_IN_MATCH → 'expired' and REJECTED →
+            # 'rejected'. A non-zero fill is accounted as 'partial',
+            # same as an exchange-closed partial.
+            terminal = "partial" if filled > 0 else status_str
         else:
             # Still non-terminal — leave entry for next cycle to retry.
             logger.info(
@@ -314,9 +320,11 @@ def _reconstruct_open_orders(
             )
             continue
 
-        # closed/canceled go into state as terminal so the next cycle
-        # does not re-attempt reconstruction.
-        persisted_status = "closed" if terminal in ("closed", "partial") else "canceled"
+        # Every exchange-terminal status goes into state as terminal so
+        # the next cycle does not re-attempt reconstruction. 'partial'
+        # is stored as 'closed' — the exchange will never fill more, so
+        # there is nothing left to reconcile (mirrors orders._persist).
+        persisted_status = "closed" if terminal == "partial" else terminal
         new_entry = replace(
             entry,
             status=persisted_status,
@@ -354,15 +362,15 @@ def _determine_outcome(order_results: list[OrderResult]) -> str:
     """Map the multiset of per-order statuses to one cycle-level word.
 
     Priority order (most urgent first): timeout/lost_track →
-    partial/canceled/rejected → success. Empty (no orders to place,
-    e.g. signal=0 with current=0) is a clean success too.
+    partial/canceled/rejected/expired → success. Empty (no orders to
+    place, e.g. signal=0 with current=0) is a clean success too.
     """
     if not order_results:
         return "success"
     statuses = {r.terminal_status for r in order_results}
     if statuses & {"timeout", "lost_track"}:
         return "unknown_orders"
-    if statuses & {"partial", "canceled", "rejected"}:
+    if statuses & {"partial", "canceled", "rejected", "expired"}:
         return "partial"
     return "success"
 

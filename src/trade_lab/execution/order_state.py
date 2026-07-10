@@ -39,7 +39,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-TERMINAL_STATUSES = frozenset({"closed", "canceled", "rejected"})
+TERMINAL_STATUSES = frozenset({"closed", "canceled", "rejected", "expired"})
 NON_TERMINAL_STATUSES = frozenset({"open", "partial", "timeout", "lost_track"})
 ALL_STATUSES = TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 

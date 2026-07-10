@@ -48,7 +48,13 @@ TOTAL_TIMEOUT_S = 300.0
 
 # CCXT status strings that represent a finished order on the exchange.
 # We map these onto our own terminal taxonomy in :func:`_result_from_order`.
-_CCXT_TERMINAL = frozenset({"closed", "canceled"})
+# 'expired' and 'rejected' are terminal too: ccxt maps Binance EXPIRED /
+# EXPIRED_IN_MATCH → 'expired' (a market order against an empty book —
+# routine on testnet — or a self-trade-prevention cancel on mainnet) and
+# REJECTED → 'rejected'. Treating them as non-terminal burns the whole
+# wait budget on an order that will never change and journals a false
+# 'timeout' whose state entry no later cycle can resolve.
+_CCXT_TERMINAL = frozenset({"closed", "canceled", "expired", "rejected"})
 
 
 @dataclass(frozen=True)
@@ -415,6 +421,10 @@ def _result_from_order(
       (Binance closes an order when no more fills are possible — for
       market orders that can mean fee-eaten size or instant-cancel.)
     * ``status='canceled'`` → ``canceled``
+    * ``status='expired'`` / ``'rejected'`` → the same status when
+      unfilled, ``partial`` when the exchange filled some of it first
+      (an IOC-style expiry). Either way exchange-terminal
+      (``terminal_at`` set): no further fills will ever come.
     * non-terminal (we hit the wait-for-ack timeout) → ``timeout`` if
       no fill yet, ``partial`` if there's a non-zero ``filled``.
     """
@@ -435,6 +445,14 @@ def _result_from_order(
         terminal_status, terminal_at = "partial", utcnow_iso()
     elif status == "canceled":
         terminal_status, terminal_at = "canceled", utcnow_iso()
+    elif status in ("expired", "rejected"):
+        logger.warning(
+            "Order %s is %s on the exchange (filled=%s of intended %s) — "
+            "exchange-terminal, no further fills will come.",
+            client_order_id, status, filled, intended,
+        )
+        terminal_status = "partial" if filled > 0 else status
+        terminal_at = utcnow_iso()
     elif filled > 0:
         terminal_status, terminal_at = "partial", None
     else:

@@ -5,8 +5,9 @@ Coverage focus:
 * Idempotency: state-cached terminal skips both fetch and create.
 * Query-before-place: existing exchange-side order is observed and
   waited on, never re-created.
-* Wait-for-ack: exponential backoff terminates on closed/canceled
-  status; on budget exhaustion returns the last observed dict.
+* Wait-for-ack: exponential backoff terminates on closed/canceled/
+  expired/rejected status; on budget exhaustion returns the last
+  observed dict.
 * Business rejections map to ``terminal_status='rejected'`` and do
   not raise; network errors propagate.
 * Reconstruction: fetch_order success; fetch_my_trades fallback;
@@ -25,6 +26,7 @@ from trade_lab.execution.delta import OrderIntent
 from trade_lab.execution.order_state import (
     OrderStateEntry,
     OrderStateStore,
+    TERMINAL_STATUSES,
 )
 from trade_lab.execution.orders import (
     POLL_INITIAL_S,
@@ -412,6 +414,91 @@ def test_wait_for_terminal_returns_last_observed_on_timeout():
     )
     assert order["status"] == "open"  # last observed, non-terminal
     assert clock.now >= 10.0
+
+
+# ---------------------------------------------------------------------------
+# Exchange-terminal 'expired' / 'rejected' statuses (regression: M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ccxt_status", ["expired", "rejected"])
+def test_expired_rejected_terminal_immediately_no_budget_burn(tmp_path, ccxt_status):
+    """ccxt maps Binance EXPIRED / EXPIRED_IN_MATCH → 'expired' (a market
+    order against an empty book — routine on testnet; a self-trade-
+    prevention cancel on mainnet) and REJECTED → 'rejected'. Both must
+    terminate the wait loop on the FIRST poll — not burn the 300s budget
+    and journal a false 'timeout' whose non-terminal state entry then
+    zombies through every later cycle's reconstruction."""
+    exch = _MockExchange(
+        create_order_response=_ccxt_order(status="open", filled=0.0),
+        fetch_order_sequence=[
+            ccxt.OrderNotFound("before placement"),
+            {"id": "12345", "status": ccxt_status, "filled": 0.0,
+             "cost": 0.0, "average": None, "timestamp": 1717000000000},
+        ],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    clock = _MockClock()
+    coid = "tsmom_20260710_BTCUSDT_buy"
+
+    result = place_order(
+        broker, _intent(), client_order_id=coid, state=store,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.terminal_status == ccxt_status   # never a false 'timeout'
+    assert result.terminal_status != "closed"      # and never a success
+    assert result.terminal_at is not None          # exchange-terminal
+    assert result.filled_amount == 0.0
+    assert clock.sleeps == []                      # zero wait budget burned
+    entry = store.get(coid)
+    assert entry.status == ccxt_status
+    assert entry.status in TERMINAL_STATUSES       # no zombie re-poll later
+    assert store.open_entries() == {}
+
+
+def test_expired_with_partial_fill_maps_to_partial(tmp_path):
+    """An IOC-style expiry that filled some size first is an exchange-
+    terminal 'partial' (same accounting as closed-below-intended) and is
+    stored as 'closed' — the exchange will never fill more."""
+    exch = _MockExchange(
+        create_order_response=_ccxt_order(status="open", filled=0.0),
+        fetch_order_sequence=[
+            ccxt.OrderNotFound("before placement"),
+            {"id": "12345", "status": "expired", "filled": 0.0004,
+             "cost": 19.98, "average": 49950.0, "timestamp": 1717000000000},
+        ],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    clock = _MockClock()
+    coid = "tsmom_20260710_BTCUSDT_buy"
+
+    result = place_order(
+        broker, _intent(amount=0.001), client_order_id=coid, state=store,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.terminal_status == "partial"
+    assert result.terminal_at is not None
+    assert result.filled_amount == 0.0004
+    assert store.get(coid).status == "closed"
+
+
+@pytest.mark.parametrize("ccxt_status", ["expired", "rejected"])
+def test_wait_for_terminal_returns_on_expired_rejected(ccxt_status):
+    """The wait loop itself treats expired/rejected as terminal — no sleep."""
+    exch = _MockExchange(fetch_order_sequence=[
+        {"id": "12345", "status": ccxt_status, "filled": 0.0},
+    ])
+    broker = _broker(exch)
+    clock = _MockClock()
+
+    order = wait_for_terminal(
+        broker, "tsmom_20260710_BTCUSDT_buy", "BTC/USDT",
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert order["status"] == ccxt_status
+    assert clock.sleeps == []
 
 
 # ---------------------------------------------------------------------------

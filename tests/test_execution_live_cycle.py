@@ -354,6 +354,54 @@ def test_rejected_outcome_when_create_raises_invalid(tmp_path):
     assert cycle["orders_executed"][0]["terminal_status"] == "rejected"
 
 
+def test_expired_order_outcome_partial_and_next_cycle_skips(tmp_path):
+    """Regression (M1): an order the exchange reports as 'expired' (ccxt
+    unified status for Binance EXPIRED / EXPIRED_IN_MATCH) must resolve
+    immediately: cycle outcome 'partial' (non-zero exit), journal entry
+    with terminal_status='expired', terminal state entry — and the NEXT
+    cycle must neither reconstruct nor re-poll nor re-place it."""
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    coid = f"tsmom_{today}_BTCUSDT_buy"
+    state = _state(tmp_path)
+    journal = _journal(tmp_path)
+    clock = _MockClock()
+
+    stub = _LiveStub(basket=("BTC",))
+    stub.fetch_order_responses[coid] = [
+        ccxt.OrderNotFound("before placement"),
+        {"id": "exch-1", "status": "expired", "filled": 0.0,
+         "cost": 0.0, "average": None, "timestamp": 0},
+    ]
+    broker = _broker(stub, basket=("BTC",))
+    result = run_live_cycle(
+        broker, journal=journal, state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.outcome == "partial"           # incident, not success
+    assert result.outcome != "unknown_orders"    # and not a false timeout
+    cycle = _read_cycles(tmp_path)[0]
+    assert cycle["orders_executed"][0]["terminal_status"] == "expired"
+    assert state.get(coid).status == "expired"
+    assert state.open_entries() == {}            # nothing left to reconcile
+
+    # Next cycle (same day re-run): the state fast-path answers from the
+    # terminal entry — zero fetch_order / create_order round-trips and no
+    # reconstruction journal entry.
+    stub2 = _LiveStub(basket=("BTC",))
+    broker2 = _broker(stub2, basket=("BTC",))
+    result2 = run_live_cycle(
+        broker2, journal=journal, state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert stub2.fetch_order_calls == []
+    assert stub2.create_order_calls == []
+    assert result2.reconstructed_count == 0
+    outcomes = [c["outcome"] for c in _read_cycles(tmp_path)]
+    assert "reconstructed" not in outcomes
+    # The day's rebalance still did not execute — re-run stays loud.
+    assert result2.outcome == "partial"
+
+
 # ---------------------------------------------------------------------------
 # Failed cycle (exception in pipeline)
 # ---------------------------------------------------------------------------
@@ -450,6 +498,43 @@ def test_reconstruction_lost_track(tmp_path):
     recon = cycles[0]
     assert recon["outcome"] == "reconstructed"
     assert recon["orders_executed"][0]["terminal_status"] == "lost_track"
+
+
+@pytest.mark.parametrize("ccxt_status", ["expired", "rejected"])
+def test_reconstruction_resolves_expired_rejected(tmp_path, ccxt_status):
+    """Regression (M1): a stale non-terminal state entry (e.g. journaled
+    as 'timeout' before expired/rejected were terminal) whose exchange
+    status is now expired/rejected must resolve to a terminal state entry
+    on the next cycle instead of being re-polled forever."""
+    state = _state(tmp_path)
+    pending_coid = "tsmom_20260528_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=pending_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="timeout",
+        exchange_order_id="exch-prior",
+        placed_at="2026-05-28T00:05:00+00:00",
+        last_seen_at="2026-05-28T00:05:00+00:00",
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[pending_coid] = [
+        {"id": "exch-prior", "status": ccxt_status, "filled": 0.0,
+         "cost": 0.0, "average": None, "timestamp": 0},
+    ]
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    recon = _read_cycles(tmp_path)[0]
+    assert recon["outcome"] == "reconstructed"
+    assert recon["orders_executed"][0]["client_order_id"] == pending_coid
+    assert recon["orders_executed"][0]["terminal_status"] == ccxt_status
+    # Terminal in state → the cycle after this one has nothing to redo.
+    assert state.get(pending_coid).status == ccxt_status
+    assert pending_coid not in state.open_entries()
 
 
 def test_new_lost_track_escalates_result(tmp_path):

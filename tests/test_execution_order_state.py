@@ -272,7 +272,17 @@ def test_terminal_and_non_terminal_are_disjoint():
 def test_all_known_statuses_covered():
     """Quick guard: if anyone adds a status, it must land in one bucket."""
     expected = {
-        "closed", "canceled", "rejected",
+        "closed", "canceled", "rejected", "expired",
         "open", "partial", "timeout", "lost_track",
     }
     assert TERMINAL_STATUSES | NON_TERMINAL_STATUSES == expected
+
+
+def test_expired_and_rejected_are_terminal():
+    """Regression (M1): ccxt maps Binance EXPIRED / EXPIRED_IN_MATCH →
+    'expired' and REJECTED → 'rejected'. Both must be terminal or the
+    state entry zombies: reconstruction re-polls it every cycle and,
+    once the exchange archives the record (~90 days), it degrades to a
+    permanent lost_track with exit 2 until manual state surgery."""
+    assert "expired" in TERMINAL_STATUSES
+    assert "rejected" in TERMINAL_STATUSES
