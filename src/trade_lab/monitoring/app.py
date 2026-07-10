@@ -1846,6 +1846,7 @@ def _render_dashboard() -> None:
 def main() -> None:
     st.set_page_config(
         page_title="trade-lab monitoring",
+        page_icon="📈",
         layout="wide",
     )
     # Static header rendered once; the dynamic body lives in an auto-rerunning

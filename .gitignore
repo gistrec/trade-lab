@@ -37,6 +37,8 @@ paper.env*
 /outputs/
 *.parquet
 *.png
+# ... except versioned site assets (OG link-preview image served by nginx).
+!ops/static/*.png
 
 # Paper-trading harness operational artifacts (validation Tests 3-4)
 # Keep the directory layout, ignore the per-cycle data.

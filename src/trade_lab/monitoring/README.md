@@ -248,6 +248,36 @@ sudo ln -s /etc/nginx/sites-available/monitoring.example.com \
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+### Link preview (Open Graph) — public deployments only
+
+Link-preview crawlers (Telegram, LinkedIn, Slack) fetch the raw HTML
+without executing JS, so they see Streamlit's stock
+`<title>Streamlit</title>` and no metadata. On a PUBLIC deployment
+(no basic auth), inject the tags at the proxy and serve the preview
+image from the repo:
+
+```nginx
+    # Versioned preview image (ops/static/, updated by git pull).
+    location = /og-image.png {
+        alias /home/<user>/trade-lab/ops/static/og-image.png;
+        add_header Cache-Control "public, max-age=86400" always;
+        access_log off;
+    }
+
+    # Inside `location /`: sub_filter cannot rewrite gzipped upstream
+    # bodies, so ask Streamlit for identity (nginx's own gzip still
+    # compresses the response to the client).
+    proxy_set_header Accept-Encoding "";
+    sub_filter_once on;
+    sub_filter '<title>Streamlit</title>' '<title>trade-lab monitoring</title>';
+    sub_filter '</head>' '<meta property="og:type" content="website"/><meta property="og:site_name" content="trade-lab"/><meta property="og:title" content="trade-lab monitoring"/><meta property="og:description" content="Live paper-trading monitor for a TSMOM crypto strategy — signal, portfolio, cycle journal and execution health on Binance testnet and mainnet."/><meta property="og:url" content="https://trade-lab.gistrec.cloud/"/><meta property="og:image" content="https://trade-lab.gistrec.cloud/og-image.png"/><meta property="og:image:width" content="1200"/><meta property="og:image:height" content="630"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="Live paper-trading monitor for a TSMOM crypto strategy."/></head>';
+```
+
+Behind basic auth this is pointless: crawlers get 401 and render no
+card. The image is regenerated with
+`scripts/generate_og_image.py` if the design changes; it plots the
+real basket index so the preview honestly depicts the product.
+
 ## Pre-deployment security checklist
 
 Before pointing humans at the dashboard, walk through this list and
