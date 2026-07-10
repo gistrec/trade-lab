@@ -1745,6 +1745,22 @@ def _render_dashboard() -> None:
         # Streamlit renames the active-segment test-id, the control
         # degrades to the default highlight — cosmetic only.
         active_color = "#b71c1c" if source == "mainnet" else "#1b5e20"
+        # The mainnet page frame is a position:fixed overlay, NOT a
+        # box-shadow on the app container: Streamlit's fixed header
+        # paints over the container's top edge, which would leave the
+        # frame open at the top of the screen. The overlay covers the
+        # full viewport (header included), ignores scroll, and
+        # pointer-events:none keeps every control clickable. It ships
+        # INSIDE the same markdown element as the CSS: a separate
+        # st.markdown would add one more element to the flow on mainnet
+        # only, and Streamlit's inter-element gap would push the banner
+        # down relative to the testnet view.
+        frame_html = (
+            "<div style='position:fixed;inset:0;"
+            "border:4px solid #b71c1c;"
+            "pointer-events:none;z-index:999999;'></div>"
+            if source == "mainnet" else ""
+        )
         st.markdown(
             f"""
             <style>
@@ -1762,22 +1778,10 @@ def _render_dashboard() -> None:
                 color: white !important;
             }}
             </style>
+            {frame_html}
             """,
             unsafe_allow_html=True,
         )
-        if source == "mainnet":
-            # A position:fixed overlay, NOT a box-shadow on the app
-            # container: Streamlit's fixed header paints over the
-            # container's top edge, which would leave the frame open at
-            # the top of the screen. The overlay covers the full
-            # viewport (header included), ignores scroll, and
-            # pointer-events:none keeps every control clickable.
-            st.markdown(
-                "<div style='position:fixed;inset:0;"
-                "border:4px solid #b71c1c;"
-                "pointer-events:none;z-index:999999;'></div>",
-                unsafe_allow_html=True,
-            )
     else:
         source = next(iter(JOURNAL_SOURCES))
     journal_path = JOURNAL_SOURCES[source]

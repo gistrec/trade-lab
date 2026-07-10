@@ -163,6 +163,7 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     assert control.value == "testnet"
     page = " ".join(str(m.value) for m in app.markdown)
     assert "TESTNET — BINANCE" in page
+    markdown_count_testnet = len(app.markdown)
 
     control.set_value("mainnet")
     app.run()
@@ -175,3 +176,7 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     # the app container is painted over by Streamlit's fixed header).
     assert "border:4px solid #b71c1c" in page
     assert "position:fixed" in page
+    # Spacing invariant: the frame must NOT be an extra element in the
+    # flow — Streamlit's inter-element gap would push the mainnet
+    # banner lower than the testnet one. Same element count both ways.
+    assert len(app.markdown) == markdown_count_testnet
