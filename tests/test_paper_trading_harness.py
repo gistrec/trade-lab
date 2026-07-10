@@ -57,22 +57,37 @@ def _stub_fetcher(asof: date):
     return fetch
 
 
-def test_hash_gate_refuses_on_drift(monkeypatch, tmp_path):
-    """If CANONICAL_HASH does not match the runtime config hash, the
-    harness must refuse to run. This is the contract."""
-    # Pretend the canonical hash is something else
-    monkeypatch.setattr(harness_mod, "CANONICAL_HASH", "0" * 64)
+def test_hash_gate_refuses_on_config_hotfix(monkeypatch, tmp_path):
+    """A config edited in place (the server-hotfix scenario) must trip
+    the gate BEFORE anything is journaled or snapshotted.
+
+    Regression M8: the gate used to compare the runtime hash against
+    ``config.CANONICAL_HASH``, which is recomputed from the same object
+    at import time — a hotfix moved both sides together and the gate
+    could never fire. Rebinding PRODUCTION_CONFIG here reproduces
+    exactly that scenario: the runtime hash drifts, and only the frozen
+    literal in the harness can catch it."""
+    from dataclasses import replace
+
+    hotfixed = replace(PRODUCTION_CONFIG, lookbacks=(28, 90))
+    monkeypatch.setattr(harness_mod, "PRODUCTION_CONFIG", hotfixed)
+
+    log = tmp_path / "j.jsonl"
+    vroot = tmp_path / "v"
     with pytest.raises(HarnessError, match="hash drift"):
         run_paper_trading_cycle(
-            log_path=tmp_path / "j.jsonl",
-            vintage_root=tmp_path / "v",
+            log_path=log,
+            vintage_root=vroot,
             asof=date(2024, 6, 1),
             fetch_callable=_stub_fetcher(date(2024, 6, 1)),
         )
+    # Loud failure must precede any write.
+    assert not log.exists()
+    assert not vroot.exists() or not any(vroot.rglob("*"))
 
 
 def test_hash_gate_passes_with_canonical_hash(tmp_path):
-    """Sanity: the in-repo CANONICAL_HASH is the one the harness reads,
+    """Sanity: the untouched in-repo config hashes to the frozen literal,
     so unmocked execution must NOT raise the drift error."""
     run_paper_trading_cycle(
         log_path=tmp_path / "j.jsonl",
@@ -80,6 +95,21 @@ def test_hash_gate_passes_with_canonical_hash(tmp_path):
         asof=date(2024, 6, 1),
         fetch_callable=_stub_fetcher(date(2024, 6, 1)),
     )
+
+
+def test_frozen_literal_matches_recomputed_config_hash():
+    """Double pin, harness side: the FROZEN_CONFIG_HASH literal must be
+    the SHA256 of the current canonical config. Fails if either the
+    config or the literal is edited without the other — the tautology
+    that motivated M8 cannot silently reappear."""
+    from trade_lab.config import production_config_hash
+
+    assert harness_mod.FROZEN_CONFIG_HASH == production_config_hash(
+        PRODUCTION_CONFIG
+    )
+    # And the import-time convenience hash still agrees (scripts and the
+    # monitoring app read CANONICAL_HASH).
+    assert harness_mod.FROZEN_CONFIG_HASH == CANONICAL_HASH
 
 
 def test_writes_one_row_per_day(tmp_path):

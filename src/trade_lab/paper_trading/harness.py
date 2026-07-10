@@ -3,11 +3,15 @@
 Each invocation does, in this order:
 
 1. **Frozen-hash gate.** Refuse to run if ``production_config_hash()``
-   has drifted from ``CANONICAL_HASH``. There is no other legitimate
-   path to changing the strategy on the forward-test branch — if the
-   hash differs, *something* changed the canonical parameters since
-   the test started, and the resulting log row would be measuring a
-   different strategy. Raise loud.
+   has drifted from the ``FROZEN_CONFIG_HASH`` literal pinned in this
+   module. There is no other legitimate path to changing the strategy
+   on the forward-test branch — if the hash differs, *something*
+   changed the canonical parameters since the test started, and the
+   resulting log row would be measuring a different strategy. Raise
+   loud, before anything is journaled. (The pin must be a literal:
+   comparing against ``config.CANONICAL_HASH`` — recomputed from the
+   same object at import time — was a tautology that let a config
+   hotfix through silently; regression M8.)
 2. **Idempotency check.** If the cycle's signal date is already in
    the journal, return that row without recomputing — the cron job
    can be invoked multiple times per day safely.
@@ -41,12 +45,31 @@ from typing import Callable, Optional
 import pandas as pd
 
 from ..backtest.market_index import build_crypto_market_index
-from ..config import CANONICAL_HASH, PRODUCTION_CONFIG, production_config_hash
+from ..config import PRODUCTION_CONFIG, production_config_hash
 from ..data.fetch_ohlcv import fetch_ohlcv
 from ..strategies.tsmom import TimeSeriesMomentumStrategy
 
 from .journal import HarnessLogRow, append_row, get_row_for_date, is_already_logged
 from .vintage_store import store_vintage
+
+# Frozen pin of the DSR-validated production config: SHA256 of the
+# canonical JSON serialization (see ``production_config_hash``). This is
+# a hardcoded LITERAL on purpose. The gate used to compare against
+# ``config.CANONICAL_HASH``, which is recomputed from PRODUCTION_CONFIG
+# at import time — a hotfix to the config moved both sides of the
+# comparison together, so the gate could never fire (M8 tautology).
+#
+# This literal must always equal ``_EXPECTED_HASH`` in
+# ``tests/test_production_config.py`` (the double pin is itself tested,
+# so editing one without the other fails CI). To change it INTENTIONALLY
+# follow the new-research-cycle procedure documented in that file, then
+# recompute the value with:
+#
+#   .venv/bin/python -c "from trade_lab.config import \
+#       production_config_hash; print(production_config_hash())"
+FROZEN_CONFIG_HASH = (
+    "ac8919618ca6d5c6515ad9c26437f3fe28f1b4af3d4f37aeefcf989d0bce8753"
+)
 
 
 class HarnessError(RuntimeError):
@@ -79,13 +102,14 @@ def run_paper_trading_cycle(
 
     # --- Step 1: frozen-hash gate ---
     runtime_hash = production_config_hash(PRODUCTION_CONFIG)
-    if runtime_hash != CANONICAL_HASH:
+    if runtime_hash != FROZEN_CONFIG_HASH:
         raise HarnessError(
             f"Frozen-config hash drift: runtime={runtime_hash}, "
-            f"canonical={CANONICAL_HASH}. Refusing to run — paper "
+            f"frozen={FROZEN_CONFIG_HASH}. Refusing to run — paper "
             f"trading must replicate the validated config exactly. "
-            f"If this drift is intentional, open a new research cycle "
-            f"and update tests/test_production_config.py."
+            f"If this drift is intentional, open a new research cycle, "
+            f"update tests/test_production_config.py AND the "
+            f"FROZEN_CONFIG_HASH literal in this module."
         )
 
     # --- Step 2: idempotency check ---
@@ -259,7 +283,9 @@ def run_paper_trading_cycle(
     # --- Step 7: append row ---
     row = HarnessLogRow(
         date=signal_date_str,
-        config_hash=CANONICAL_HASH,
+        # Gate-verified above: runtime_hash == FROZEN_CONFIG_HASH, so the
+        # journaled hash is both "what actually ran" and the frozen pin.
+        config_hash=runtime_hash,
         vintage_content_hash=vintage_hash,
         basket_close=basket_close,
         sma_value=sma_value,

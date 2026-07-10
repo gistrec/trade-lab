@@ -55,6 +55,22 @@ def test_canonical_hash_pinned():
     )
 
 
+def test_harness_frozen_literal_matches_pin():
+    """The harness's runtime gate compares against its own hardcoded
+    FROZEN_CONFIG_HASH literal (not the import-time CANONICAL_HASH,
+    which recomputes from the same object and can never drift — M8).
+    Both pins must point at the same value: updating one without the
+    other is exactly the half-done config change this test catches.
+    """
+    from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
+
+    assert FROZEN_CONFIG_HASH == _EXPECTED_HASH, (
+        "FROZEN_CONFIG_HASH in paper_trading/harness.py and "
+        "_EXPECTED_HASH here must be updated together, following the "
+        "procedure in this file's docstring."
+    )
+
+
 def test_hash_is_deterministic():
     # Same config -> same hash (sanity: the hash is not random per import).
     h1 = production_config_hash(PRODUCTION_CONFIG)
