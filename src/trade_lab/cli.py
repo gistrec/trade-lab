@@ -936,9 +936,23 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
             f"Could not fetch market constraints for {args.symbol}: {exc}"
         )
 
-    if constraints.min_cost is not None and notional < constraints.min_cost:
+    # Truncate to the exchange lot step so the intent carries exactly the
+    # quantity ccxt will send (create_order truncates internally, TRUNCATE
+    # mode). An unquantized intended_amount is unreachable by design and
+    # would journal a fully filled smoke order as a false 'partial'.
+    base_amount = constraints.quantize_amount(base_amount)
+    if base_amount <= 0:
         raise SystemExit(
             f"SKIPPED: notional {notional:.2f} {config.quote_currency} "
+            f"truncates to 0 base units at the exchange lot step for "
+            f"{args.symbol}. Exchange would reject — not sent."
+        )
+    effective_notional = base_amount * price
+
+    if constraints.min_cost is not None and effective_notional < constraints.min_cost:
+        raise SystemExit(
+            f"SKIPPED: notional {effective_notional:.2f} "
+            f"{config.quote_currency} (after lot-step truncation) "
             f"< min_cost {constraints.min_cost:.2f}. "
             "Exchange would reject — not sent."
         )
@@ -956,7 +970,7 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
         symbol=args.symbol,
         side=args.side,
         base_amount=base_amount,
-        notional_quote=notional,
+        notional_quote=effective_notional,
         price_used=price,
         reason="smoke_test",
     )

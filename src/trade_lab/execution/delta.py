@@ -92,10 +92,38 @@ def compute_delta_plan(
             continue
 
         side = "buy" if delta_qty > 0 else "sell"
-        abs_qty = abs(delta_qty)
-        notional = abs_qty * price
+        desired_qty = abs(delta_qty)
+        desired_notional = desired_qty * price
 
         c = constraints.get(pair)
+        # Truncate to the exchange lot step BEFORE the min gates and the
+        # intent. ccxt truncates the amount inside ``create_order`` anyway
+        # (``amount_to_precision``, TRUNCATE mode), so an unquantized
+        # intent would make ``intended_amount`` unreachable by design and
+        # a fully filled order would be journaled as a false ``partial``.
+        # The intent must carry exactly the quantity that will be sent.
+        abs_qty = c.quantize_amount(desired_qty) if c is not None else desired_qty
+        notional = abs_qty * price
+
+        if abs_qty <= 0.0:
+            # The whole delta is below one lot step — same first-class
+            # skip treatment as the sub-minimum cases below. The desired_*
+            # fields keep the raw (pre-truncation) values so the skipped
+            # drift metric measures the true gap we could not move.
+            skipped.append(SkippedDelta(
+                symbol=pair,
+                desired_side=side,
+                desired_amount=desired_qty,
+                desired_notional=desired_notional,
+                constraint_min_amount=c.min_amount,
+                constraint_min_cost=c.min_cost,
+                reason=(
+                    f"amount {desired_qty:.8f} truncates to 0 at the "
+                    "exchange lot step"
+                ),
+            ))
+            continue
+
         below_min_amount = c is not None and c.min_amount is not None and abs_qty < c.min_amount
         below_min_cost = c is not None and c.min_cost is not None and notional < c.min_cost
 
@@ -112,8 +140,8 @@ def compute_delta_plan(
             skipped.append(SkippedDelta(
                 symbol=pair,
                 desired_side=side,
-                desired_amount=abs_qty,
-                desired_notional=notional,
+                desired_amount=desired_qty,
+                desired_notional=desired_notional,
                 constraint_min_amount=c.min_amount if c else None,
                 constraint_min_cost=c.min_cost if c else None,
                 reason="; ".join(reason_parts),

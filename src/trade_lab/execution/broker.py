@@ -143,6 +143,9 @@ class MarketConstraints:
     the smallest order in QUOTE notional. ``amount_precision`` is the
     decimal-place count CCXT exposes; treat it as a rough lot-step
     proxy. Any field may be ``None`` if the exchange doesn't expose it.
+    ``precision_mode`` is the exchange's CCXT ``precisionMode`` (how to
+    interpret ``raw['precision']['amount']``); it defaults to
+    DECIMAL_PLACES, matching the CCXT base-class default.
     """
 
     symbol: str
@@ -150,6 +153,41 @@ class MarketConstraints:
     min_cost: Optional[float]
     amount_precision: Optional[int]
     raw: dict
+    precision_mode: int = ccxt.DECIMAL_PLACES
+
+    def quantize_amount(self, amount: float) -> float:
+        """Truncate ``amount`` to the exchange lot step.
+
+        Replicates exactly what ccxt's ``amount_to_precision`` does inside
+        ``create_order`` (``decimal_to_precision`` with TRUNCATE): the
+        exchange never sees more than the truncated quantity. Order intents
+        must therefore carry the *post*-truncation amount — an unquantized
+        ``intended_amount`` is unreachable by design, so a fully filled
+        order would be journaled as a false ``partial`` (exit 2 on a
+        healthy rebalance).
+
+        Returns ``amount`` unchanged when the market reports no usable
+        amount precision — consistent with the ``None`` policy above: no
+        constraint info means no filtering, and ccxt will not truncate
+        either.
+        """
+        raw_precision = _coerce_float_or_none(
+            (self.raw.get("precision") or {}).get("amount")
+        )
+        if raw_precision is None:
+            return amount
+        if self.precision_mode == ccxt.TICK_SIZE:
+            if raw_precision <= 0:
+                return amount  # garbage step — no usable constraint info
+            precision = raw_precision
+        else:
+            # DECIMAL_PLACES / SIGNIFICANT_DIGITS require an integral count.
+            if not raw_precision.is_integer():
+                return amount
+            precision = int(raw_precision)
+        return float(ccxt.decimal_to_precision(
+            amount, ccxt.TRUNCATE, precision, self.precision_mode,
+        ))
 
 
 @dataclass
@@ -513,15 +551,19 @@ class Broker:
         amount = (limits.get("amount") or {})
         cost = (limits.get("cost") or {})
         precision = (m.get("precision") or {})
-        is_tick_size = getattr(self.exchange, "precisionMode", None) == ccxt.TICK_SIZE
+        precision_mode = getattr(
+            self.exchange, "precisionMode", ccxt.DECIMAL_PLACES,
+        )
         return MarketConstraints(
             symbol=symbol,
             min_amount=_coerce_float_or_none(amount.get("min")),
             min_cost=_coerce_float_or_none(cost.get("min")),
             amount_precision=_precision_to_decimals(
-                precision.get("amount"), tick_size=is_tick_size,
+                precision.get("amount"),
+                tick_size=precision_mode == ccxt.TICK_SIZE,
             ),
             raw=m,
+            precision_mode=precision_mode,
         )
 
     # ------------------------------------------------------------------

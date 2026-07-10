@@ -640,3 +640,110 @@ def test_fees_list_preferred_over_fee_to_avoid_double_count():
         "USDT",
     )
     assert quote_sum == pytest.approx(0.05)
+
+
+# ---------------------------------------------------------------------------
+# Lot-step truncation vs partial detection (false-partial regression)
+# ---------------------------------------------------------------------------
+
+
+class _TruncatingExchange(_MockExchange):
+    """Mimics ccxt binance's amount handling: ``create_order`` truncates
+    the requested amount to the LOT_SIZE step (``amount_to_precision``,
+    TRUNCATE mode) before sending, and the exchange then fills
+    ``fill_fraction`` of the truncated quantity."""
+
+    LOT_STEP = 1e-05
+    PRICE = 98_350.0
+
+    def __init__(self, fill_fraction: float = 1.0) -> None:
+        super().__init__()
+        self.fill_fraction = fill_fraction
+        self._orders: dict = {}
+
+    def create_order(self, symbol, type, side, amount, price=None, params=None):
+        sent = float(ccxt.decimal_to_precision(
+            amount, ccxt.TRUNCATE, self.LOT_STEP, ccxt.TICK_SIZE,
+        ))
+        self.create_order_calls.append({"requested": amount, "sent": sent})
+        filled = sent * self.fill_fraction
+        coid = (params or {}).get("newClientOrderId")
+        order = {
+            "id": "777", "clientOrderId": coid, "symbol": symbol,
+            "side": side, "status": "closed", "filled": filled,
+            "cost": filled * self.PRICE, "average": self.PRICE,
+            "timestamp": 1767000000000,
+        }
+        self._orders[coid] = order
+        return dict(order)
+
+    def fetch_order(self, id, symbol=None, params=None):
+        coid = (params or {}).get("origClientOrderId") or id
+        if coid not in self._orders:
+            raise ccxt.OrderNotFound(f"unknown {coid}")
+        return dict(self._orders[coid])
+
+
+def _planned_btc_intent(equity: float = 25.0) -> OrderIntent:
+    """Build the intent the way the live cycle does — allocator → delta
+    planner with Binance-like TICK_SIZE constraints — so the regression
+    covers the real cross-module path, not a hand-rolled intent."""
+    from trade_lab.execution.allocator import compute_target_allocation
+    from trade_lab.execution.broker import MarketConstraints
+    from trade_lab.execution.delta import compute_delta_plan
+
+    allocation = compute_target_allocation(
+        signal=1.0, total_equity=equity,
+        prices={"BTC": _TruncatingExchange.PRICE},
+        basket=("BTC",), weights={"BTC": 1.0},
+    )
+    constraints = {
+        "BTC/USDT": MarketConstraints(
+            symbol="BTC/USDT", min_amount=1e-05, min_cost=5.0,
+            amount_precision=5,
+            raw={"precision": {"amount": _TruncatingExchange.LOT_STEP}},
+            precision_mode=ccxt.TICK_SIZE,
+        ),
+    }
+    plan = compute_delta_plan(
+        allocation=allocation, current_holdings={},
+        constraints=constraints, quote_currency="USDT",
+    )
+    assert plan.skipped == []
+    [intent] = plan.orders
+    return intent
+
+
+def test_full_fill_of_truncated_amount_is_closed_not_partial(tmp_path):
+    """Regression: a 25 USDT BTC buy wants 2.5419e-4 BTC; ccxt truncates
+    to the 1e-5 lot step and the exchange fills ALL of it. When the
+    intent carried the raw amount, the full fill compared as
+    ``filled < intended × 0.9999`` → terminal_status 'partial' → cycle
+    outcome 'partial' → exit 2 on a perfectly healthy rebalance. The
+    planner now quantizes the intent, so intended == sent == filled."""
+    exch = _TruncatingExchange()
+    broker = _broker(exch)
+    intent = _planned_btc_intent()
+    result = place_order(
+        broker, intent, client_order_id="tsmom_20260710_BTCUSDT_buy",
+        state=_store(tmp_path),
+    )
+    [call] = exch.create_order_calls
+    assert call["requested"] == call["sent"]     # nothing left to truncate
+    assert result.intended_amount == call["sent"]
+    assert result.filled_amount == result.intended_amount
+    assert result.terminal_status == "closed"
+
+
+def test_genuine_partial_fill_still_detected(tmp_path):
+    """Control: quantization must not mask a REAL partial fill — a half
+    fill of the sent quantity still maps to terminal_status 'partial'."""
+    exch = _TruncatingExchange(fill_fraction=0.5)
+    broker = _broker(exch)
+    intent = _planned_btc_intent()
+    result = place_order(
+        broker, intent, client_order_id="tsmom_20260710_BTCUSDT_buy",
+        state=_store(tmp_path),
+    )
+    assert result.terminal_status == "partial"
+    assert result.filled_amount == pytest.approx(intent.base_amount * 0.5)

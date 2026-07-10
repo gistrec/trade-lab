@@ -13,7 +13,7 @@ import pytest
 import ccxt
 
 from trade_lab.execution.broker import (
-    BalanceSnapshot, Broker, BrokerError, ConnectionRefused,
+    BalanceSnapshot, Broker, BrokerError, ConnectionRefused, MarketConstraints,
 )
 from trade_lab.execution.config import PaperConfig
 
@@ -343,6 +343,88 @@ def test_constraints_non_power_of_ten_step_maps_to_none():
     c = Broker(_config(), exch).fetch_market_constraints("X/USDT")
     assert c.amount_precision is None
     assert c.raw["precision"]["amount"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Lot-step quantization — ccxt truncates the amount inside create_order,
+# so intents must carry the post-truncation quantity or a fully filled
+# order is journaled as a false 'partial' (see quantize_amount docstring).
+# ---------------------------------------------------------------------------
+
+
+def _tick_constraints(step: float = 1e-05) -> MarketConstraints:
+    return MarketConstraints(
+        symbol="BTC/USDT", min_amount=1e-05, min_cost=5.0,
+        amount_precision=5, raw={"precision": {"amount": step}},
+        precision_mode=ccxt.TICK_SIZE,
+    )
+
+
+def test_quantize_amount_truncates_to_tick_size_step():
+    """The 25 USDT smoke-test scenario: 2.5419e-4 BTC on a 1e-5 lot step
+    must quantize to exactly 0.00025 — the quantity ccxt actually sends."""
+    c = _tick_constraints()
+    assert c.quantize_amount(0.0002541942) == pytest.approx(0.00025)
+
+
+def test_quantize_amount_is_idempotent():
+    """Re-truncating an already-quantized amount is a no-op, so what we
+    journal as intended is byte-identical to what ccxt transmits."""
+    c = _tick_constraints()
+    q = c.quantize_amount(0.0002541942)
+    assert c.quantize_amount(q) == q
+
+
+def test_quantize_amount_below_one_step_yields_zero():
+    """Anything below one lot step truncates to 0 — the caller must turn
+    that into an explicit skip, never a zero-amount order."""
+    c = _tick_constraints()
+    assert c.quantize_amount(4.2e-06) == 0.0
+
+
+def test_quantize_amount_non_power_of_ten_step():
+    """0.5-steps have no decimal-count equivalent but must still truncate
+    exactly like ccxt does."""
+    c = MarketConstraints(
+        symbol="X/USDT", min_amount=None, min_cost=None,
+        amount_precision=None, raw={"precision": {"amount": 0.5}},
+        precision_mode=ccxt.TICK_SIZE,
+    )
+    assert c.quantize_amount(2.7) == pytest.approx(2.5)
+
+
+def test_quantize_amount_decimal_places_mode():
+    c = MarketConstraints(
+        symbol="BTC/USDT", min_amount=None, min_cost=None,
+        amount_precision=8, raw={"precision": {"amount": 8}},
+        precision_mode=ccxt.DECIMAL_PLACES,
+    )
+    assert c.quantize_amount(1.234567891) == pytest.approx(1.23456789)
+
+
+def test_quantize_amount_without_precision_info_is_identity():
+    """No precision info → ccxt won't truncate either → pass through."""
+    c = MarketConstraints(
+        symbol="BTC/USDT", min_amount=0.0001, min_cost=10.0,
+        amount_precision=None, raw={},
+    )
+    assert c.quantize_amount(0.0002541942) == 0.0002541942
+
+
+def test_fetch_market_constraints_captures_precision_mode():
+    """The live path: constraints built by the broker must quantize with
+    the exchange's own precisionMode (Binance = TICK_SIZE)."""
+    exch = _MockExchange()
+    exch.precisionMode = ccxt.TICK_SIZE
+    exch.load_markets = lambda reload=False: {
+        "BTC/USDT": {
+            "limits": {"amount": {"min": 1e-05}, "cost": {"min": 5.0}},
+            "precision": {"amount": 1e-05},
+        },
+    }
+    c = Broker(_config(), exch).fetch_market_constraints("BTC/USDT")
+    assert c.precision_mode == ccxt.TICK_SIZE
+    assert c.quantize_amount(0.0002541942) == pytest.approx(0.00025)
 
 
 # ---------------------------------------------------------------------------

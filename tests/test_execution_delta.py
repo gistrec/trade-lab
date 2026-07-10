@@ -1,6 +1,7 @@
 """Tests for the delta planner (target vs current → orders + skipped)."""
 from __future__ import annotations
 
+import ccxt
 import pytest
 
 from trade_lab.execution.allocator import compute_target_allocation
@@ -236,3 +237,88 @@ def test_missing_constraints_does_no_filtering():
     )
     assert len(plan.orders) == 2
     assert plan.skipped == []
+
+
+# ---------------------------------------------------------------------------
+# Lot-step quantization (false-partial regression) — ccxt truncates the
+# amount to the LOT_SIZE step inside create_order, so an intent carrying
+# the raw amount makes intended_amount unreachable and a fully filled
+# order journals as a false 'partial' (cycle outcome 'partial', exit 2).
+# ---------------------------------------------------------------------------
+
+
+def _btc_only_allocation(equity: float, price: float):
+    return compute_target_allocation(
+        signal=1.0, total_equity=equity, prices={"BTC": price},
+        basket=("BTC",), weights={"BTC": 1.0},
+    )
+
+
+def _btc_tick_constraints(step=1e-05, min_amount=1e-05, min_cost=5.0):
+    return {
+        "BTC/USDT": MarketConstraints(
+            symbol="BTC/USDT", min_amount=min_amount, min_cost=min_cost,
+            amount_precision=None, raw={"precision": {"amount": step}},
+            precision_mode=ccxt.TICK_SIZE,
+        ),
+    }
+
+
+def test_intent_amount_quantized_to_lot_step():
+    """A 25 USDT buy at $98,350 wants 2.5419e-4 BTC; on Binance's 1e-5
+    lot step the sendable quantity is exactly 0.00025. The intent must
+    carry that — the same value ccxt transmits — so a full fill compares
+    equal to intended."""
+    alloc = _btc_only_allocation(equity=25.0, price=98_350.0)
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings={},
+        constraints=_btc_tick_constraints(), quote_currency="USDT",
+    )
+    assert plan.skipped == []
+    [order] = plan.orders
+    assert order.base_amount == 0.00025
+    assert order.notional_quote == pytest.approx(0.00025 * 98_350.0)
+    # Byte-identical to ccxt's own truncation (idempotent re-truncation).
+    resent = float(ccxt.decimal_to_precision(
+        order.base_amount, ccxt.TRUNCATE, 1e-05, ccxt.TICK_SIZE,
+    ))
+    assert resent == order.base_amount
+
+
+def test_delta_below_one_lot_step_is_first_class_skip():
+    """A delta smaller than one lot step truncates to zero. It must
+    surface as a SkippedDelta with an explicit reason — never a silent
+    drop, never a zero-amount order reaching the broker."""
+    alloc = _btc_only_allocation(equity=25.0, price=98_350.0)
+    target = alloc.target_qty_per_asset["BTC"]
+    current = {"BTC": target - 4.2e-06}          # gap under the 1e-5 step
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints=_btc_tick_constraints(min_amount=None, min_cost=None),
+        quote_currency="USDT",
+    )
+    assert plan.orders == []
+    [s] = plan.skipped
+    assert "truncates to 0" in s.reason
+    assert s.desired_amount == pytest.approx(4.2e-06)
+    assert s.desired_notional == pytest.approx(4.2e-06 * 98_350.0)
+
+
+def test_min_cost_gate_evaluates_truncated_notional():
+    """Raw notional 26 clears min_cost 25, but after truncation to the
+    1e-4 lot step only 20 is sendable. The gate must judge what will
+    actually be sent, so this is a skip — not an order the exchange
+    would reject (or fill 20/26 as a false partial)."""
+    alloc = _btc_only_allocation(equity=26.0, price=100_000.0)
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings={},
+        constraints=_btc_tick_constraints(
+            step=1e-04, min_amount=None, min_cost=25.0,
+        ),
+        quote_currency="USDT",
+    )
+    assert plan.orders == []
+    [s] = plan.skipped
+    assert "min_cost" in s.reason
+    # Drift metric keeps the raw desired gap, not the truncated one.
+    assert s.desired_notional == pytest.approx(26.0)
