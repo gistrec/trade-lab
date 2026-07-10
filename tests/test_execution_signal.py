@@ -372,3 +372,101 @@ def test_in_progress_candle_is_excluded_from_signal():
     assert snap.basket_close == pytest.approx(
         100.0 * (up[-1] / up[0]), rel=1e-6
     )
+
+
+# ---------------------------------------------------------------------------
+# Uneven per-asset history (M5): a truncated history for ONE asset must
+# raise, never silently shrink the basket inside the SMA/lookback window
+# ---------------------------------------------------------------------------
+
+
+def _ohlcv_ending_at(closes, end="2026-01-01"):
+    """Frame whose bars END at a common date — the shape of a truncated
+    kline response (an exchange wipe / short response keeps the most
+    recent bars, so the truncated asset starts LATER, not earlier)."""
+    idx = pd.date_range(end=end, periods=len(closes), freq="1D", tz="UTC")
+    idx.name = "timestamp"
+    return pd.DataFrame(
+        {"open": closes, "high": closes, "low": closes,
+         "close": closes, "volume": 1.0},
+        index=idx,
+    )
+
+
+def _frames_fetch(frames):
+    return lambda broker, pair, limit: frames[pair.split("/")[0]].iloc[-limit:]
+
+
+def test_one_truncated_asset_raises_instead_of_shrinking_basket():
+    """6 assets x 400 bars + DOGE x 150 (same end date): before the guard
+    this produced signal=1.0 with ZERO warnings while N_active flipped
+    6->7 at bar 250 — inside the SMA(200) window — with a forced
+    unscheduled 1/6->1/7 rebalance the backtest never had (with full
+    history all 7 majors are listed years before any live window, so a
+    late start can only be truncated API data, not a listing). The
+    union index still has 400 bars, so the required_basket_bars depth
+    guard cannot catch this. Must raise, naming the truncated asset and
+    both depths."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    trunc = (100 + np.linspace(120, 200, 150)).tolist()
+    frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
+    frames["DOGE"] = _ohlcv_ending_at(trunc)
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError,
+        match=r"Uneven basket history.*400 completed bars.*DOGE has 150 bars",
+    ):
+        compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+
+
+def test_equal_full_histories_pass_the_uneven_history_guard():
+    """All 7 assets with identical 400-bar aligned-end windows: the
+    guard must stay silent and the signal must compute normally."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+    assert snap.signal == 1.0
+    assert snap.n_assets_in_basket == 7
+
+
+def test_uniform_truncation_still_hits_depth_guard_not_uneven_guard():
+    """All 7 assets truncated ALIKE (150 bars, common start): the starts
+    agree, so the uneven-history guard stays silent and the
+    required_basket_bars depth guard owns the error — the two checks
+    are complementary, never contradictory."""
+    trunc = (100 + np.linspace(0, 200, 150)).tolist()
+    frames = {s: _ohlcv_ending_at(trunc) for s in _BASKET_7}
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError,
+        match=r"150 completed bars, need >= 200",
+    ):
+        compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+
+
+def test_all_nan_closes_for_one_asset_raises():
+    """A frame that is non-empty but has no valid close at all has no
+    first bar to anchor the coverage check — refuse by asset name
+    instead of treating the asset as never-listed."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
+    frames["XRP"] = _ohlcv_ending_at([float("nan")] * 400)
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(SignalComputationError, match=r"No valid closes for XRP"):
+        compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+
+
+def test_backtest_index_path_stays_lenient_for_late_listing():
+    """The strictness lives ONLY in the live signal path. The index
+    builder keeps the dynamic-universe leniency the backtest needs
+    (leading NaN = not yet listed): the exact frames the live guard
+    rejects still build a 400-bar index without raising. (See also
+    test_market_index.py::test_leading_nan_late_listing_still_allowed.)"""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    trunc = (100 + np.linspace(120, 200, 150)).tolist()
+    frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
+    frames["DOGE"] = _ohlcv_ending_at(trunc)
+    market = build_crypto_market_index_with_weights(frames)
+    assert len(market.index) == 400          # union window, no raise
+    assert (market.weights["DOGE"].iloc[-1]) > 0  # DOGE onboarded late

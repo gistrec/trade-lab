@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -170,6 +170,8 @@ def compute_live_signal(
             )
         asset_candles[sym] = df
 
+    _assert_common_history_start(asset_candles)
+
     try:
         market = build_crypto_market_index_with_weights(
             asset_candles,
@@ -252,6 +254,70 @@ def compute_live_signal(
         sma_value=float(sma) if pd.notna(sma) else None,
         per_lookback_returns=per_lookback_returns,
         basket_weights=basket_weights,
+    )
+
+
+def _assert_common_history_start(
+    asset_candles: Mapping[str, pd.DataFrame],
+) -> None:
+    """Reject fetched frames whose history starts later than the rest.
+
+    The basket index treats leading NaN as "asset not yet listed" — the
+    dynamic-universe leniency the *backtest* needs, because assets there
+    genuinely list mid-history. On the live path that leniency is wrong:
+    every basket asset listed years before any live fetch window, so an
+    asset whose first bar arrives later than the others' can only mean
+    truncated kline history from the exchange (testnet wipe, pagination
+    glitch, short response). Fed into the index builder anyway, it would
+    silently run part of the SMA/lookback window on a smaller basket,
+    then flip the composition (N_active 6→7) and charge an unscheduled
+    rebalance mid-window — a configuration the backtest (full history,
+    all assets listed long before) never produced. Hard rule: the basket
+    never shrinks silently.
+
+    Chosen semantics (deliberate): the *first valid close* of every
+    asset must equal the common window start — the earliest first valid
+    close across the fetched frames. Only the window start is pinned
+    here, so the check cannot fire on (or double-report) other data
+    problems that already fail loudly elsewhere: interior gaps and
+    early-ending series are rejected by
+    ``build_crypto_market_index_with_weights``'s missing-candle check,
+    and a window that is uniformly too short (all assets truncated
+    alike, same start) is caught by the ``required_basket_bars`` depth
+    guard in :func:`compute_live_signal`. Uneven starts are exactly the
+    remaining silent case, and this check owns it.
+    """
+    first_bars: dict[str, pd.Timestamp] = {}
+    for sym, df in asset_candles.items():
+        first_valid = df["close"].first_valid_index()
+        if first_valid is None:
+            raise SignalComputationError(
+                f"No valid closes for {sym} in the fetched window."
+            )
+        first_bars[sym] = first_valid
+    window_start = min(first_bars.values())
+    late = {sym: ts for sym, ts in first_bars.items() if ts != window_start}
+    if not late:
+        return
+    bar_counts = {
+        sym: int(df["close"].notna().sum())
+        for sym, df in asset_candles.items()
+    }
+    full_depth = max(
+        bar_counts[sym] for sym in bar_counts if sym not in late
+    )
+    detail = "; ".join(
+        f"{sym} has {bar_counts[sym]} bars starting {ts.date()}"
+        for sym, ts in sorted(late.items())
+    )
+    raise SignalComputationError(
+        f"Uneven basket history: the window starts {window_start.date()} "
+        f"with {full_depth} completed bars, but {detail}. Every basket "
+        f"asset listed long before any live window, so a late first bar "
+        f"means truncated kline history from the exchange, not a listing "
+        f"event. Building the index anyway would silently run part of "
+        f"the SMA/lookback window on a shrunken basket and charge an "
+        f"unscheduled rebalance the backtest never had — refusing."
     )
 
 
