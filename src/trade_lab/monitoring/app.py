@@ -69,10 +69,10 @@ MAINNET_JOURNAL_PATH = os.environ.get(
 JOURNAL_SOURCES: dict[str, str] = {"testnet": JOURNAL_PATH}
 if MAINNET_JOURNAL_PATH:
     JOURNAL_SOURCES["mainnet"] = MAINNET_JOURNAL_PATH
-# Operator-facing labels for the environment switcher. MAINNET carries
-# the real-money warning right in the control, not just in the banner.
+# Operator-facing labels for the environment switcher, symmetric with
+# the banner wording: the stakes are stated right in the control.
 _SOURCE_LABELS = {
-    "testnet": "🧪 TESTNET",
+    "testnet": "🧪 TESTNET — PAPER TRADING",
     "mainnet": "🔴 MAINNET — REAL MONEY",
 }
 EXPECTED_INTERVAL_S = int(
