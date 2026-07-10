@@ -205,6 +205,31 @@ def test_dry_run_short_history_journals_failed_cycle_and_raises(tmp_path):
     assert cycle["orders_planned"] is None
 
 
+def test_dry_run_keyboard_interrupt_journals_failed_and_reraises(tmp_path):
+    """Regression (M4, dry-run mirror): Ctrl-C mid-cycle (KeyboardInterrupt
+    is a BaseException, not an Exception) must still journal
+    outcome='failed' and re-raise — same guarantee as an ordinary
+    exception. Before the fix `except Exception` let the interrupt bypass
+    the journal write entirely."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+
+    class _CtrlCStub(_StubExchange):
+        def fetch_balance(self):
+            raise KeyboardInterrupt()
+
+    broker = Broker(_config(), _CtrlCStub())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(KeyboardInterrupt):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "KeyboardInterrupt"
+
+
 def test_dry_run_records_exchange_latency_in_journal(tmp_path):
     """A successful dry cycle stamps context.exchange_latency — read-only
     telemetry the /metrics exporter surfaces. Metadata only."""

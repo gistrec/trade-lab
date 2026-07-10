@@ -146,7 +146,11 @@ def run_dry_cycle(
             ],
             total_skipped_quote_drift=total_skipped_quote_drift(plan),
         )
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException, not Exception: Ctrl-C (KeyboardInterrupt) mid-cycle
+        # must still leave a failed-cycle journal entry (mirrors
+        # live_cycle.run_live_cycle). The write path is local and bounded;
+        # the unconditional re-raise preserves interrupt/exit semantics.
         if journal is not None:
             context["exchange_latency"] = broker.exchange_call_stats()
             _try_write(journal, _failed_cycle(cycle_id, started_at, context, exc))

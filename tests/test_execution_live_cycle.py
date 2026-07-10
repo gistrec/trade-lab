@@ -430,6 +430,40 @@ def test_exception_in_pipeline_writes_failed_cycle(tmp_path):
     assert "balance call dropped" in cycle["error"]["message"]
 
 
+def test_keyboard_interrupt_mid_cycle_journals_failed_and_reraises(tmp_path):
+    """Regression (M4): Ctrl-C (KeyboardInterrupt is a BaseException, not
+    an Exception) during the sleep between order placements — the shape of
+    an operator interrupting a manual run mid-wait — must still write the
+    failed-cycle journal entry, record the order already placed on the
+    exchange under orders_executed, and re-raise so the process dies as
+    the operator asked. Before the fix `except Exception` let the
+    interrupt bypass the journal entirely: a real placed order with zero
+    journal record."""
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    broker = _broker(stub)
+
+    def _ctrl_c_sleep(_s: float) -> None:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_live_cycle(
+            broker, journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=_ctrl_c_sleep, time_fn=lambda: 0.0,
+        )
+
+    # The first order completed before the inter-order sleep raised.
+    assert len(stub.create_order_calls) == 1
+    cycles = _read_cycles(tmp_path)
+    assert len(cycles) == 1
+    cycle = cycles[0]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "KeyboardInterrupt"
+    # The already-placed order is not lost to history.
+    executed = cycle["orders_executed"]
+    assert executed is not None and len(executed) == 1
+    assert executed[0]["terminal_status"] == "closed"
+
+
 # ---------------------------------------------------------------------------
 # Reconstruction
 # ---------------------------------------------------------------------------

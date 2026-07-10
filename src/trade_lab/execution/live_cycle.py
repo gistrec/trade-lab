@@ -25,9 +25,12 @@ Failure handling
 ================
 An exception anywhere inside phase 2-5 still produces a journal entry
 (``outcome='failed'``, ``error={...}``) with any partially-placed
-orders recorded under ``orders_executed``. The exception then
-propagates so the cron's stderr captures the actual traceback —
-silently swallowing it would hide a real incident from the operator.
+orders recorded under ``orders_executed``. This covers *any*
+``BaseException`` — including ``KeyboardInterrupt``, because Ctrl-C
+during the up-to-35-minute wait-for-ack of a manual run is the most
+likely mid-cycle abort. The exception then propagates so the cron's
+stderr captures the actual traceback — silently swallowing it would
+hide a real incident from the operator.
 """
 from __future__ import annotations
 
@@ -210,7 +213,14 @@ def run_live_cycle(
             lost_track_count=lost_track_count,
         )
 
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException, not Exception: Ctrl-C (KeyboardInterrupt) during
+        # the up-to-35-minute wait-for-ack is the single most likely way a
+        # manual run dies mid-cycle, and it must not leave already-placed
+        # orders without a journal record. Everything below is local and
+        # bounded (in-memory stats, git subprocess with timeout, file
+        # append) — nothing here can hang a shutdown. The unconditional
+        # re-raise preserves the interrupt/exit semantics for the caller.
         context["exchange_latency"] = broker.exchange_call_stats()
         _write_failed_cycle(
             journal=journal,
