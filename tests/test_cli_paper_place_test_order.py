@@ -453,11 +453,88 @@ def test_prints_human_readable_result(monkeypatch, tmp_path, capsys):
 
 
 def test_prints_error_on_rejection(monkeypatch, tmp_path, capsys):
+    """A rejected smoke order prints the error AND exits 2 — the smoke
+    test is a gate step of the rollout ladder, so a rejection must never
+    look like a pass to scripts (M6)."""
     exch = _FakeExchange(
         create_raises=ccxt.InvalidOrder("min notional 10 USDT not met"),
     )
     _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
-    cmd_paper_place_test_order(_args(tmp_path))
-    out = capsys.readouterr().out
-    assert "terminal_status=rejected" in out
-    assert "InvalidOrder" in out
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_test_order(_args(tmp_path))
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "terminal_status=rejected" in captured.out
+    assert "InvalidOrder" in captured.out
+    assert "FAILED" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Exit code reflects the smoke-test outcome (M6)
+# ---------------------------------------------------------------------------
+
+
+def test_closed_outcome_exits_zero(monkeypatch, tmp_path, capsys):
+    """Fully filled ('closed') is the ONLY passing outcome: the command
+    returns normally → process exit code 0."""
+    exch = _FakeExchange()  # default fetch_terminal: closed, fully filled
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+    cmd_paper_place_test_order(_args(tmp_path))  # no SystemExit
+    captured = capsys.readouterr()
+    assert "terminal_status=closed" in captured.out
+    assert "FAILED" not in captured.err
+
+
+def test_timeout_outcome_exits_two(monkeypatch, tmp_path, capsys):
+    """Order never terminalizes within the wait budget → 'timeout' →
+    exit 2. An unconfirmed order is not a passed gate step."""
+    exch = _FakeExchange(
+        fetch_terminal={
+            "id": "exch-1", "status": "open", "filled": 0.0,
+            "cost": 0.0, "average": None, "fee": {"cost": 0.0},
+            "timestamp": 0,
+        },
+    )
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_test_order(_args(tmp_path, timeout_s=0.0))
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "terminal_status=timeout" in captured.out
+    assert "FAILED" in captured.err
+
+
+def test_partial_fill_outcome_exits_two(monkeypatch, tmp_path, capsys):
+    """'closed' with filled < intended maps to 'partial' — suspicious
+    for a tiny-notional market order, so it fails the smoke test."""
+    exch = _FakeExchange(
+        fetch_terminal={
+            "id": "exch-1", "status": "closed", "filled": 0.0002,
+            "cost": 10.0, "average": 50_000.0,
+            "fee": {"cost": 0.01, "currency": "USDT"}, "timestamp": 0,
+        },
+    )
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_test_order(_args(tmp_path))
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "terminal_status=partial" in captured.out
+    assert "FAILED" in captured.err
+
+
+def test_failed_smoke_still_journaled(monkeypatch, tmp_path):
+    """The non-zero exit fires AFTER the journal append: the failed
+    result must still be recorded for the observation trail."""
+    exch = _FakeExchange(
+        create_raises=ccxt.InvalidOrder("min notional 10 USDT not met"),
+    )
+    _patch_config_and_broker(monkeypatch, config=_config(), exchange=exch)
+    journal_path = tmp_path / "smoke_log.jsonl"
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_test_order(
+            _args(tmp_path, journal=str(journal_path)),
+        )
+    assert exc_info.value.code == 2
+    record = json.loads(journal_path.read_text().splitlines()[0])
+    assert record["result"]["terminal_status"] == "rejected"

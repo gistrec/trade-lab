@@ -1088,6 +1088,23 @@ def cmd_paper_place_test_order(args: argparse.Namespace) -> None:
             f.write((json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
         print(f"  appended to:       {path}")
 
+    # The smoke test is a gate step of the rollout ladder: only a fully
+    # filled order ('closed') validates the placement plumbing. Anything
+    # else — rejected / canceled / expired / timeout / partial (a market
+    # order for a tiny notional should never partial-fill) — must exit
+    # non-zero so scripts and operators cannot mistake it for a pass.
+    # Exit 2 mirrors paper-place-orders' "bad outcome" code (1 =
+    # refusals/config, 3 = instance lock). Runs AFTER the journal append
+    # so the failed result is still recorded.
+    if result.terminal_status != "closed" or result.error is not None:
+        print(
+            f"FAILED: smoke test ended with terminal_status="
+            f"'{result.terminal_status}' (expected 'closed'). "
+            f"Do not treat this as a passed gate step.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
 
 def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     """Production daily cycle: reconstruct, plan, place real orders, journal.
