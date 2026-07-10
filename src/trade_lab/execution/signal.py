@@ -75,6 +75,33 @@ class SignalSnapshot:
     # callers/tests that construct the snapshot by hand.
 
 
+def required_basket_bars(
+    lookbacks: Sequence[int] = (28, 60),
+    sma_filter_period: int = 200,
+) -> int:
+    """Minimum completed basket bars for a fully-warmed signal at asof.
+
+    Exact pandas warm-up semantics (empirically pinned by tests, not
+    guessed):
+
+    * ``close.rolling(P).mean()`` (``min_periods`` defaults to the
+      window) is first non-NaN once ``P`` bars exist — the SMA at the
+      last bar needs ``P`` bars.
+    * ``close.pct_change(L)`` at the last bar reaches back to
+      ``close[-1 - L]`` — it needs ``L + 1`` bars.
+
+    Below this depth the strategy does not error on its own:
+    ``_sma_filter`` treats a NaN SMA as "regime gate closed", the
+    ladder silently collapses to 0.0 even when every lookback state is
+    1, and the allocator reads that as "liquidate the book".
+    :func:`compute_live_signal` therefore refuses to compute a signal
+    on a shallower basket (hard rule: missing candles raise).
+    """
+    if not lookbacks:
+        raise ValueError("lookbacks must be non-empty")
+    return max(int(sma_filter_period), max(int(L) for L in lookbacks) + 1)
+
+
 def compute_live_signal(
     broker: Broker,
     *,
@@ -91,14 +118,30 @@ def compute_live_signal(
 
     ``candles_per_asset`` must be large enough that every rolling
     window inside the strategy is fully warmed. With ``sma_filter_period
-    = 200`` and ``lookbacks max = 60``, we need at least 200 days; 400
-    gives a comfortable buffer for the monthly basket rebalance dates
-    to line up cleanly.
+    = 200`` and ``lookbacks max = 60``, we need at least 200 completed
+    days plus the in-progress candle that gets dropped; 400 gives a
+    comfortable buffer for the monthly basket rebalance dates to line
+    up cleanly. Both the requested window and the *actual* basket depth
+    are enforced — an unwarmed SMA(200) must raise
+    :class:`SignalComputationError`, never silently read as "gate
+    closed" (that would plan a full liquidation of the book).
 
     ``fetch_candles`` defaults to ``_fetch_recent_candles`` via the
     broker's underlying CCXT exchange. Tests pass a stub returning
     canned OHLCV frames.
     """
+    required = required_basket_bars(lookbacks, sma_filter_period)
+    # +1: a live fetch's last row is the in-progress daily candle, which
+    # is dropped below — a request of exactly `required` bars could
+    # never produce a warmed basket against a real exchange.
+    if candles_per_asset < required + 1:
+        raise SignalComputationError(
+            f"candles_per_asset={candles_per_asset} cannot warm the signal: "
+            f"need >= {required + 1} bars per asset "
+            f"({required} completed bars for SMA({sma_filter_period}) / "
+            f"lookbacks {tuple(int(L) for L in lookbacks)} warm-up, plus "
+            f"the in-progress candle that is dropped)."
+        )
     fetch = fetch_candles or _fetch_recent_candles
     asset_candles: dict[str, pd.DataFrame] = {}
     quote = broker.config.quote_currency
@@ -140,6 +183,21 @@ def compute_live_signal(
     basket = market.index
     if basket.empty:
         raise SignalComputationError("Basket construction returned empty frame.")
+    if len(basket) < required:
+        # Truncated kline history (exchange wipe, API glitch, too-small
+        # fetch window). The strategy would NOT error here on its own:
+        # a NaN SMA reads as "regime gate closed", the ladder collapses
+        # to 0.0 even with every lookback state at 1, and the allocator
+        # turns that into a full liquidation plan. Fail loud instead.
+        max_lookback = max(int(L) for L in lookbacks)
+        raise SignalComputationError(
+            f"Basket history too short to warm the signal: {len(basket)} "
+            f"completed bars, need >= {required} "
+            f"(SMA({sma_filter_period}) needs {sma_filter_period} bars; "
+            f"max lookback {max_lookback} needs {max_lookback + 1}). "
+            f"An unwarmed SMA would silently read as 'gate closed' "
+            f"(signal=0) and plan a full liquidation — refusing."
+        )
 
     strategy = TimeSeriesMomentumStrategy(
         lookbacks=tuple(lookbacks),

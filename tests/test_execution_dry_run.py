@@ -178,6 +178,33 @@ def test_nan_weight_fails_loud_through_dry_cycle(tmp_path, monkeypatch):
     assert cycle["error"]["type"] == "ValueError"
 
 
+def test_dry_run_short_history_journals_failed_cycle_and_raises(tmp_path):
+    """Binance-testnet shape: the exchange wiped candles and returns only
+    ~36 daily bars, so SMA(200) can never warm. The cycle must NOT
+    'succeed' with signal=0 (that plans a full liquidation of any open
+    book); it raises SignalComputationError AND journals a structured
+    outcome='failed' entry so monitoring surfaces the incident."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+    from trade_lab.execution.signal import SignalComputationError
+
+    exch = _StubExchange(balance_usdt=0.0, btc_holdings=0.1)
+    exch._closes = (100 + np.linspace(0, 20, 36)).tolist()  # uptrend, 36 bars
+    broker = Broker(_config(), exch)
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(SignalComputationError, match="36 completed bars"):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "SignalComputationError"
+    assert "36 completed bars" in cycle["error"]["message"]
+    # No plan was produced — nothing that could be mistaken for orders.
+    assert cycle["orders_planned"] is None
+
+
 def test_dry_run_records_exchange_latency_in_journal(tmp_path):
     """A successful dry cycle stamps context.exchange_latency — read-only
     telemetry the /metrics exporter surfaces. Metadata only."""

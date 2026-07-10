@@ -812,14 +812,17 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     """
     from .execution import (
         Broker, BrokerError, JournalEnvMismatch, JournalWriter,
-        PaperConfigError, assert_journal_env, load_paper_config,
-        print_dry_run, run_dry_cycle,
+        PaperConfigError, SignalComputationError, assert_journal_env,
+        load_paper_config, print_dry_run, run_dry_cycle,
+        required_basket_bars,
     )
 
     try:
         config = load_paper_config()
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
+
+    _validate_candles_window(int(args.candles), required_basket_bars())
 
     if args.journal:
         try:
@@ -836,10 +839,38 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         raise SystemExit(f"Broker connection failed: {exc}")
 
     journal = JournalWriter(args.journal) if args.journal else None
-    result = run_dry_cycle(
-        broker, candles_per_asset=int(args.candles), journal=journal,
-    )
+    try:
+        result = run_dry_cycle(
+            broker, candles_per_asset=int(args.candles), journal=journal,
+        )
+    except SignalComputationError as exc:
+        # run_dry_cycle already journaled the failed cycle (outcome=
+        # 'failed', error type/message) before re-raising. Surface a
+        # structured one-line refusal + non-zero exit for cron, not a
+        # raw traceback. Expected on Binance testnet, whose ~monthly
+        # candle wipes leave too little history to warm SMA(200).
+        raise SystemExit(f"Signal computation failed: {exc}")
     print_dry_run(result, quote=config.quote_currency)
+
+
+def _validate_candles_window(candles: int, required_bars: int) -> None:
+    """Refuse a ``--candles`` window that cannot warm the signal.
+
+    ``required_bars`` completed bars are needed for the SMA/lookback
+    warm-up; +1 because the exchange's last daily candle is in-progress
+    and gets dropped by ``compute_live_signal``. Without this check an
+    unwarmed SMA(200) would silently read as "gate closed" (signal=0)
+    and the cycle would plan a full liquidation of the book.
+    """
+    min_candles = required_bars + 1
+    if candles < min_candles:
+        raise SystemExit(
+            f"REFUSED: --candles {candles} is below the signal warm-up "
+            f"minimum {min_candles} ({required_bars} completed bars for "
+            f"SMA(200) / lookback warm-up + the dropped in-progress "
+            f"candle). An unwarmed SMA silently reads as 'gate closed' "
+            f"and would plan a full liquidation."
+        )
 
 
 # A mainnet smoke test moves real money by design (tiny, deliberate,
@@ -1071,14 +1102,17 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     from .execution import (
         Broker, BrokerError, InstanceLockHeld, JournalEnvMismatch,
         JournalWriter, OrderStateEnvMismatch, OrderStateStore,
-        PaperConfigError, acquire_instance_lock, assert_journal_env,
-        load_paper_config, run_live_cycle,
+        PaperConfigError, SignalComputationError, acquire_instance_lock,
+        assert_journal_env, load_paper_config, required_basket_bars,
+        run_live_cycle,
     )
 
     try:
         config = load_paper_config()
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
+
+    _validate_candles_window(int(args.candles), required_basket_bars())
 
     if not config.sandbox and not config.mainnet_live_orders:
         raise SystemExit(
@@ -1134,13 +1168,22 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
 
     journal = JournalWriter(args.journal)
 
-    result = run_live_cycle(
-        broker,
-        candles_per_asset=int(args.candles),
-        journal=journal,
-        state=state,
-        total_timeout_s=float(args.timeout_s),
-    )
+    try:
+        result = run_live_cycle(
+            broker,
+            candles_per_asset=int(args.candles),
+            journal=journal,
+            state=state,
+            total_timeout_s=float(args.timeout_s),
+        )
+    except SignalComputationError as exc:
+        # run_live_cycle already journaled the failed cycle (outcome=
+        # 'failed', error type/message) before re-raising, and no order
+        # was placed (the signal is computed before any placement).
+        # Surface a structured one-line refusal + non-zero exit for
+        # cron instead of a raw traceback. Expected on Binance testnet,
+        # whose ~monthly candle wipes cannot warm SMA(200).
+        raise SystemExit(f"Signal computation failed: {exc}")
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")
@@ -1453,7 +1496,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_env_file_flag(p_pd)
     p_pd.add_argument("--candles", type=int, default=400,
-                       help="Daily candles fetched per asset (default 400).")
+                       help="Daily candles fetched per asset (default 400; "
+                            "minimum 201 = SMA(200)/lookback warm-up + the "
+                            "dropped in-progress candle).")
     p_pd.add_argument(
         "--journal", default=None,
         help="Path to append-only JSON Lines journal. If set, one Cycle entry "
@@ -1499,7 +1544,9 @@ def build_parser() -> argparse.ArgumentParser:
                               "data/state/orders.json on testnet, "
                               "data/state/orders_mainnet.json on mainnet).")
     p_live.add_argument("--candles", type=int, default=400,
-                         help="Daily candles fetched per asset (default 400).")
+                         help="Daily candles fetched per asset (default 400; "
+                              "minimum 201 = SMA(200)/lookback warm-up + the "
+                              "dropped in-progress candle).")
     p_live.add_argument("--timeout-s", dest="timeout_s", type=float, default=300.0,
                          help="Per-order wait-for-ack budget in seconds (default 300).")
     p_live.set_defaults(func=cmd_paper_place_orders)

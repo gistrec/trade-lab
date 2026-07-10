@@ -226,6 +226,59 @@ def test_refuses_when_another_instance_holds_the_lock(
     )
 
 
+def test_refuses_candles_window_below_signal_warmup(monkeypatch, tmp_path):
+    """--candles that cannot warm SMA(200)+lookbacks must exit before the
+    broker is constructed. An unwarmed SMA silently reads as 'gate
+    closed' (signal=0) — on mainnet that is a full liquidation plan."""
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config", _sandbox_config,
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(lambda cls, config: connect_calls.append(config)),
+    )
+
+    args = _args(tmp_path)
+    args.candles = 150
+    with pytest.raises(SystemExit, match=r"--candles 150 is below"):
+        cmd_paper_place_orders(args)
+
+    assert connect_calls == []
+
+
+def test_signal_computation_error_exits_structured_nonzero(
+    monkeypatch, tmp_path,
+):
+    """A SignalComputationError from the live cycle (e.g. testnet's
+    wiped kline history cannot warm SMA(200)) must exit non-zero with a
+    one-line structured message, not a raw traceback. The journal entry
+    (outcome='failed') is written inside run_live_cycle before the
+    re-raise."""
+    from trade_lab.execution.signal import SignalComputationError
+
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config", _sandbox_config,
+    )
+    monkeypatch.setattr(
+        Broker, "connect", classmethod(lambda cls, config: object()),
+    )
+
+    def _raise(broker, **kwargs):
+        raise SignalComputationError(
+            "Basket history too short to warm the signal: 36 completed "
+            "bars, need >= 200"
+        )
+
+    monkeypatch.setattr("trade_lab.execution.run_live_cycle", _raise)
+
+    with pytest.raises(
+        SystemExit, match=r"Signal computation failed: .*36 completed bars",
+    ) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code not in (0, None)
+
+
 def test_lost_track_exits_nonzero_even_on_success(monkeypatch, tmp_path):
     """A lost_track surfaced by reconstruction must exit non-zero even
     when the MAIN cycle outcome is 'success' — cron alerting keys on the

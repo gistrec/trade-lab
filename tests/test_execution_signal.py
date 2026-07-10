@@ -15,6 +15,7 @@ from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.signal import (
     SignalComputationError, SignalSnapshot, compute_live_signal,
+    required_basket_bars,
 )
 
 
@@ -233,6 +234,105 @@ def test_signal_empty_candles_raises():
     broker = Broker(_config(), _ExchangeStub())
     with pytest.raises(SignalComputationError, match="Empty candles"):
         compute_live_signal(broker, fetch_candles=empty_fetch)
+
+
+# ---------------------------------------------------------------------------
+# Warm-up depth guard (H3): truncated history must raise, never
+# silently liquidate
+# ---------------------------------------------------------------------------
+
+_BASKET_7 = ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")
+
+
+def test_short_history_raises_instead_of_signal_zero():
+    """150 bars of clean uptrend: both lookback states are 1, but the
+    SMA(200) is still NaN. Before the guard this silently produced
+    signal=0 / sma_value=None — which the allocator reads as 'liquidate
+    the whole book'. On mainnet a truncated kline response would become
+    a real sell-off with zero errors. Must raise, with the depth and
+    the requirement in the message."""
+    closes = (100 + np.linspace(0, 200, 150)).tolist()
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError,
+        match=r"150 completed bars, need >= 200",
+    ):
+        compute_live_signal(broker, fetch_candles=fetch)
+
+
+def test_signal_computes_at_exact_warmup_boundary():
+    """Exactly 200 completed bars is the first depth where SMA(200) is
+    non-NaN at asof (pandas rolling(P) with default min_periods=P) —
+    the signal must compute, gate open in a clean uptrend."""
+    closes = (100 + np.linspace(0, 200, 200)).tolist()
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(broker, fetch_candles=fetch)
+    assert snap.sma_value is not None
+    assert snap.sma_gate_open is True
+    assert snap.signal == 1.0
+
+
+def test_one_bar_below_warmup_boundary_raises():
+    """199 bars → SMA(200) NaN at asof → raise. Pins the exact
+    rolling(min_periods=window) off-by-one."""
+    closes = (100 + np.linspace(0, 200, 199)).tolist()
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError,
+        match=r"199 completed bars, need >= 200",
+    ):
+        compute_live_signal(broker, fetch_candles=fetch)
+
+
+def test_candles_per_asset_below_warmup_refused_before_any_fetch():
+    """A fetch window that cannot possibly warm the signal (200
+    requested = 199 completed after the in-progress bar drops) is
+    refused up front, before any exchange call."""
+    calls: list[str] = []
+
+    def fetch(broker, pair, limit):
+        calls.append(pair)
+        return _ohlcv((100 + np.linspace(0, 200, 500)).tolist()).iloc[-limit:]
+
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError, match=r"candles_per_asset=200.*need >= 201",
+    ):
+        compute_live_signal(broker, fetch_candles=fetch, candles_per_asset=200)
+    assert calls == [], "must refuse before burning exchange calls"
+
+
+def test_required_basket_bars_semantics():
+    """max(SMA period, max lookback + 1): SMA(P) needs P bars,
+    pct_change(L) needs L+1 bars (both at the last bar)."""
+    assert required_basket_bars() == 200
+    assert required_basket_bars((28, 60), 200) == 200
+    # A lookback deeper than the SMA dominates (+1 for pct_change).
+    assert required_basket_bars((28, 250), 200) == 251
+    assert required_basket_bars((28, 60), 50) == 61
+    with pytest.raises(ValueError, match="non-empty"):
+        required_basket_bars((), 200)
+
+
+def test_deep_lookback_dominates_warmup_requirement():
+    """With lookbacks deeper than the SMA, 250 bars warm SMA(200) but
+    NOT pct_change(250) — the guard must key on max(lookback)+1, not
+    just the SMA period. Without it, the NaN trailing return silently
+    reads as state 0 (warm-up bars are 'flat, never long')."""
+    closes = (100 + np.linspace(0, 200, 250)).tolist()
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(
+        SignalComputationError,
+        match=r"250 completed bars, need >= 251",
+    ):
+        compute_live_signal(
+            broker, fetch_candles=fetch, lookbacks=(28, 250),
+            candles_per_asset=400,
+        )
 
 
 # ---------------------------------------------------------------------------

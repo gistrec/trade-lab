@@ -13,7 +13,10 @@ independent decisions, not one.
 """
 from .config import PaperConfig, load_paper_config, PaperConfigError
 from .broker import Broker, BrokerError, ConnectionRefused, MarketConstraints
-from .signal import SignalSnapshot, SignalComputationError, compute_live_signal
+from .signal import (
+    SignalSnapshot, SignalComputationError, compute_live_signal,
+    required_basket_bars,
+)
 from .allocator import TargetAllocation, compute_target_allocation
 from .delta import (
     DeltaPlan, OrderIntent, SkippedDelta,
@@ -71,6 +74,7 @@ __all__ = [
     "load_paper_config",
     "place_order",
     "print_dry_run",
+    "required_basket_bars",
     "run_dry_cycle",
     "run_live_cycle",
     "sort_orders_for_placement",
