@@ -3,8 +3,11 @@
 Three goals:
 
 1. **No exchange-specific code outside this module.** Callers only see
-   the methods on :class:`Broker`. Switching from Binance testnet to
-   Kraken live is a config change, not a code change.
+   the methods on :class:`Broker`. Adding a new exchange means changing
+   only this module — but it IS a code change, not just config: the
+   client-order-id idempotency params are exchange-specific, so
+   :meth:`Broker.connect` refuses any exchange outside
+   :data:`VERIFIED_EXCHANGES`.
 2. **Exchange is the source of truth.** Every call that touches state
    (balances, positions, orders) goes through CCXT, not through any
    in-memory cache. Memory caches are dangerous when the process
@@ -37,6 +40,19 @@ logger = logging.getLogger(__name__)
 
 # A single exchange round-trip slower than this logs at WARNING (else DEBUG).
 SLOW_CALL_MS = 3000.0
+
+# Exchanges whose client-order-id idempotency path has been verified
+# end-to-end. The broker sends Binance RAW param names
+# (``newClientOrderId`` on create, ``origClientOrderId`` on fetch) — other
+# exchanges silently ignore them (ccxt.kraken, for example, only reads the
+# unified ``params['clientOrderId']`` and keys ``fetch_order`` by txid), so
+# query-before-place, wait-for-ack and reconstruction would never find an
+# order by clientOrderId: every retry would place a NEW real order. To add
+# an exchange: map its client-order-id params in :meth:`Broker.create_order_safe`
+# and :meth:`Broker.fetch_order_by_coid`, verify the full place/refetch/
+# reconstruct cycle against it, add it here, and extend the tests in
+# ``tests/test_execution_broker.py``.
+VERIFIED_EXCHANGES = frozenset({"binance"})
 
 
 def _pctl(sorted_vals: list[float], q: float) -> float:
@@ -379,6 +395,27 @@ class Broker:
                 f"Unknown CCXT exchange id: {config.exchange_id!r}"
             )
 
+        # Idempotency is only verified for the exchanges listed in
+        # VERIFIED_EXCHANGES: the broker passes Binance RAW client-order-id
+        # params, which other exchanges ignore — an order placed there could
+        # never be found again by clientOrderId, and every retried cycle
+        # would place a duplicate real order. Refuse loudly before any
+        # network call rather than trade without idempotency.
+        if config.exchange_id not in VERIFIED_EXCHANGES:
+            raise BrokerError(
+                f"Exchange {config.exchange_id!r} is not on the verified "
+                f"list {sorted(VERIFIED_EXCHANGES)}: clientOrderId "
+                "idempotency (query-before-place, wait-for-ack, "
+                "reconstruction) uses Binance-specific params "
+                "(newClientOrderId/origClientOrderId) and has only been "
+                "verified on Binance. On an unverified exchange a retried "
+                "cycle would silently place duplicate orders. To add an "
+                "exchange, map its client-order-id params in "
+                "Broker.create_order_safe / Broker.fetch_order_by_coid, "
+                "verify the full placement cycle, and add it to "
+                "VERIFIED_EXCHANGES with tests."
+            )
+
         exchange = exchange_cls({
             "apiKey": config.api_key,
             "secret": config.api_secret,
@@ -584,8 +621,11 @@ class Broker:
         :mod:`trade_lab.execution.orders`, not here — the broker stays
         a thin transport.
 
-        The ``newClientOrderId`` param is the Binance name; if a future
-        exchange uses a different one, this is the single line to swap.
+        The ``newClientOrderId`` param is the Binance RAW name; other
+        exchanges ignore it, which is why :meth:`connect` refuses any
+        exchange outside :data:`VERIFIED_EXCHANGES`. Adding an exchange
+        means mapping its param here AND in :meth:`fetch_order_by_coid`,
+        then extending that list.
         """
         if side not in ("buy", "sell"):
             raise ValueError(f"side must be buy or sell, got {side!r}")

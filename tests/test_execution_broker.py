@@ -14,6 +14,7 @@ import ccxt
 
 from trade_lab.execution.broker import (
     BalanceSnapshot, Broker, BrokerError, ConnectionRefused, MarketConstraints,
+    VERIFIED_EXCHANGES,
 )
 from trade_lab.execution.config import PaperConfig
 
@@ -151,6 +152,87 @@ def test_connect_uses_real_ccxt_for_unknown_exchange_id():
     )
     with pytest.raises(BrokerError, match="Unknown CCXT exchange"):
         Broker.connect(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Verified-exchange gate at connect() level (M2)
+#
+# The broker's idempotency path sends Binance RAW client-order-id params
+# (newClientOrderId / origClientOrderId). ccxt.kraken ignores both (it only
+# reads the unified params['clientOrderId'] and keys fetch_order by txid),
+# so on kraken query-before-place would NEVER find a previously placed
+# order and every retried cycle would place a duplicate real order.
+# connect() must therefore refuse any exchange outside VERIFIED_EXCHANGES
+# before making a single network call.
+# ---------------------------------------------------------------------------
+
+
+def test_connect_refuses_kraken_as_unverified_exchange():
+    """kraken (no sandbox — kraken+sandbox is already refused at config
+    level) is a real ccxt exchange, but its client-order-id params differ
+    from Binance's, so idempotency would be structurally dead. connect()
+    must refuse it loudly with a message that explains why."""
+    cfg = PaperConfig(
+        exchange_id="kraken",
+        sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=True, quote_currency="USDT",
+        basket=("BTC",), request_timeout_ms=5000,
+    )
+    with pytest.raises(BrokerError) as excinfo:
+        Broker.connect(cfg)
+    msg = str(excinfo.value)
+    assert "kraken" in msg
+    assert "not on the verified list" in msg
+    assert "idempotency" in msg          # says WHY it is refused
+    assert "VERIFIED_EXCHANGES" in msg   # says HOW to add an exchange
+
+
+def test_connect_refuses_unverified_exchange_before_any_network_call(monkeypatch):
+    """The gate must fire before an exchange object is even built —
+    an unverified-exchange config must never produce network traffic."""
+    import ccxt as ccxt_module
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise AssertionError("exchange object must not be constructed")
+
+    monkeypatch.setattr(ccxt_module, "kraken", _Boom)
+    cfg = PaperConfig(
+        exchange_id="kraken",
+        sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=True, quote_currency="USDT",
+        basket=("BTC",), request_timeout_ms=5000,
+    )
+    with pytest.raises(BrokerError, match="not on the verified list"):
+        Broker.connect(cfg)
+
+
+def test_verified_exchanges_is_binance_only():
+    """Deliberate pin: extending the list requires end-to-end verification
+    of the client-order-id cycle on the new exchange (see broker.py).
+    If this test fails, that verification better have happened."""
+    assert VERIFIED_EXCHANGES == frozenset({"binance"})
+
+
+def test_connect_still_reaches_ccxt_construction_for_binance(monkeypatch):
+    """binance passes the verified-exchange gate: connect() proceeds to
+    build the ccxt exchange (stubbed here to avoid network)."""
+    import ccxt as ccxt_module
+
+    built = {}
+
+    class _StubExchange(_MockExchange):
+        def __init__(self, params):
+            super().__init__()
+            built["params"] = params
+
+        def fetch_time(self):
+            return int(time.time() * 1000)
+
+    monkeypatch.setattr(ccxt_module, "binance", _StubExchange)
+    broker = Broker.connect(_config())
+    assert built["params"]["apiKey"] == "k"
+    assert broker.exchange.sandbox is True  # set_sandbox_mode was honored
 
 
 # ---------------------------------------------------------------------------
