@@ -676,6 +676,108 @@ def test_state_persisted_after_rejection(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Persist-open before wait-for-ack (regression: M3)
+# ---------------------------------------------------------------------------
+
+
+def test_network_error_on_first_poll_persists_open_entry(tmp_path):
+    """Regression (M3): create succeeds on the exchange, then the FIRST
+    wait-for-ack poll dies (NetworkError through every broker retry —
+    same shape as a SIGKILL between create and persist). The order
+    exists on the exchange; without an immediate 'open' persist it was
+    invisible to state, journal, and reconstruction forever, and its
+    fill silently dissolved into the balance."""
+    exch = _MockExchange(
+        create_order_response=_ccxt_order(status="open", filled=0.0),
+        fetch_order_sequence=[
+            ccxt.OrderNotFound("query-before-place: not there yet"),
+            # Broker retries transient reads (retry_max_attempts=3):
+            # exhaust every attempt so place_order raises.
+            ccxt.NetworkError("connection dropped right after create"),
+            ccxt.NetworkError("still down"),
+            ccxt.NetworkError("still down"),
+        ],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    clock = _MockClock()
+    coid = "tsmom_20260710_BTCUSDT_buy"
+
+    with pytest.raises(ccxt.NetworkError):
+        place_order(
+            broker, _intent(), client_order_id=coid, state=store,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+
+    assert len(exch.create_order_calls) == 1  # order IS on the exchange
+    entry = store.get(coid)
+    assert entry is not None, "created order must be visible in state"
+    assert entry.status == "open"
+    assert entry.exchange_order_id == "12345"
+    assert entry.intended_amount == 0.001
+    # Reconstruction iterates open_entries() — the crashed order must
+    # be in that set or the next cycle never asks the exchange about it.
+    assert coid in store.open_entries()
+
+
+def test_wait_crash_on_existing_order_persists_open_entry(tmp_path):
+    """Same hole on the query-before-place branch: the order was found
+    on the exchange (e.g. a prior run crashed pre-persist), then the
+    wait poll dies. The re-discovered order must not vanish again."""
+    exch = _MockExchange(
+        fetch_order_sequence=[
+            _ccxt_order(status="open", filled=0.0),   # query finds existing
+            ccxt.NetworkError("dropped during wait"),
+            ccxt.NetworkError("still down"),
+            ccxt.NetworkError("still down"),
+        ],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    clock = _MockClock()
+    coid = "tsmom_20260710_BTCUSDT_buy"
+
+    with pytest.raises(ccxt.NetworkError):
+        place_order(
+            broker, _intent(), client_order_id=coid, state=store,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+
+    assert exch.create_order_calls == []  # never re-created
+    entry = store.get(coid)
+    assert entry is not None
+    assert entry.status == "open"
+    assert coid in store.open_entries()
+
+
+def test_happy_path_open_entry_overwritten_by_terminal(tmp_path):
+    """Control: the interim 'open' persist must not degrade the happy
+    path — after a clean create → fill, state holds exactly one entry
+    for the coid, terminal, with nothing left for reconstruction."""
+    exch = _MockExchange(
+        create_order_response=_ccxt_order(status="open", filled=0.0),
+        fetch_order_sequence=[
+            ccxt.OrderNotFound("before placement"),
+            _ccxt_order(status="closed"),
+        ],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    clock = _MockClock()
+    coid = "tsmom_20260530_BTCUSDT_buy"
+
+    result = place_order(
+        broker, _intent(), client_order_id=coid, state=store,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.terminal_status == "closed"
+    entries = store.all_entries()
+    assert list(entries) == [coid]          # exactly one entry, no strays
+    assert entries[coid].status == "closed"
+    assert store.open_entries() == {}       # nothing to reconstruct
+
+
+# ---------------------------------------------------------------------------
 # Fee extraction semantics
 # ---------------------------------------------------------------------------
 

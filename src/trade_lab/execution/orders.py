@@ -139,8 +139,16 @@ def place_order(
        Business rejections (``InvalidOrder`` / ``InsufficientFunds`` /
        ``BadRequest``) come back as ``terminal_status='rejected'``.
        Network and unexpected exchange errors propagate.
-    4. **Wait for terminal**: bounded exponential backoff.
-    5. **Persist**: update state.
+    4. **Persist 'open' immediately**: the instant the exchange is
+       known to have the order (create acked, or found by the query in
+       step 2), it is written to state as ``status='open'`` — BEFORE
+       the first wait-for-ack poll. A crash or network drop during the
+       wait then leaves a non-terminal entry that the next cycle's
+       reconstruction resolves. Without this, an order that exists on
+       the exchange is invisible to state, journal, and reconstruction
+       forever, and its fill silently dissolves into the balance.
+    5. **Wait for terminal**: bounded exponential backoff.
+    6. **Persist**: update state with the final status.
 
     The state-cache shortcut is here because a re-run of the daily cron
     on the same UTC date must complete fast — without it, an idle cycle
@@ -168,6 +176,7 @@ def place_order(
             client_order_id, existing.get("id"), existing.get("status"),
         )
         placed_at = _placed_at_from_order(existing)
+        _persist_open(state, intent, client_order_id, existing, placed_at)
         final_order = _wait_or_use_terminal(
             broker, client_order_id, intent.symbol, existing,
             poll_initial_s=poll_initial_s, poll_max_s=poll_max_s,
@@ -206,6 +215,7 @@ def place_order(
         _persist(state, intent, client_order_id, result)
         return result
 
+    _persist_open(state, intent, client_order_id, new_order, placed_at)
     final_order = _wait_or_use_terminal(
         broker, client_order_id, intent.symbol, new_order,
         poll_initial_s=poll_initial_s, poll_max_s=poll_max_s,
@@ -505,6 +515,43 @@ def _placed_at_from_order(order: dict) -> str:
     if ts:
         return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).isoformat()
     return utcnow_iso()
+
+
+def _persist_open(
+    state: OrderStateStore,
+    intent: OrderIntent,
+    client_order_id: str,
+    order: dict,
+    placed_at: str,
+) -> None:
+    """Record an order as ``status='open'`` the moment the exchange has it.
+
+    Runs BEFORE the first wait-for-ack poll (M3). The window between
+    ``create_order_safe`` and the terminal :func:`_persist` used to be
+    a hole: a SIGKILL or a NetworkError on the first poll left an order
+    that exists on the exchange with no state entry — reconstruction
+    iterates ``state.open_entries()`` only, so the order (and its fill)
+    was invisible forever unless the exact same intent re-ran the same
+    day. With this entry in place, the next cycle's reconstruction
+    resolves it via ``fetch_order_by_coid`` / trade discovery.
+
+    A failure of this write propagates deliberately: the order was
+    already created, so failing loud (journaled failed cycle, non-zero
+    exit, operator alert) is the only honest option — and a same-day
+    re-run still recovers via query-before-place on the same
+    deterministic clientOrderId.
+    """
+    exchange_id = order.get("id")
+    state.put(OrderStateEntry(
+        client_order_id=client_order_id,
+        symbol=intent.symbol,
+        side=intent.side,
+        intended_amount=intent.base_amount,
+        status="open",
+        exchange_order_id=str(exchange_id) if exchange_id is not None else None,
+        placed_at=placed_at,
+        last_seen_at=utcnow_iso(),
+    ))
 
 
 def _persist(

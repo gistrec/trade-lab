@@ -467,6 +467,66 @@ def test_reconstruction_writes_separate_entry(tmp_path):
     assert state.get(pending_coid).status == "closed"
 
 
+def test_crash_between_create_and_persist_recovered_next_cycle(tmp_path):
+    """End-to-end regression (M3): cycle 1 creates the order on the
+    exchange, then the connection dies on the first wait-for-ack poll
+    (same shape as a SIGKILL between create and persist). The cycle
+    fails loud — but the order must land in state as 'open' so cycle 2's
+    reconstruction finds the fill and journals it. Before the fix the
+    order was invisible forever: no state entry, no journal record, the
+    fill silently dissolved into the balance, and fetch_open_orders
+    discovery does not exist."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+
+    # --- Cycle 1: create acked, then every wait poll dies ---------------
+    stub1 = _LiveStub(basket=("BTC",))
+    stub1.fetch_order_responses[coid] = [
+        ccxt.OrderNotFound("query-before-place: not there yet"),
+        # Broker retries transient reads (retry_max_attempts=3).
+        ccxt.NetworkError("dropped right after create"),
+        ccxt.NetworkError("still down"),
+        ccxt.NetworkError("still down"),
+    ]
+    clock = _MockClock()
+    with pytest.raises(ccxt.NetworkError):
+        run_live_cycle(
+            broker=_broker(stub1, basket=("BTC",)),
+            journal=_journal(tmp_path), state=state,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert len(stub1.create_order_calls) == 1     # order IS on the exchange
+    entry = state.get(coid)
+    assert entry is not None, "crashed placement must be visible in state"
+    assert entry.status == "open"
+
+    # --- Cycle 2: reconstruction resolves the orphan --------------------
+    stub2 = _LiveStub(basket=("BTC",))
+    stub2.fetch_order_responses[coid] = [
+        _closed_order(coid, "BTC/USDT", filled=entry.intended_amount),
+    ]
+    result = run_live_cycle(
+        broker=_broker(stub2, basket=("BTC",)),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    assert stub2.create_order_calls == []          # recovered, not re-placed
+    assert state.get(coid).status == "closed"
+
+    cycles = _read_cycles(tmp_path)
+    # cycle 1 failed loud; cycle 2 = reconstruction entry + main entry.
+    assert [c["outcome"] for c in cycles[:2]] == ["failed", "reconstructed"]
+    recon = cycles[1]["orders_executed"][0]
+    assert recon["client_order_id"] == coid
+    assert recon["terminal_status"] == "closed"
+    assert recon["filled_amount"] == pytest.approx(entry.intended_amount)
+
+
 def test_reconstruction_lost_track(tmp_path):
     """Pre-existing open state + OrderNotFound + no matching trades →
     status='lost_track' with loud warning."""

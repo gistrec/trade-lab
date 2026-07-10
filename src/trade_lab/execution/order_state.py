@@ -14,9 +14,11 @@ Recovery
 ========
 A corrupt state file is treated as empty with a loud warning, NOT a
 hard error. The exchange is the single source of truth: query-before-
-place plus discovery via ``fetch_open_orders`` will reconstruct state
-from the exchange's history on the next cycle. Blocking the bot on a
-recoverable corruption is worse than starting fresh and rediscovering.
+place (``fetch_order_by_coid`` on the deterministic clientOrderId)
+re-discovers same-intent orders from the exchange on the next cycle,
+and ``place_order`` re-persists every order it touches. Blocking the
+bot on a recoverable corruption is worse than starting fresh and
+rediscovering.
 
 Permissions
 ===========
