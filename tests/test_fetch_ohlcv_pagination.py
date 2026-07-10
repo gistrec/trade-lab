@@ -7,6 +7,7 @@ stop pagination — that silently truncated history to a single page.
 from __future__ import annotations
 
 import ccxt
+import pytest
 
 from trade_lab.data.fetch_ohlcv import fetch_ohlcv
 
@@ -85,3 +86,28 @@ def test_tz_aware_until_does_not_crash_and_trims(monkeypatch):
     )
     # Must not raise; trimmed to candles at or before `until` (indices 0,1,2).
     assert len(df) == 3
+
+
+def test_since_none_raises_instead_of_truncating(monkeypatch):
+    """since=None must fail loud (regression: H4).
+
+    With since=None Binance returns only the newest ~limit candles and
+    pagination stops after that single page, silently replacing years of
+    history with a ~41-day window when the result is saved. The fetcher
+    therefore requires an explicit `since`. The stub records calls to
+    prove the exchange is never even contacted.
+    """
+    calls = []
+
+    class _RecordingExchange(_PagedExchange):
+        def fetch_ohlcv(self, symbol, timeframe, since=None, limit=1000):
+            calls.append(since)
+            return super().fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+
+    monkeypatch.setattr(
+        ccxt, "recordingexchange", _RecordingExchange, raising=False
+    )
+
+    with pytest.raises(ValueError, match="since"):
+        fetch_ohlcv("recordingexchange", "BTC/USDT", timeframe="1h", since=None)
+    assert calls == []

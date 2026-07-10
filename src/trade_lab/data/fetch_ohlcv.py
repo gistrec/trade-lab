@@ -46,7 +46,11 @@ def fetch_ohlcv(
     timeframe
         Candle timeframe (e.g. ``"1m"``, ``"1h"``, ``"1d"``).
     since
-        Optional start datetime; naive values are treated as UTC.
+        Start datetime; naive values are treated as UTC. Required:
+        ``None`` raises ``ValueError``, because with ``since=None`` most
+        exchanges (e.g. Binance) return only the newest page and
+        pagination stops there, silently truncating history to ~``limit``
+        candles.
     until
         Optional end datetime; naive values are treated as UTC.
     limit
@@ -57,12 +61,20 @@ def fetch_ohlcv(
     DataFrame indexed by UTC timestamp with columns ``open``, ``high``,
     ``low``, ``close``, ``volume``.
     """
+    if since is None:
+        raise ValueError(
+            "fetch_ohlcv requires an explicit `since`: with since=None most "
+            "exchanges (e.g. Binance) return only the newest page "
+            f"(~{limit} candles) and pagination stops there, silently "
+            "truncating history to that window. Pass the start datetime of "
+            "the range you want (CLI: trade-lab fetch --since 2020-01-01)."
+        )
     exchange_cls = getattr(ccxt, exchange_id, None)
     if exchange_cls is None:
         raise ValueError(f"Unknown ccxt exchange id: {exchange_id!r}")
     exchange = exchange_cls({"enableRateLimit": True})
 
-    since_ms = _to_ms(since) if since else None
+    since_ms = _to_ms(since)
     until_ms = _to_ms(until) if until else None
 
     rows: list[list] = []
@@ -78,7 +90,7 @@ def fetch_ohlcv(
         # — breaking on it silently truncated history to one page. End
         # of data shows up as an empty next page instead (one extra
         # request, never missing candles).
-        if since_ms is not None and last_ts <= since_ms:
+        if last_ts <= since_ms:
             break
         since_ms = last_ts + 1
         if until_ms is not None and last_ts >= until_ms:

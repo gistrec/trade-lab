@@ -141,6 +141,7 @@ def cmd_fetch(args: argparse.Namespace) -> None:
             exchange=exchange,
             symbol=args.symbol,
             timeframe=args.timeframe,
+            force=args.force,
         )
     print(f"Saved {len(df)} candles to {path}")
 
@@ -1218,8 +1219,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--symbol", default="BTC/USDT", help="Symbol (default BTC/USDT)")
     p_fetch.add_argument("--timeframe", default="1h", help="Candle timeframe (default 1h)")
     p_fetch.add_argument("--exchange", default=None, help="ccxt exchange id (default binance)")
-    p_fetch.add_argument("--since", default=None, help="ISO timestamp to start from")
+    p_fetch.add_argument(
+        "--since",
+        required=True,
+        help=(
+            "ISO timestamp to start from (required: without it the exchange "
+            "returns only the newest ~1000 candles, silently truncating history)"
+        ),
+    )
     p_fetch.add_argument("--until", default=None, help="ISO timestamp to stop at")
+    p_fetch.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Overwrite the stored candles file even if the new data covers a "
+            "smaller date range than the existing file"
+        ),
+    )
     p_fetch.add_argument(
         "--output",
         default=None,

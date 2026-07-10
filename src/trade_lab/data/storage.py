@@ -22,9 +22,40 @@ def save_candles(
     exchange: str,
     symbol: str,
     timeframe: str,
+    force: bool = False,
 ) -> Path:
-    """Persist a candles DataFrame to Parquet under ``data_dir``."""
+    """Persist a candles DataFrame to Parquet under ``data_dir``.
+
+    Saving is a full overwrite (no merge with the existing file). To keep
+    a truncated fetch from silently destroying stored history, an existing
+    non-empty file may only be replaced by data whose date range covers it
+    (``new_min <= old_min`` and ``new_max >= old_max``). A strictly smaller
+    range raises ``ValueError`` unless ``force=True`` (CLI: ``--force``).
+    """
     path = candles_path(data_dir, exchange, symbol, timeframe)
+    if path.exists() and not force:
+        existing = pd.read_parquet(path)
+        if not existing.empty:
+            covers = (
+                not df.empty
+                and df.index.min() <= existing.index.min()
+                and df.index.max() >= existing.index.max()
+            )
+            if not covers:
+                new_range = (
+                    "(empty)"
+                    if df.empty
+                    else f"[{df.index.min()} .. {df.index.max()}]"
+                )
+                raise ValueError(
+                    f"Refusing to overwrite {path}: the existing file covers "
+                    f"[{existing.index.min()} .. {existing.index.max()}] "
+                    f"({len(existing)} bars) but the new data covers "
+                    f"{new_range} ({len(df)} bars), which would shrink stored "
+                    "history. save_candles overwrites the whole file (no "
+                    "merge) — re-fetch the full range, or pass force=True "
+                    "(CLI: --force) to overwrite anyway."
+                )
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path)
     return path
