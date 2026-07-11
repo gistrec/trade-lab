@@ -191,14 +191,21 @@ def compute_live_signal(
         # a NaN SMA reads as "regime gate closed", the ladder collapses
         # to 0.0 even with every lookback state at 1, and the allocator
         # turns that into a full liquidation plan. Fail loud instead.
+        # Raised as the structured InsufficientWarmupError subclass so
+        # the *orchestrator* (never this module) can branch on it: on
+        # Binance testnet this depth is structural (the ~monthly candle
+        # wipe caps history at ~36 bars) and becomes a first-class
+        # 'skipped_warmup' cycle; on mainnet it stays a hard failure.
         max_lookback = max(int(L) for L in lookbacks)
-        raise SignalComputationError(
+        raise InsufficientWarmupError(
             f"Basket history too short to warm the signal: {len(basket)} "
             f"completed bars, need >= {required} "
             f"(SMA({sma_filter_period}) needs {sma_filter_period} bars; "
             f"max lookback {max_lookback} needs {max_lookback + 1}). "
             f"An unwarmed SMA would silently read as 'gate closed' "
-            f"(signal=0) and plan a full liquidation — refusing."
+            f"(signal=0) and plan a full liquidation — refusing.",
+            bars_available=len(basket),
+            bars_required=required,
         )
 
     strategy = TimeSeriesMomentumStrategy(
@@ -343,3 +350,41 @@ class SignalComputationError(RuntimeError):
     """Raised when the live signal cannot be computed (missing candles,
     empty basket, strategy returned empty series). Distinct from
     ``BrokerError`` so callers can branch on data vs connectivity."""
+
+
+class InsufficientWarmupError(SignalComputationError):
+    """The built basket is shallower than the SMA/lookback warm-up floor.
+
+    Raised ONLY by the basket-depth guard in :func:`compute_live_signal`
+    (after the basket is built), carrying the structured depth facts so
+    the orchestrator can journal them. Every other refusal in this
+    module — empty candles, a fetch failure, uneven per-asset history,
+    a ``candles_per_asset`` window too small to ever warm — stays a
+    plain :class:`SignalComputationError` and fails loud EVERYWHERE.
+
+    The split exists because this one condition is *structural* on
+    Binance testnet (the exchange wipes candles ~monthly, capping the
+    basket at ~36 bars, so SMA(200) can never warm there) while on
+    mainnet the same depth means truncated kline history — a real
+    incident. The branch on ``config.sandbox`` lives in the
+    orchestrators (``dry_run`` / ``live_cycle``), never here: signal
+    computation stays environment-agnostic.
+    """
+
+    def __init__(
+        self, message: str, *, bars_available: int, bars_required: int,
+    ) -> None:
+        super().__init__(message)
+        self.bars_available = int(bars_available)
+        self.bars_required = int(bars_required)
+
+    def reason_dict(self) -> dict:
+        """Structured ``skip_reason`` block for the journal — single
+        source of the shape, so dry-run and live cycles can never
+        journal two different reason schemas."""
+        return {
+            "type": "insufficient_warmup",
+            "bars_available": self.bars_available,
+            "bars_required": self.bars_required,
+            "message": str(self)[:512],
+        }

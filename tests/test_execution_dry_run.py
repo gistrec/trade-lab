@@ -178,20 +178,58 @@ def test_nan_weight_fails_loud_through_dry_cycle(tmp_path, monkeypatch):
     assert cycle["error"]["type"] == "ValueError"
 
 
-def test_dry_run_short_history_journals_failed_cycle_and_raises(tmp_path):
+def _mainnet_config(basket=("BTC", "ETH")):
+    return PaperConfig(
+        exchange_id="binance", sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=True, quote_currency="USDT", basket=basket,
+        request_timeout_ms=5000,
+    )
+
+
+def test_dry_run_short_history_on_testnet_journals_skipped_warmup(tmp_path):
     """Binance-testnet shape: the exchange wiped candles and returns only
-    ~36 daily bars, so SMA(200) can never warm. The cycle must NOT
-    'succeed' with signal=0 (that plans a full liquidation of any open
-    book); it raises SignalComputationError AND journals a structured
-    outcome='failed' entry so monitoring surfaces the incident."""
+    ~36 daily bars, so SMA(200) structurally can NEVER warm there. On a
+    sandbox config that is a healthy first-class skip, not an incident:
+    journal outcome='skipped_warmup' with an explicit skip_reason block
+    (bars_available/bars_required), error=None, no plan. The exception
+    still re-raises — no result exists — and the CLI maps it to exit 0."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+    from trade_lab.execution.signal import InsufficientWarmupError
+
+    exch = _StubExchange(balance_usdt=0.0, btc_holdings=0.1)
+    exch._closes = (100 + np.linspace(0, 20, 36)).tolist()  # uptrend, 36 bars
+    broker = Broker(_config(), exch)
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(InsufficientWarmupError, match="36 completed bars"):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "skipped_warmup"
+    assert cycle["error"] is None
+    assert cycle["skip_reason"]["type"] == "insufficient_warmup"
+    assert cycle["skip_reason"]["bars_available"] == 36
+    assert cycle["skip_reason"]["bars_required"] == 200
+    assert "36 completed bars" in cycle["skip_reason"]["message"]
+    # No plan was produced — nothing that could be mistaken for orders.
+    assert cycle["orders_planned"] is None
+
+
+def test_dry_run_short_history_on_mainnet_stays_failed(tmp_path):
+    """PIN of mainnet strictness (H3): the identical short history on a
+    sandbox=False config means truncated kline history on the real-money
+    path — outcome='failed' + raise, no skipped_warmup softening. This
+    test exists to break any future dilution of the mainnet posture."""
     import json
 
     from trade_lab.execution.journal import JournalWriter
     from trade_lab.execution.signal import SignalComputationError
 
     exch = _StubExchange(balance_usdt=0.0, btc_holdings=0.1)
-    exch._closes = (100 + np.linspace(0, 20, 36)).tolist()  # uptrend, 36 bars
-    broker = Broker(_config(), exch)
+    exch._closes = (100 + np.linspace(0, 20, 36)).tolist()
+    broker = Broker(_mainnet_config(), exch)
     journal = JournalWriter(tmp_path / "cycles.jsonl")
 
     with pytest.raises(SignalComputationError, match="36 completed bars"):
@@ -199,10 +237,39 @@ def test_dry_run_short_history_journals_failed_cycle_and_raises(tmp_path):
 
     cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
     assert cycle["outcome"] == "failed"
-    assert cycle["error"]["type"] == "SignalComputationError"
+    assert cycle["error"]["type"] == "InsufficientWarmupError"
     assert "36 completed bars" in cycle["error"]["message"]
-    # No plan was produced — nothing that could be mistaken for orders.
-    assert cycle["orders_planned"] is None
+    assert cycle["skip_reason"] is None
+
+
+def test_dry_run_other_signal_errors_still_fail_on_testnet(tmp_path, monkeypatch):
+    """Only the depth guard's InsufficientWarmupError becomes a
+    first-class skip on the sandbox. Every other SignalComputationError
+    (e.g. the M5 uneven-history guard) keeps the failed posture on
+    testnet too — a real data incident must never hide behind the
+    warm-up skip."""
+    import json
+
+    from trade_lab.execution import dry_run as dr
+    from trade_lab.execution.journal import JournalWriter
+    from trade_lab.execution.signal import SignalComputationError
+
+    def _raise(*a, **k):
+        raise SignalComputationError(
+            "Uneven basket history: DOGE has 150 bars starting 2025-08-05"
+        )
+
+    monkeypatch.setattr(dr, "compute_live_signal", _raise)
+    broker = Broker(_config(), _StubExchange())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(SignalComputationError, match="Uneven"):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "SignalComputationError"
+    assert cycle["skip_reason"] is None
 
 
 def test_dry_run_keyboard_interrupt_journals_failed_and_reraises(tmp_path):

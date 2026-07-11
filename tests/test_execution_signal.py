@@ -14,8 +14,8 @@ from trade_lab.backtest.market_index import build_crypto_market_index_with_weigh
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.signal import (
-    SignalComputationError, SignalSnapshot, compute_live_signal,
-    required_basket_bars,
+    InsufficientWarmupError, SignalComputationError, SignalSnapshot,
+    compute_live_signal, required_basket_bars,
 )
 
 
@@ -303,6 +303,60 @@ def test_candles_per_asset_below_warmup_refused_before_any_fetch():
     ):
         compute_live_signal(broker, fetch_candles=fetch, candles_per_asset=200)
     assert calls == [], "must refuse before burning exchange calls"
+
+
+def test_depth_guard_raises_structured_insufficient_warmup_error():
+    """The basket-depth guard raises the InsufficientWarmupError SUBCLASS
+    carrying bars_available/bars_required — the structured facts the
+    orchestrators journal into skip_reason on testnet. It stays a
+    SignalComputationError, so every existing catch keeps working."""
+    closes = (100 + np.linspace(0, 20, 36)).tolist()  # testnet shape
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(InsufficientWarmupError) as exc_info:
+        compute_live_signal(broker, fetch_candles=fetch)
+    exc = exc_info.value
+    assert isinstance(exc, SignalComputationError)
+    assert exc.bars_available == 36
+    assert exc.bars_required == 200
+    assert exc.reason_dict() == {
+        "type": "insufficient_warmup",
+        "bars_available": 36,
+        "bars_required": 200,
+        "message": str(exc)[:512],
+    }
+
+
+def test_non_depth_errors_are_not_insufficient_warmup():
+    """Only the basket-depth guard gets the structured subclass. Every
+    other refusal — the up-front candles_per_asset window check, uneven
+    per-asset history, empty candles — must stay a plain
+    SignalComputationError, so the testnet 'skipped_warmup' branch in the
+    orchestrators can never swallow a real data incident."""
+    broker = Broker(_config(), _ExchangeStub())
+
+    # Up-front window refusal (before any fetch).
+    with pytest.raises(SignalComputationError) as e1:
+        compute_live_signal(
+            broker,
+            fetch_candles=lambda b, p, n: _ohlcv([1.0]),
+            candles_per_asset=200,
+        )
+    assert not isinstance(e1.value, InsufficientWarmupError)
+
+    # Empty candles for one asset.
+    with pytest.raises(SignalComputationError) as e2:
+        compute_live_signal(broker, fetch_candles=lambda b, p, n: _ohlcv([]))
+    assert not isinstance(e2.value, InsufficientWarmupError)
+
+    # Uneven history (M5): one truncated asset.
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    trunc = (100 + np.linspace(120, 200, 150)).tolist()
+    frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
+    frames["DOGE"] = _ohlcv_ending_at(trunc)
+    with pytest.raises(SignalComputationError, match="Uneven") as e3:
+        compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+    assert not isinstance(e3.value, InsufficientWarmupError)
 
 
 def test_required_basket_bars_semantics():

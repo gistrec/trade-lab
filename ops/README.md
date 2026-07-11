@@ -35,13 +35,20 @@ live** order cycle (see `execution/README.md`). One probe cannot separate
 | Endpoint | Question | 200 when | 503 when |
 |---|---|---|---|
 | `GET /healthz` | heartbeat | a cycle within `HEARTBEAT_MAX_AGE_S` (default 12h) | journal unreadable/empty, or no cycle in ~12h |
-| `GET /healthz/daily` | daily live health | last **main** live cycle (identified by `context.mode=='live'`; reconstruction excluded) within `DAILY_MAX_AGE_S` (26h) with outcome `success` | no live cycle in window, stale >26h, or live outcome not `success` — including a live run that failed even before placing an order (see note) |
+| `GET /healthz/daily` | daily live health | last **main** live cycle (identified by `context.mode=='live'`; reconstruction excluded) within `DAILY_MAX_AGE_S` (26h) with a healthy outcome: `success`, plus `skipped_warmup` on a testnet journal only (see below) | no live cycle in window, stale >26h, or live outcome unhealthy — including a live run that failed even before placing an order (see note) |
 | `GET /` | human summary | always (informational, not an alarm target) | — |
 
 `partial` is treated as unhealthy on purpose — CLAUDE.md forbids silent
 partial fills. `open_order_incidents` is surfaced in the `/healthz/daily`
 body for humans but does **not** gate 503 in v1 (kept out of the paging
 path to avoid false positives from stale window entries).
+
+`skipped_warmup` is healthy **only when the cycle's own `context.sandbox`
+is `true`**: Binance testnet wipes candles ~monthly, so SMA(200) can never
+warm there and the daily cycle records a first-class skip (no orders)
+instead of failing. The executor never writes this outcome on mainnet —
+if it ever appears in a mainnet journal, the environment guard was
+bypassed, and `/daily` pages on it.
 
 **How `/daily` identifies the live run (and two failure modes it closes).**
 Every cycle carries a durable `context.mode` (`'live'` / `'dry_run'`), set in

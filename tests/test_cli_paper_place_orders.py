@@ -159,18 +159,18 @@ def _sandbox_config() -> PaperConfig:
     )
 
 
-def _patch_pipeline(monkeypatch, outcome: str):
+def _patch_pipeline(monkeypatch, outcome: str, config=None, **result_kwargs):
     from trade_lab.execution.live_cycle import LiveCycleResult
 
     monkeypatch.setattr(
-        "trade_lab.execution.load_paper_config", _sandbox_config,
+        "trade_lab.execution.load_paper_config", config or _sandbox_config,
     )
     monkeypatch.setattr(
         Broker, "connect", classmethod(lambda cls, config: object()),
     )
     result = LiveCycleResult(
         cycle_id="0" * 32, outcome=outcome, order_results=[],
-        reconstructed_count=0, error=None,
+        reconstructed_count=0, error=None, **result_kwargs,
     )
     monkeypatch.setattr(
         "trade_lab.execution.run_live_cycle",
@@ -250,11 +250,11 @@ def test_refuses_candles_window_below_signal_warmup(monkeypatch, tmp_path):
 def test_signal_computation_error_exits_structured_nonzero(
     monkeypatch, tmp_path,
 ):
-    """A SignalComputationError from the live cycle (e.g. testnet's
-    wiped kline history cannot warm SMA(200)) must exit non-zero with a
-    one-line structured message, not a raw traceback. The journal entry
-    (outcome='failed') is written inside run_live_cycle before the
-    re-raise."""
+    """A non-warm-up SignalComputationError from the live cycle (uneven
+    history, empty candles, fetch failure) must exit non-zero with a
+    one-line structured message, not a raw traceback — on ANY
+    environment, testnet included. The journal entry (outcome='failed')
+    is written inside run_live_cycle before the re-raise."""
     from trade_lab.execution.signal import SignalComputationError
 
     monkeypatch.setattr(
@@ -266,8 +266,100 @@ def test_signal_computation_error_exits_structured_nonzero(
 
     def _raise(broker, **kwargs):
         raise SignalComputationError(
+            "Uneven basket history: DOGE has 150 bars starting 2025-08-05"
+        )
+
+    monkeypatch.setattr("trade_lab.execution.run_live_cycle", _raise)
+
+    with pytest.raises(
+        SystemExit, match=r"Signal computation failed: .*Uneven basket",
+    ) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code not in (0, None)
+
+
+# ---------------------------------------------------------------------------
+# skipped_warmup — healthy testnet state (exit 0), pinned mainnet strictness
+# ---------------------------------------------------------------------------
+
+_SKIP_REASON = {
+    "type": "insufficient_warmup",
+    "bars_available": 36,
+    "bars_required": 200,
+    "message": "Basket history too short to warm the signal",
+}
+
+
+def test_skipped_warmup_outcome_exits_zero_on_testnet(
+    monkeypatch, tmp_path, capsys,
+):
+    """Testnet's structurally-unwarmable SMA is a healthy first-class
+    skip: run_live_cycle returns outcome='skipped_warmup' (journal entry
+    already written) and the CLI prints the bar counts and exits 0 —
+    exit-code semantics unchanged for every other outcome."""
+    _patch_pipeline(
+        monkeypatch, outcome="skipped_warmup", skip_reason=_SKIP_REASON,
+    )
+    assert cmd_paper_place_orders(_args(tmp_path)) is None  # no SystemExit
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out
+    assert "36" in out and "200" in out
+    assert "skipped_warmup" in out
+
+
+def test_skipped_warmup_with_lost_track_still_exits_nonzero(
+    monkeypatch, tmp_path,
+):
+    """A perpetually-skipping testnet must not mute an unresolved order
+    incident: lost_track keeps the exit code red even on a healthy
+    skipped_warmup cycle."""
+    _patch_pipeline(
+        monkeypatch, outcome="skipped_warmup", skip_reason=_SKIP_REASON,
+        lost_track_count=1,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code == 2
+
+
+def test_skipped_warmup_outcome_on_mainnet_config_exits_nonzero(
+    monkeypatch, tmp_path,
+):
+    """Defense in depth (PIN): run_live_cycle only returns
+    'skipped_warmup' on a sandbox config, so seeing it under a mainnet
+    config means that invariant broke — the CLI must alert (exit 2),
+    never treat it as healthy."""
+    _patch_pipeline(
+        monkeypatch, outcome="skipped_warmup", skip_reason=_SKIP_REASON,
+        config=lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code == 2
+
+
+def test_mainnet_insufficient_warmup_raises_exits_nonzero(
+    monkeypatch, tmp_path,
+):
+    """PIN of mainnet strictness (H3): on mainnet run_live_cycle re-raises
+    InsufficientWarmupError after journaling outcome='failed'; the CLI
+    turns it into a one-line non-zero SystemExit. This test exists to
+    break any future dilution of the mainnet posture."""
+    from trade_lab.execution.signal import InsufficientWarmupError
+
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config",
+        lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    monkeypatch.setattr(
+        Broker, "connect", classmethod(lambda cls, config: object()),
+    )
+
+    def _raise(broker, **kwargs):
+        raise InsufficientWarmupError(
             "Basket history too short to warm the signal: 36 completed "
-            "bars, need >= 200"
+            "bars, need >= 200",
+            bars_available=36, bars_required=200,
         )
 
     monkeypatch.setattr("trade_lab.execution.run_live_cycle", _raise)

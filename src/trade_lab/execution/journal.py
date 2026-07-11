@@ -13,7 +13,10 @@ planned orders, no fills. ``schema_version=2`` (current) adds
 dry-run cycles continue to write the same shape with
 ``orders_executed=None`` so a v1 reader still parses them. Readers
 must accept all known versions and skip unknown ones with a warning
-— never crash.
+— never crash. Additive v2 extension (2026-07-11, no version bump):
+outcome ``skipped_warmup`` + optional ``skip_reason`` dict for the
+testnet-only "SMA warm-up structurally impossible" first-class skip;
+readers that predate it simply see an unfamiliar outcome string.
 
 Atomicity
 =========
@@ -82,7 +85,7 @@ class Cycle:
     started_at: str             # ISO-8601 UTC
     ended_at: str               # ISO-8601 UTC
     duration_ms: int
-    outcome: str                # success | failed | partial | unknown_orders | reconstructed
+    outcome: str                # success | failed | partial | unknown_orders | reconstructed | skipped_warmup
     error: Optional[dict]       # {"type": ..., "message": ...} or None
     git_commit: Optional[str]
     python_version: str
@@ -97,6 +100,12 @@ class Cycle:
     orders_skipped: Optional[list]
     total_skipped_quote_drift: Optional[float]
     orders_executed: Optional[list] = None  # NEW in v2 — real-order results
+    skip_reason: Optional[dict] = None
+    # Structured reason for outcome='skipped_warmup' (testnet-only:
+    # SMA warm-up structurally impossible): {"type": "insufficient_warmup",
+    # "bars_available": int, "bars_required": int, "message": str}.
+    # CLAUDE.md: skipped actions are first-class outputs with an explicit
+    # reason field. None for every other outcome.
     schema_version: int = JOURNAL_SCHEMA_VERSION
 
 

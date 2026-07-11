@@ -865,11 +865,74 @@ def test_sma_stall_silent_without_latest_or_signal():
     assert _sma_warmup_stall(_NoSignal()) is None
 
 
-def test_render_incidents_shows_stall_banner_after_clean_success(monkeypatch):
-    """On a clean window the banner renders AFTER the 'No failed/partial
-    cycles...' success line — the operational verdict first, the structural
-    SMA(200) notice below it — so a clean window still explains why no
-    trades ever happen."""
+def _skipped_warmup_reader(*, bars=36, required=200, sandbox=True):
+    """Reader whose latest cycle is the current first-class skip shape:
+    outcome='skipped_warmup' + structured skip_reason (no signal at all —
+    the executor refused before computing one)."""
+    cycle = {
+        "outcome": "skipped_warmup",
+        "context": {"exchange": "binance", "sandbox": sandbox},
+        "signal": None,
+        "basket_close_series": None,
+        "skip_reason": {
+            "type": "insufficient_warmup",
+            "bars_available": bars,
+            "bars_required": required,
+            "message": "Basket history too short to warm the signal",
+        },
+    }
+
+    class _R:
+        def latest_cycle(self):
+            return cycle
+
+    return _R()
+
+
+def test_sma_stall_reads_skipped_warmup_reason():
+    """The current journal shape: a skipped_warmup cycle's skip_reason
+    (bars_available/bars_required from the executor itself) feeds the
+    banner — not the legacy basket_close_series length."""
+    from trade_lab.monitoring.app import _sma_warmup_stall
+
+    stall = _sma_warmup_stall(_skipped_warmup_reader(bars=36, required=200))
+    assert stall is not None
+    assert stall["exchange"] == "binance"
+    assert stall["bars"] == 36
+    assert stall["bars_required"] == 200
+
+
+def test_sma_stall_silent_for_skipped_warmup_on_mainnet_content():
+    """Defense in depth: a skipped_warmup record whose own context says
+    mainnet must NOT produce the 'by design' banner — that outcome is
+    impossible on mainnet, and reassuring wording would mask the bug."""
+    from trade_lab.monitoring.app import _sma_warmup_stall
+
+    assert _sma_warmup_stall(_skipped_warmup_reader(sandbox=False)) is None
+
+
+def test_render_warmup_notice_renders_yellow_banner_with_bar_counts(monkeypatch):
+    app = _stub_st(monkeypatch, cap := {})
+    app._render_warmup_notice(_skipped_warmup_reader(bars=36, required=200))
+    assert len(cap["warning"]) == 1
+    msg = cap["warning"][0]
+    assert "SMA(200)" in msg
+    assert "36 of 200" in msg
+    assert "skipped_warmup" in msg
+    assert "not an incident" in msg
+    assert not cap["error"]
+
+
+def test_render_warmup_notice_silent_when_no_stall(monkeypatch):
+    app = _stub_st(monkeypatch, cap := {})
+    app._render_warmup_notice(_stall_reader(sma_value=91.2))  # warmed gate
+    assert not cap["warning"] and not cap["error"]
+
+
+def test_render_incidents_no_longer_renders_stall_banner(monkeypatch):
+    """The structural notice moved to the single page-bottom banner
+    (_render_warmup_notice); the Incidents section renders only the
+    operational verdict — one banner on the page, not duplicates."""
     import trade_lab.monitoring.app as app
 
     calls: list[tuple[str, str]] = []
@@ -886,12 +949,25 @@ def test_render_incidents_shows_stall_banner_after_clean_success(monkeypatch):
     app._render_incidents(reader)
 
     kinds = [k for k, _ in calls]
-    # verdict first, then the orange SMA(200) caveat (st.warning, like the
-    # redeploy-span notice); no incident/gap warnings on a clean window.
-    assert kinds == ["success", "warning"]
+    assert kinds == ["success"]
     assert "No failed/partial cycles" in calls[0][1]
-    assert "SMA(200)" in calls[1][1]
-    assert "no buy order is placed" in calls[1][1]
+
+
+def test_incidents_clean_when_window_full_of_skipped_warmup(monkeypatch):
+    """skipped_warmup cycles are healthy testnet states: a window holding
+    nothing else must render the clean-window success line and no
+    incident warning."""
+    app = _stub_st(monkeypatch, cap := {})
+    cycles = [
+        {"outcome": "skipped_warmup", "cycle_id": f"s{i}", "ended_at": None,
+         "orders_executed": [],
+         "skip_reason": {"type": "insufficient_warmup",
+                         "bars_available": 36, "bars_required": 200}}
+        for i in range(3)
+    ]
+    app._render_incidents(_LiveReader(cycles=cycles))
+    assert cap["success"]
+    assert not cap["warning"] and not cap["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -930,3 +1006,66 @@ def test_journal_sources_with_mainnet_env(monkeypatch):
         monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
                            raising=False)
         importlib.reload(app)
+
+
+# ---------------------------------------------------------------------------
+# Runtime verify (AppTest): a skipped_warmup journal renders the page-bottom
+# warm-up banner and zero incident/alarm blocks
+# ---------------------------------------------------------------------------
+
+
+def test_app_renders_warmup_banner_not_incident_for_skipped_warmup(
+    tmp_path, monkeypatch,
+):
+    """End-to-end through the real Streamlit script: a fresh testnet
+    journal whose only cycle is outcome='skipped_warmup' must render as a
+    HEALTHY dashboard — clean incident window, no failure blocks — with
+    the single yellow structural notice (bars X of Y from skip_reason) at
+    the bottom of the page."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc).isoformat()
+    cycle = {
+        "cycle_id": "skip1", "started_at": now, "ended_at": now,
+        "duration_ms": 5000, "outcome": "skipped_warmup", "error": None,
+        "git_commit": None, "python_version": "3.11.0",
+        "context": {"mode": "live", "exchange": "binance", "sandbox": True,
+                    "quote_currency": "USDT", "basket": ["BTC"]},
+        "signal": None, "basket_close_series": None, "balance": None,
+        "equity_usd": None, "target_allocation": None,
+        "current_holdings_quote": None, "orders_planned": None,
+        "orders_skipped": None, "total_skipped_quote_drift": None,
+        "orders_executed": [],
+        "skip_reason": {"type": "insufficient_warmup",
+                        "bars_available": 36, "bars_required": 200,
+                        "message": "too short"},
+        "schema_version": 2,
+    }
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text(json.dumps(cycle) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    warnings = [str(w.value) for w in app.warning]
+    banner = [w for w in warnings if "SMA(200)" in w]
+    assert len(banner) == 1, warnings          # one banner, no duplicates
+    assert "36 of 200" in banner[0]
+    assert "not an incident" in banner[0]
+    # No incident surface anywhere: the skip is a healthy state.
+    assert not any("non-success cycle" in w for w in warnings), warnings
+    errors = [str(e.value) for e in app.error]
+    assert not any("FAILED" in e for e in errors), errors
+    successes = [str(s.value) for s in app.success]
+    assert any("No failed/partial cycles" in s for s in successes), successes

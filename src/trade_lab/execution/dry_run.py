@@ -29,7 +29,7 @@ from .journal import (
     Cycle, JournalWriter, get_git_commit_short, get_python_version,
     new_cycle_id,
 )
-from .signal import SignalSnapshot, compute_live_signal
+from .signal import InsufficientWarmupError, SignalSnapshot, compute_live_signal
 from ..logging_setup import set_cycle_id
 
 
@@ -70,6 +70,13 @@ def run_dry_cycle(
     re-raised so the caller is not left thinking everything went fine.
     A journal-write failure is logged and swallowed: it must not mask
     or replace the operational outcome of the cycle itself.
+
+    Special case: :class:`InsufficientWarmupError` on a sandbox config
+    journals ``outcome='skipped_warmup'`` (testnet's ~monthly candle
+    wipe makes the warm-up structurally impossible — a first-class
+    skip, not an incident) but is still re-raised: no plan exists, and
+    the CLI turns it into a friendly exit-0 message. On mainnet the
+    same error keeps the failed-entry posture unchanged.
     """
     cycle_id = new_cycle_id()
     set_cycle_id(cycle_id)  # tag every log line in this cycle with the id
@@ -146,6 +153,26 @@ def run_dry_cycle(
             ],
             total_skipped_quote_drift=total_skipped_quote_drift(plan),
         )
+    except InsufficientWarmupError as exc:
+        # Environment branch lives HERE (the orchestrator), never inside
+        # signal computation. On the sandbox (Binance testnet) an
+        # unwarmed SMA is structural — the exchange wipes candles
+        # ~monthly, so the basket can never reach 200 bars — and the
+        # cycle is journaled as a first-class 'skipped_warmup' with an
+        # explicit reason block, not as an incident. On mainnet the
+        # same depth means truncated kline history: keep the H3 posture
+        # (outcome='failed') without any softening. Re-raised either
+        # way — no plan exists, and the caller must not think one does.
+        if journal is not None:
+            context["exchange_latency"] = broker.exchange_call_stats()
+            if broker.config.sandbox is True:
+                cycle = _skipped_warmup_cycle(
+                    cycle_id, started_at, context, exc,
+                )
+            else:
+                cycle = _failed_cycle(cycle_id, started_at, context, exc)
+            _try_write(journal, cycle)
+        raise
     except BaseException as exc:
         # BaseException, not Exception: Ctrl-C (KeyboardInterrupt) mid-cycle
         # must still leave a failed-cycle journal entry (mirrors
@@ -216,6 +243,42 @@ def _failed_cycle(
         orders_planned=None,
         orders_skipped=None,
         total_skipped_quote_drift=None,
+    )
+
+
+def _skipped_warmup_cycle(
+    cycle_id: str,
+    started_at: datetime,
+    context: dict,
+    exc: InsufficientWarmupError,
+) -> Cycle:
+    """Testnet-only first-class skip: the basket structurally cannot warm
+    SMA(200) (~monthly candle wipe), so this is a healthy state of that
+    environment, not an incident. ``error`` stays None — monitoring and
+    health checks key incidents off ``outcome``/``error`` — and the
+    depth facts go into the explicit ``skip_reason`` block instead.
+    """
+    ended_at = datetime.now(timezone.utc)
+    return Cycle(
+        cycle_id=cycle_id,
+        started_at=started_at.isoformat(),
+        ended_at=ended_at.isoformat(),
+        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
+        outcome="skipped_warmup",
+        error=None,
+        git_commit=get_git_commit_short(),
+        python_version=get_python_version(),
+        context=context,
+        signal=None,
+        basket_close_series=None,
+        balance=None,
+        equity_usd=None,
+        target_allocation=None,
+        current_holdings_quote=None,
+        orders_planned=None,
+        orders_skipped=None,
+        total_skipped_quote_drift=None,
+        skip_reason=exc.reason_dict(),
     )
 
 

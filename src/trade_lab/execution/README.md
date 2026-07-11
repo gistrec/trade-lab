@@ -221,7 +221,8 @@ What it does:
 4. Places the plan in sell-first order, 200ms inter-order spacing,
    5-minute per-order wait-for-ack budget.
 5. Writes one Cycle entry (schema v2) with `outcome` ∈ {success,
-   partial, unknown_orders, failed} and `orders_executed` populated.
+   partial, unknown_orders, failed, skipped_warmup (testnet only)}
+   and `orders_executed` populated.
 
 Mainnet order placement sits behind a THREE-flag gate:
 `TRADE_LAB_PAPER_SANDBOX=false` + `TRADE_LAB_PAPER_ALLOW_MAINNET=true`
@@ -306,11 +307,19 @@ fast-path.
 ### Why testnet cannot validate order placement
 
 Binance Spot Testnet wipes kline history on a ~monthly reset, so the
-basket never accumulates the 200 daily bars the SMA gate needs —
-the ladder stays 0 and no buy order is ever placed there, no matter
-how long the cron runs. Testnet still validates cycle timing, journal
-integrity, idempotency, and network-error recovery; signal warm-up
-and real fills are what the mainnet observation phase adds.
+basket never accumulates the 200 daily bars the SMA gate needs — no
+signal can be computed there, no matter how long the cron runs. The
+executor records this as a first-class cycle outcome
+`skipped_warmup` (an `InsufficientWarmupError` from the basket-depth
+guard on a sandbox config): explicit `skip_reason` block with
+`bars_available`/`bars_required`, no orders, CLI exit 0, yellow
+notice at the bottom of the dashboard. It is a healthy testnet
+state, not an incident. On **mainnet** the identical condition means
+truncated kline history and keeps the hard-failure posture
+(`outcome='failed'`, exit 1) — never soften it. Testnet still
+validates cycle timing, journal integrity, idempotency, and
+network-error recovery; signal warm-up and real fills are what the
+mainnet observation phase adds.
 
 ### Why dry-run is 6-hourly but live is daily
 

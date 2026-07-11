@@ -68,6 +68,17 @@ DEFAULT_DAILY_MAX_AGE_S = 93600
 # so it is excluded from the daily clock entirely (see evaluate_daily).
 HEALTHY_MAIN_LIVE_OUTCOMES = frozenset({"success"})
 
+# Sandbox (testnet) additionally treats 'skipped_warmup' as healthy: Binance
+# testnet wipes its candle history ~monthly, so the SMA(200) warm-up is
+# structurally impossible there and the daily cycle records a first-class
+# skip (no orders) instead of failing. Applied ONLY when the cycle's own
+# context.sandbox is True — the executor never writes this outcome on
+# mainnet, and if one ever appears in a mainnet journal the environment
+# guard was bypassed, which must page, not pass.
+SANDBOX_HEALTHY_MAIN_LIVE_OUTCOMES = (
+    HEALTHY_MAIN_LIVE_OUTCOMES | {"skipped_warmup"}
+)
+
 # How many trailing cycles to scan for the daily check. The 6-hourly dry-run +
 # daily live share the journal, so ~200 cycles covers well over a month — more
 # than enough to find the last live run and anything that failed after it.
@@ -225,7 +236,13 @@ def evaluate_daily(
             False, f"last live cycle {age:.0f}s ago (limit {max_age_s:.0f}s)",
             detail,
         )
-    if outcome not in HEALTHY_MAIN_LIVE_OUTCOMES:
+    ctx = last.get("context")
+    cycle_is_sandbox = isinstance(ctx, dict) and ctx.get("sandbox") is True
+    healthy_outcomes = (
+        SANDBOX_HEALTHY_MAIN_LIVE_OUTCOMES if cycle_is_sandbox
+        else HEALTHY_MAIN_LIVE_OUTCOMES
+    )
+    if outcome not in healthy_outcomes:
         # Covers a live run that placed orders then failed AND one that died
         # before placing (both carry mode=='live' and a non-success outcome).
         return HealthResult(False, f"last live outcome={outcome}", detail)

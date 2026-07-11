@@ -30,6 +30,7 @@ def _entry(
     cycle_id: str = "c1",
     orders_executed=None,
     mode=None,
+    sandbox: bool = True,
 ) -> dict:
     """Build a minimal schema-v2 journal entry the reader will accept.
 
@@ -47,7 +48,7 @@ def _entry(
         "ended_at": ended_at.isoformat(),
         "duration_ms": 1000,
         "outcome": outcome,
-        "context": {"mode": mode, "exchange": "binance", "sandbox": True},
+        "context": {"mode": mode, "exchange": "binance", "sandbox": sandbox},
         "orders_executed": orders_executed,  # None => dry-run, list => live
     }
 
@@ -174,6 +175,48 @@ def test_daily_bad_outcome_fails(tmp_path, bad):
     r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
     assert not r.ok and r.status_code == 503
     assert bad in r.reason
+
+
+def test_daily_skipped_warmup_on_testnet_is_healthy(tmp_path):
+    """Binance testnet structurally cannot warm SMA(200) (~monthly candle
+    wipe), so the daily cycle records a first-class 'skipped_warmup'
+    (no orders) — for the testnet health instance that is a HEALTHY
+    daily outcome, not a page. Keyed off the cycle's own
+    context.sandbox==True."""
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=1), outcome="skipped_warmup",
+               live=True, sandbox=True),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert r.ok and r.status_code == 200
+    assert r.detail["outcome"] == "skipped_warmup"
+
+
+def test_daily_skipped_warmup_on_mainnet_pages(tmp_path):
+    """PIN of mainnet strictness: the executor never writes
+    'skipped_warmup' on mainnet — if it ever appears in a mainnet
+    journal (context.sandbox==False), the environment guard was
+    bypassed and /daily must page, never pass."""
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=1), outcome="skipped_warmup",
+               live=True, sandbox=False),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "skipped_warmup" in r.reason
+
+
+def test_daily_skipped_warmup_still_goes_stale(tmp_path):
+    """skipped_warmup only blesses the OUTCOME — the freshness clock is
+    untouched. A testnet whose last skip is >26h old means the daily
+    cron itself died and must page."""
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=30), outcome="skipped_warmup",
+               live=True, sandbox=True),
+    ])
+    r = hs.evaluate_daily(reader, NOW, hs.DEFAULT_DAILY_MAX_AGE_S)
+    assert not r.ok and r.status_code == 503
+    assert "ago" in r.reason
 
 
 def test_daily_live_outcome_failure_when_not_latest(tmp_path):

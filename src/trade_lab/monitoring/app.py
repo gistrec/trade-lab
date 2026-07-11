@@ -363,6 +363,14 @@ def _render_status(reader: JournalReader) -> None:
             "next cycle entry (if it has run yet)."
         )
 
+    if latest is not None and latest.get("outcome") == "skipped_warmup":
+        st.info(
+            "Latest cycle SKIPPED itself: the basket cannot warm the "
+            "SMA(200)/lookback windows on this testnet (candles wiped "
+            "~monthly). Healthy state, no orders placed — see the notice "
+            "at the bottom of the page."
+        )
+
     _render_live_cron_health(reader)
     _render_incidents(reader)
 
@@ -435,33 +443,86 @@ def _sma_warmup_stall(reader: JournalReader) -> Optional[dict]:
     The deployable strategy's SMA(200) regime gate needs 200 daily basket
     bars. Binance Spot Testnet wipes its candle history on the exchange's
     ~monthly periodic reset, so the basket close series never reaches 200
-    bars: ``sma_value`` stays ``None`` → gate CLOSED → ladder 0 → no buy
-    order is ever placed. This is by design of the testnet, not an
-    incident — so surface it as a caveat (orange, like the redeploy-span
-    notice), not a failure.
+    bars — the executor cannot even compute a signal there. This is by
+    design of the testnet, not an incident — so surface it as a caveat
+    (orange, like the redeploy-span notice), not a failure.
+
+    Two journal shapes feed this, newest-cycle only:
+
+    * Current: the cycle skipped itself first-class — ``outcome ==
+      'skipped_warmup'`` with a structured ``skip_reason`` carrying
+      ``bars_available`` / ``bars_required`` (written by the
+      orchestrators when ``InsufficientWarmupError`` fires on a sandbox
+      config).
+    * Legacy (pre-H3 journals / deploy skew): a 'successful' cycle whose
+      ``signal.sma_value`` stayed ``None`` — the shape the executor
+      produced before the depth guard existed.
 
     Returns the facts to display, or ``None`` when the gate is (or could
     become) warmed. The 'never' claim is only honest where history is
-    capped by periodic resets, so it fires only on the sandbox source; a
-    full-history mainnet exchange would warm up given time.
+    capped by periodic resets, so it fires only when the cycle's own
+    ``context.sandbox`` says testnet; a full-history mainnet exchange
+    would warm up given time.
     """
     latest = reader.latest_cycle()
     if not latest:
         return None
+    ctx = latest.get("context") or {}
+    if not ctx.get("sandbox"):
+        return None
+    exchange = ctx.get("exchange") or "the exchange"
+    if latest.get("outcome") == "skipped_warmup":
+        reason = latest.get("skip_reason")
+        reason = reason if isinstance(reason, dict) else {}
+        return {
+            "exchange": exchange,
+            "bars": int(as_float(reason.get("bars_available"))),
+            "bars_required": int(as_float(reason.get("bars_required"), 200)),
+            "start_ts": None,
+        }
     sig = latest.get("signal") or {}
     # A present sma_value means the gate is warmed — nothing to flag.
     if not sig or sig.get("sma_value") is not None:
         return None
-    ctx = latest.get("context") or {}
-    if not ctx.get("sandbox"):
-        return None
     bcs = latest.get("basket_close_series") or {}
     values = bcs.get("values") or []
     return {
-        "exchange": ctx.get("exchange") or "the exchange",
+        "exchange": exchange,
         "bars": len(values),
+        "bars_required": 200,
         "start_ts": bcs.get("start_ts"),
     }
+
+
+def _render_warmup_notice(reader: JournalReader) -> None:
+    """Page-bottom yellow banner: SMA(200) structurally unwarmable here.
+
+    Rendered once, below the tabs, on the testnet source only (the
+    detector keys on the cycle's own ``context.sandbox``). Fed by the
+    latest journal entry — a ``skipped_warmup`` cycle's ``skip_reason``
+    when available (bars X of Y from the executor itself), the legacy
+    pre-H3 signal shape otherwise. Read-only, journal-only: no exchange
+    access, per the monitoring layer's contract.
+    """
+    stall = _sma_warmup_stall(reader)
+    if not stall:
+        return
+    start = _humanize_iso(stall["start_ts"]) if stall.get("start_ts") else None
+    since = f" (series starts {start})" if start else ""
+    required = stall.get("bars_required", 200)
+    st.warning(
+        f"**SMA(200) regime gate is not warmed on {stall['exchange']} "
+        f"testnet — {stall['bars']} of {required} daily basket bars"
+        f"{since} — by design, not an incident.** Binance Spot Testnet "
+        f"wipes its candle history on its ~monthly periodic reset, so the "
+        f"basket can never accumulate {required} bars there. The executor "
+        f"refuses to compute a signal on an unwarmed basket (an unwarmed "
+        f"SMA would silently read as 'gate closed' and plan a full "
+        f"liquidation), records the cycle as **skipped_warmup**, and "
+        f"**places no orders, regardless of momentum.** This is a healthy "
+        f"state of the testnet and resolves only on a full-history "
+        f"exchange (e.g. Binance mainnet), not by waiting."
+    )
 
 
 def _render_incidents(reader: JournalReader) -> None:
@@ -475,9 +536,6 @@ def _render_incidents(reader: JournalReader) -> None:
 
     st.subheader("Incidents (last 500 cycles)")
 
-    # No early return: the operational verdict (success / incidents) renders
-    # first, then the structural SMA(200) notice below it. The clean-window
-    # branch's if-guards below are all false here, so nothing else fires.
     if not incidents and not open_orders and not gap_overdue:
         st.success(
             "No failed/partial cycles, unresolved orders, or cadence gaps "
@@ -523,24 +581,11 @@ def _render_incidents(reader: JournalReader) -> None:
             f"Staleness check cannot see this."
         )
 
-    # Structural notice, shown LAST — after the clean-window success line or
-    # the incident list. On the testnet the SMA(200) gate can never warm up,
-    # so a clean window would otherwise read as "all good" and hide why no
-    # trades ever happen.
-    stall = _sma_warmup_stall(reader)
-    if stall:
-        start = _humanize_iso(stall["start_ts"]) if stall["start_ts"] else None
-        since = f" (series starts {start})" if start else ""
-        st.warning(
-            f"**SMA(200) regime gate will not warm up on {stall['exchange']} "
-            f"testnet — by design, not an incident.** The gate needs 200 daily "
-            f"basket bars, but Binance Spot Testnet wipes its candle history on "
-            f"its ~monthly periodic reset, so the basket never accumulates 200 "
-            f"bars — currently {stall['bars']}{since}. SMA(200) stays undefined "
-            f"→ gate CLOSED → ladder 0 → **no buy order is placed, regardless "
-            f"of momentum.** This resolves only on a full-history exchange "
-            f"(e.g. Binance mainnet), not by waiting."
-        )
+    # The structural SMA(200) warm-up notice is NOT rendered here: cycles
+    # with outcome='skipped_warmup' are healthy testnet states, not
+    # incidents, and the single page-bottom banner
+    # (_render_warmup_notice) owns the explanation — one banner, fed by
+    # the latest journal entry, instead of duplicates per tab.
 
 
 def _render_read_stats(stats: ReadStats, journal_path: Path | str) -> None:
@@ -1839,6 +1884,11 @@ def _render_dashboard() -> None:
         _render_tab_safely("Validation", _render_validation)
     with tab_research:
         _render_tab_safely("Research", _render_research)
+
+    # Page-bottom structural notice (testnet source only): SMA(200) can
+    # never warm on the testnet, so skipped_warmup cycles are healthy —
+    # this banner is the single place that explains why no orders happen.
+    _render_tab_safely("Warm-up notice", lambda: _render_warmup_notice(reader))
 
     _render_footer()
 

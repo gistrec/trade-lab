@@ -403,6 +403,153 @@ def test_expired_order_outcome_partial_and_next_cycle_skips(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Insufficient warm-up: first-class skip on testnet, hard failure on mainnet
+# ---------------------------------------------------------------------------
+
+
+def _mainnet_config(basket=("BTC", "ETH")):
+    return PaperConfig(
+        exchange_id="binance", sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=True, quote_currency="USDT", basket=basket,
+        request_timeout_ms=5000,
+    )
+
+
+def _short_history_stub(basket=("BTC", "ETH")) -> _LiveStub:
+    """Binance-testnet shape: ~monthly candle wipe leaves 36 daily bars."""
+    return _LiveStub(
+        basket=basket,
+        closes=(100 + np.linspace(0, 20, 36)).tolist(),  # clean uptrend
+    )
+
+
+def test_short_history_on_testnet_is_first_class_skipped_warmup(tmp_path):
+    """Sandbox config + 36-bar history: NOT a failed cycle. run_live_cycle
+    returns outcome='skipped_warmup' with the structured reason, journals
+    a first-class entry (error=None, skip_reason populated,
+    orders_executed=[] so the live-cron clocks still see the daily run),
+    and never touches create_order."""
+    stub = _short_history_stub()
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "skipped_warmup"
+    assert result.order_results == []
+    assert result.error is None
+    assert result.skip_reason["type"] == "insufficient_warmup"
+    assert result.skip_reason["bars_available"] == 36
+    assert result.skip_reason["bars_required"] == 200
+    assert stub.create_order_calls == []
+
+    cycles = _read_cycles(tmp_path)
+    assert len(cycles) == 1
+    cycle = cycles[0]
+    assert cycle["outcome"] == "skipped_warmup"
+    assert cycle["error"] is None
+    assert cycle["skip_reason"]["bars_available"] == 36
+    assert cycle["skip_reason"]["bars_required"] == 200
+    # A list (empty) — the daily live cron DID run; monitoring's
+    # live-cycle discriminator and /healthz/daily key on this.
+    assert cycle["orders_executed"] == []
+    assert cycle["context"]["mode"] == "live"
+    assert cycle["context"]["sandbox"] is True
+
+
+def test_short_history_on_mainnet_stays_failed_and_raises(tmp_path):
+    """PIN of mainnet strictness (H3): sandbox=False + the identical short
+    history = truncated kline history on the real-money path. Must journal
+    outcome='failed' AND re-raise — zero skipped_warmup softening. This
+    test exists to break any future dilution of the mainnet posture."""
+    from trade_lab.execution.signal import InsufficientWarmupError
+
+    stub = _short_history_stub()
+    broker = Broker(_mainnet_config(), stub)
+    clock = _MockClock()
+
+    with pytest.raises(InsufficientWarmupError, match="36 completed bars"):
+        run_live_cycle(
+            broker, journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+
+    assert stub.create_order_calls == []
+    cycles = _read_cycles(tmp_path)
+    assert len(cycles) == 1
+    cycle = cycles[0]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "InsufficientWarmupError"
+    assert "36 completed bars" in cycle["error"]["message"]
+    assert cycle["skip_reason"] is None
+    assert cycle["context"]["sandbox"] is False
+
+
+def test_other_signal_errors_still_fail_on_testnet(tmp_path, monkeypatch):
+    """Only the depth guard's InsufficientWarmupError is a first-class
+    skip. Any other SignalComputationError (uneven history, empty
+    candles, fetch failure) keeps outcome='failed' + raise on the
+    sandbox too — real data incidents never hide behind the skip."""
+    from trade_lab.execution import live_cycle as lc
+    from trade_lab.execution.signal import SignalComputationError
+
+    def _raise(*a, **k):
+        raise SignalComputationError(
+            "Uneven basket history: DOGE has 150 bars starting 2025-08-05"
+        )
+
+    monkeypatch.setattr(lc, "compute_live_signal", _raise)
+    broker = _broker(_LiveStub(basket=("BTC", "ETH")))
+    clock = _MockClock()
+
+    with pytest.raises(SignalComputationError, match="Uneven"):
+        run_live_cycle(
+            broker, journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "SignalComputationError"
+    assert cycle["skip_reason"] is None
+
+
+def test_skipped_warmup_still_surfaces_lost_track(tmp_path):
+    """A perpetually-skipping testnet must not mute an unresolved order
+    incident: reconstruction still runs first, and a lost_track discovered
+    there keeps lost_track_count > 0 on the skipped_warmup result so the
+    CLI exit code stays red."""
+    state = _state(tmp_path)
+    coid = "tsmom_20260520_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="open",
+        exchange_order_id="exch-vanished",
+        placed_at="2026-05-20T00:05:00+00:00",
+        last_seen_at="2026-05-20T00:05:00+00:00",
+    ))
+    stub = _short_history_stub()
+    stub.fetch_order_responses[coid] = [ccxt.OrderNotFound("gone")]
+    stub.my_trades = []
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "skipped_warmup"
+    assert result.lost_track_count == 1
+    assert result.reconstructed_count == 1
+    outcomes = [c["outcome"] for c in _read_cycles(tmp_path)]
+    assert outcomes == ["reconstructed", "skipped_warmup"]
+
+
+# ---------------------------------------------------------------------------
 # Failed cycle (exception in pipeline)
 # ---------------------------------------------------------------------------
 

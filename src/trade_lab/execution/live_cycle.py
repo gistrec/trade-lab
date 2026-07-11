@@ -31,6 +31,15 @@ during the up-to-35-minute wait-for-ack of a manual run is the most
 likely mid-cycle abort. The exception then propagates so the cron's
 stderr captures the actual traceback — silently swallowing it would
 hide a real incident from the operator.
+
+One deliberate exception to the rule: ``InsufficientWarmupError`` on a
+*sandbox* config does not fail the cycle. Binance testnet wipes its
+candle history ~monthly, so the SMA(200) warm-up is structurally
+impossible there — the cycle is journaled as a first-class
+``outcome='skipped_warmup'`` with an explicit ``skip_reason`` block and
+returned normally (no orders, no plan). On mainnet the same error keeps
+the failed-entry + re-raise posture: truncated kline history on the
+real-money path is an incident, full stop.
 """
 from __future__ import annotations
 
@@ -60,7 +69,7 @@ from .orders import (
     reconstruct_status,
     sort_orders_for_placement,
 )
-from .signal import SignalSnapshot, compute_live_signal
+from .signal import InsufficientWarmupError, SignalSnapshot, compute_live_signal
 from ..logging_setup import set_cycle_id
 
 
@@ -81,6 +90,10 @@ class LiveCycleResult:
     reconstructed_count: int
     error: Optional[dict]
     lost_track_count: int = 0            # orders in lost_track state (any age)
+    skip_reason: Optional[dict] = None
+    # Set only for outcome='skipped_warmup' (testnet-only structural
+    # SMA warm-up skip): the same reason dict that went into the
+    # journal, so the CLI can print bars_available/bars_required.
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +224,46 @@ def run_live_cycle(
             reconstructed_count=len(reconstructed),
             error=None,
             lost_track_count=lost_track_count,
+        )
+
+    except InsufficientWarmupError as exc:
+        # Environment branch lives HERE (the orchestrator), never inside
+        # signal computation. Sandbox (Binance testnet): the basket
+        # structurally cannot warm SMA(200) — the exchange wipes candles
+        # ~monthly — so this is a first-class 'skipped_warmup' cycle
+        # with an explicit reason block, not an incident: no orders, no
+        # plan, exit 0 at the CLI. Mainnet: the identical depth means
+        # truncated kline history — keep the H3 posture (failed entry +
+        # re-raise) with zero softening.
+        context["exchange_latency"] = broker.exchange_call_stats()
+        if broker.config.sandbox is not True:
+            _write_failed_cycle(
+                journal=journal,
+                cycle_id=main_cycle_id,
+                started_at=started_at,
+                context=context,
+                exc=exc,
+                partial_orders=order_results,
+            )
+            raise
+        skip_reason = exc.reason_dict()
+        _write_skipped_warmup_cycle(
+            journal=journal,
+            cycle_id=main_cycle_id,
+            started_at=started_at,
+            context=context,
+            skip_reason=skip_reason,
+        )
+        return LiveCycleResult(
+            cycle_id=main_cycle_id,
+            outcome="skipped_warmup",
+            order_results=[],
+            reconstructed_count=len(reconstructed),
+            error=None,
+            # lost_track stays surfaced: a perpetual warm-up skip on
+            # testnet must not mute an unresolved order incident.
+            lost_track_count=lost_track_count,
+            skip_reason=skip_reason,
         )
 
     except BaseException as exc:
@@ -628,6 +681,56 @@ def _write_failed_cycle(
     except Exception as journal_exc:
         logger.error(
             "Could not write failed-cycle journal entry %s: %s",
+            cycle_id, journal_exc,
+        )
+
+
+def _write_skipped_warmup_cycle(
+    *,
+    journal: JournalWriter,
+    cycle_id: str,
+    started_at: datetime,
+    context: dict,
+    skip_reason: dict,
+) -> None:
+    """Testnet-only first-class skip (SMA warm-up structurally impossible).
+
+    ``error`` stays None — monitoring and the health server key
+    incidents off ``outcome``/``error`` — and the depth facts live in
+    the explicit ``skip_reason`` block. ``orders_executed=[]`` (a list,
+    like every main live cycle) keeps the cycle recognizable as the
+    daily live cron's run, so the dashboard's live-cron freshness clock
+    and /healthz/daily do not misread a perpetually-skipping testnet as
+    a dead cron.
+    """
+    ended_at = datetime.now(timezone.utc)
+    cycle = Cycle(
+        cycle_id=cycle_id,
+        started_at=started_at.isoformat(),
+        ended_at=ended_at.isoformat(),
+        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
+        outcome="skipped_warmup",
+        error=None,
+        git_commit=get_git_commit_short(),
+        python_version=get_python_version(),
+        context=context,
+        signal=None,
+        basket_close_series=None,
+        balance=None,
+        equity_usd=None,
+        target_allocation=None,
+        current_holdings_quote=None,
+        orders_planned=None,
+        orders_skipped=None,
+        total_skipped_quote_drift=None,
+        orders_executed=[],
+        skip_reason=skip_reason,
+    )
+    try:
+        journal.append(cycle)
+    except Exception as journal_exc:
+        logger.error(
+            "Could not write skipped_warmup journal entry %s: %s",
             cycle_id, journal_exc,
         )
 

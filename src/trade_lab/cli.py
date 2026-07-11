@@ -812,9 +812,9 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     notional, print the plan. NO orders sent.
     """
     from .execution import (
-        Broker, BrokerError, JournalEnvMismatch, JournalWriter,
-        PaperConfigError, SignalComputationError, assert_journal_env,
-        load_paper_config, print_dry_run, run_dry_cycle,
+        Broker, BrokerError, InsufficientWarmupError, JournalEnvMismatch,
+        JournalWriter, PaperConfigError, SignalComputationError,
+        assert_journal_env, load_paper_config, print_dry_run, run_dry_cycle,
         required_basket_bars,
     )
 
@@ -844,12 +844,28 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         result = run_dry_cycle(
             broker, candles_per_asset=int(args.candles), journal=journal,
         )
+    except InsufficientWarmupError as exc:
+        # Testnet only: an unwarmed SMA is structural there (~monthly
+        # candle wipe caps history at ~36 bars), so this is a healthy
+        # first-class skip — run_dry_cycle journaled outcome=
+        # 'skipped_warmup' with the reason block — and the cron must
+        # see exit 0, not a permanently-red alert. Mainnet keeps the
+        # H3 posture: failed journal entry + exit 1.
+        if config.sandbox:
+            print(
+                f"SKIPPED (warm-up): SMA/lookback warm-up needs "
+                f"{exc.bars_required} completed basket bars; testnet has "
+                f"{exc.bars_available} (candles wiped ~monthly — "
+                f"structural, not an incident). No plan computed, no "
+                f"orders. Journal outcome=skipped_warmup."
+            )
+            return
+        raise SystemExit(f"Signal computation failed: {exc}")
     except SignalComputationError as exc:
         # run_dry_cycle already journaled the failed cycle (outcome=
         # 'failed', error type/message) before re-raising. Surface a
         # structured one-line refusal + non-zero exit for cron, not a
-        # raw traceback. Expected on Binance testnet, whose ~monthly
-        # candle wipes leave too little history to warm SMA(200).
+        # raw traceback.
         raise SystemExit(f"Signal computation failed: {exc}")
     print_dry_run(result, quote=config.quote_currency)
 
@@ -1199,8 +1215,11 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # 'failed', error type/message) before re-raising, and no order
         # was placed (the signal is computed before any placement).
         # Surface a structured one-line refusal + non-zero exit for
-        # cron instead of a raw traceback. Expected on Binance testnet,
-        # whose ~monthly candle wipes cannot warm SMA(200).
+        # cron instead of a raw traceback. On mainnet this includes the
+        # insufficient-warm-up case (truncated kline history is a real
+        # incident there); on testnet the warm-up case never reaches
+        # here — run_live_cycle converts it into outcome=
+        # 'skipped_warmup' below.
         raise SystemExit(f"Signal computation failed: {exc}")
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
@@ -1215,11 +1234,29 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"({r.filled_notional_quote:.2f} {config.quote_currency})"
         )
 
-    if result.outcome != "success" or result.lost_track_count > 0:
+    # 'skipped_warmup' is a healthy testnet state (SMA warm-up is
+    # structurally impossible there — candles wiped ~monthly), so it
+    # exits 0 like a success. The config.sandbox re-check is a defense
+    # in depth: run_live_cycle only ever returns this outcome on a
+    # sandbox config, and if that invariant is ever broken a mainnet
+    # 'skipped_warmup' must alert (exit 2), never pass silently.
+    skipped_warmup = result.outcome == "skipped_warmup" and config.sandbox
+    if skipped_warmup:
+        reason = result.skip_reason or {}
+        print(
+            f"  SKIPPED (warm-up): SMA/lookback warm-up needs "
+            f"{reason.get('bars_required', '?')} completed basket bars; "
+            f"testnet has {reason.get('bars_available', '?')} (candles "
+            f"wiped ~monthly — structural, not an incident). No orders "
+            f"placed. Journal outcome=skipped_warmup."
+        )
+
+    healthy = result.outcome == "success" or skipped_warmup
+    if not healthy or result.lost_track_count > 0:
         # Non-zero exit so cron/alerting catches stuck (unknown_orders)
         # or partially-executed cycles; the journal entry has the detail.
         # A lost_track order (surfaced by reconstruction) is an unresolved
-        # incident even when the main cycle outcome is 'success', so it
+        # incident even when the main cycle outcome is healthy, so it
         # escalates too. Exceptions inside run_live_cycle already
         # propagate → exit 1.
         raise SystemExit(2)

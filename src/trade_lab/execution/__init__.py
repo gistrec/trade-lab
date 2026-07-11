@@ -14,8 +14,8 @@ independent decisions, not one.
 from .config import PaperConfig, load_paper_config, PaperConfigError
 from .broker import Broker, BrokerError, ConnectionRefused, MarketConstraints
 from .signal import (
-    SignalSnapshot, SignalComputationError, compute_live_signal,
-    required_basket_bars,
+    InsufficientWarmupError, SignalSnapshot, SignalComputationError,
+    compute_live_signal, required_basket_bars,
 )
 from .allocator import TargetAllocation, compute_target_allocation
 from .delta import (
@@ -46,6 +46,7 @@ __all__ = [
     "DryRunResult",
     "InstanceLock",
     "InstanceLockHeld",
+    "InsufficientWarmupError",
     "JOURNAL_SCHEMA_VERSION",
     "JournalEntryTooLarge",
     "JournalEnvMismatch",

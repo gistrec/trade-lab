@@ -608,6 +608,19 @@ def test_recent_incidents_excludes_reconstructed_recovery():
     assert recent_incidents(cycles) == []
 
 
+def test_recent_incidents_excludes_skipped_warmup():
+    """'skipped_warmup' is the healthy first-class testnet state (SMA
+    warm-up structurally impossible — candles wiped ~monthly), never an
+    incident. A window full of them must read as clean."""
+    cycles = [
+        {"outcome": "skipped_warmup", "cycle_id": "skip1",
+         "skip_reason": {"type": "insufficient_warmup",
+                         "bars_available": 36, "bars_required": 200}},
+        {"outcome": "skipped_warmup", "cycle_id": "skip2"},
+    ]
+    assert recent_incidents(cycles) == []
+
+
 def test_open_order_incidents_lists_non_resolved_orders():
     cycles = [
         _live_cycle("c1", orders_executed=[

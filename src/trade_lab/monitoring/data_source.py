@@ -119,7 +119,11 @@ def first_live_cycle_time(cycles: list[dict]) -> Optional[datetime]:
 
 # Cycle-level outcomes that mean something went wrong and wants an operator's
 # eye. ``reconstructed`` is a *recovery* (an unknown-order state was resolved),
-# not an incident, so it is surfaced separately, not here.
+# not an incident, so it is surfaced separately, not here. ``skipped_warmup``
+# is deliberately excluded too: it is the healthy first-class testnet state
+# "SMA warm-up structurally impossible" (candles wiped ~monthly) — the
+# dashboard explains it with the page-bottom warm-up notice, never as an
+# incident.
 INCIDENT_OUTCOMES = frozenset({"failed", "unknown_orders", "partial"})
 
 # Terminal order states that count as fully resolved. Anything else an
