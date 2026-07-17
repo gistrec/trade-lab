@@ -17,6 +17,8 @@ dependencies = [
     "ccxt>=4.0",
     "python-dotenv>=1.0",
     "pyarrow>=14.0",
+    # MySQL mirror of data/journal + data/state (execution/db_mirror.py).
+    "pymysql>=1.1",
 ]
 
 [project.optional-dependencies]
