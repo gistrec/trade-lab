@@ -867,6 +867,13 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         # structured one-line refusal + non-zero exit for cron, not a
         # raw traceback.
         raise SystemExit(f"Signal computation failed: {exc}")
+    finally:
+        # Every path above this point has already journaled its cycle
+        # (success, skip and failure alike) — mirror it off-host while
+        # never touching the cycle's own exit code.
+        if journal is not None:
+            from .execution.db_mirror import mirror_after_cycle
+            mirror_after_cycle()
     print_dry_run(result, quote=config.quote_currency)
 
 
@@ -1221,6 +1228,12 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # here — run_live_cycle converts it into outcome=
         # 'skipped_warmup' below.
         raise SystemExit(f"Signal computation failed: {exc}")
+    finally:
+        # The cycle (and its order-state writes) is on disk by now on
+        # every path, including the journaled failure above — mirror it
+        # off-host without touching the cycle's own exit code.
+        from .execution.db_mirror import mirror_after_cycle
+        mirror_after_cycle()
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")
@@ -1260,6 +1273,69 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # escalates too. Exceptions inside run_live_cycle already
         # propagate → exit 1.
         raise SystemExit(2)
+
+
+def cmd_db_mirror(args: argparse.Namespace) -> None:
+    """Reconcile all local journal/state files into the MySQL mirror.
+
+    Manual / recovery entry point for the mirror that runs
+    automatically after every cycle. Fails loud: drift or an
+    unreachable database is a non-zero exit here, unlike the
+    best-effort post-cycle hook.
+    """
+    from .execution.db_mirror import (
+        MirrorConfigError, connect, mirror_config_from_env, reconcile,
+    )
+
+    try:
+        config = mirror_config_from_env()
+    except MirrorConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+    if config is None:
+        raise SystemExit(
+            "TRADE_LAB_DB_URL is not set in the selected env file — "
+            "the MySQL mirror is unconfigured."
+        )
+    conn = connect(config)
+    try:
+        report = reconcile(conn, Path(args.data_dir))
+    finally:
+        conn.close()
+    print(report.summary())
+    if report.drift:
+        raise SystemExit(2)
+
+
+def cmd_db_restore(args: argparse.Namespace) -> None:
+    """Rematerialise journal/state files from the MySQL mirror (DR).
+
+    For a fresh host: clone + env files + ``db-restore``, then the
+    cron cycles continue where the dead host stopped. Existing
+    non-empty files are refused without ``--force`` — a live host is
+    ahead of its mirror by up to one cycle.
+    """
+    from .execution.db_mirror import (
+        MirrorConfigError, connect, mirror_config_from_env, restore,
+    )
+
+    try:
+        config = mirror_config_from_env()
+    except MirrorConfigError as exc:
+        raise SystemExit(f"Config error: {exc}")
+    if config is None:
+        raise SystemExit(
+            "TRADE_LAB_DB_URL is not set in the selected env file — "
+            "the MySQL mirror is unconfigured."
+        )
+    conn = connect(config)
+    try:
+        written = restore(conn, Path(args.data_dir), force=args.force)
+    finally:
+        conn.close()
+    for source in written:
+        print(f"restored {args.data_dir}/{source}")
+    if not written:
+        print("nothing restored (files already present? see warnings)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1620,6 +1696,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--timeout-s", dest="timeout_s", type=float, default=300.0,
                          help="Per-order wait-for-ack budget in seconds (default 300).")
     p_live.set_defaults(func=cmd_paper_place_orders)
+
+    p_dbm = sub.add_parser(
+        "db-mirror",
+        help="Reconcile data/journal + data/state into the MySQL mirror "
+             "(runs automatically after every cycle; this is the manual "
+             "/ recovery entry point).",
+    )
+    _add_env_file_flag(p_dbm)
+    p_dbm.add_argument(
+        "--data-dir", default="data",
+        help="Data directory to mirror (default: data).",
+    )
+    p_dbm.set_defaults(func=cmd_db_mirror)
+
+    p_dbr = sub.add_parser(
+        "db-restore",
+        help="Rematerialise data/journal + data/state from the MySQL "
+             "mirror on a fresh host (refuses to overwrite existing "
+             "files without --force).",
+    )
+    _add_env_file_flag(p_dbr)
+    p_dbr.add_argument(
+        "--data-dir", default="data",
+        help="Data directory to restore into (default: data).",
+    )
+    p_dbr.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing non-empty files (a live host is ahead "
+             "of its mirror by up to one cycle — use deliberately).",
+    )
+    p_dbr.set_defaults(func=cmd_db_restore)
 
     return parser
 
