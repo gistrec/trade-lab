@@ -41,7 +41,7 @@ recovery entry point. The post-cycle hook (``mirror_after_cycle``) must
 never take a completed trading cycle down with it: a mirror failure is
 logged as a structured warning and the next cycle (or a manual
 ``db-mirror``) reconciles everything — the scan is always full, so
-nothing is lost, only delayed. With ``TRADE_LAB_DB_URL`` unset the
+nothing is lost, only delayed. With ``MYSQL_HOST`` unset the
 mirror is disabled and says so once per run.
 """
 from __future__ import annotations
@@ -53,7 +53,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote, urlsplit
 
 import pymysql
 
@@ -84,7 +83,7 @@ _SCHEMA = (
 
 
 class MirrorConfigError(RuntimeError):
-    """TRADE_LAB_DB_URL is present but unusable."""
+    """The MYSQL_* env is present but unusable."""
 
 
 @dataclass(frozen=True)
@@ -105,33 +104,35 @@ class MirrorConfig:
 
 
 def mirror_config_from_env() -> Optional[MirrorConfig]:
-    """Build the mirror config from ``TRADE_LAB_DB_URL``, or None if unset.
+    """Build the mirror config from the fleet-standard ``MYSQL_*`` env, or
+    None if unset.
 
-    URL shape: ``mysql://user:password@host:3306/dbname`` (URL-encoded
-    credentials survive). ``TRADE_LAB_DB_SSL_CA`` may point at a CA
-    bundle for clusters that require TLS.
+    Reads discrete ``MYSQL_HOST`` / ``MYSQL_PORT`` / ``MYSQL_USER`` /
+    ``MYSQL_PASSWORD`` / ``MYSQL_DB``. With ``MYSQL_HOST`` unset the mirror is
+    disabled (None). ``MYSQL_SSL_CA`` selects the CA bundle for TLS
+    verification, defaulting to the system bundle (trusts public CAs).
     """
-    raw = os.getenv("TRADE_LAB_DB_URL", "").strip()
-    if not raw:
+    host = os.getenv("MYSQL_HOST", "").strip()
+    if not host:
         return None
-    parts = urlsplit(raw)
-    if parts.scheme != "mysql":
+    user = os.getenv("MYSQL_USER", "").strip()
+    database = os.getenv("MYSQL_DB", "").strip()
+    if not user or not database:
         raise MirrorConfigError(
-            f"TRADE_LAB_DB_URL must be a mysql:// URL, got scheme "
-            f"{parts.scheme!r}"
+            "MYSQL_HOST is set but MYSQL_USER / MYSQL_DB is missing"
         )
-    database = parts.path.lstrip("/")
-    if not parts.hostname or not parts.username or not database:
-        raise MirrorConfigError(
-            "TRADE_LAB_DB_URL must look like "
-            "mysql://user:password@host:3306/dbname"
-        )
-    ssl_ca = os.getenv("TRADE_LAB_DB_SSL_CA", "").strip() or None
+    try:
+        port = int(os.getenv("MYSQL_PORT", "3306"))
+    except ValueError as exc:
+        raise MirrorConfigError("MYSQL_PORT must be an integer") from exc
+    ssl_ca = os.getenv(
+        "MYSQL_SSL_CA", "/etc/ssl/certs/ca-certificates.crt"
+    ).strip() or None
     return MirrorConfig(
-        host=parts.hostname,
-        port=parts.port or 3306,
-        user=unquote(parts.username),
-        password=unquote(parts.password or ""),
+        host=host,
+        port=port,
+        user=user,
+        password=os.getenv("MYSQL_PASSWORD", ""),
         database=database,
         ssl_ca=ssl_ca,
     )
@@ -337,7 +338,7 @@ def mirror_after_cycle(data_dir: Path = DEFAULT_DATA_DIR) -> None:
     try:
         config = mirror_config_from_env()
         if config is None:
-            logger.info("db mirror disabled (TRADE_LAB_DB_URL unset)")
+            logger.info("db mirror disabled (MYSQL_HOST unset)")
             return
         conn = connect(config)
         try:

@@ -1293,7 +1293,7 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
         raise SystemExit(f"Config error: {exc}")
     if config is None:
         raise SystemExit(
-            "TRADE_LAB_DB_URL is not set in the selected env file — "
+            "MYSQL_HOST is not set in the selected env file — "
             "the MySQL mirror is unconfigured."
         )
     conn = connect(config)
@@ -1324,7 +1324,7 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
         raise SystemExit(f"Config error: {exc}")
     if config is None:
         raise SystemExit(
-            "TRADE_LAB_DB_URL is not set in the selected env file — "
+            "MYSQL_HOST is not set in the selected env file — "
             "the MySQL mirror is unconfigured."
         )
     conn = connect(config)
