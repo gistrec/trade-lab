@@ -103,14 +103,16 @@ def _write_journal(path: Path, records) -> None:
 # ── config ───────────────────────────────────────────────────────────
 
 def test_config_unset_means_disabled(monkeypatch):
-    monkeypatch.delenv("TRADE_LAB_DB_URL", raising=False)
+    monkeypatch.delenv("MYSQL_HOST", raising=False)
     assert mirror_config_from_env() is None
 
 
-def test_config_parses_url_encoded_credentials(monkeypatch):
-    monkeypatch.setenv(
-        "TRADE_LAB_DB_URL", "mysql://trade-lab:p%40ss@db.host:3307/trade-lab"
-    )
+def test_config_from_discrete_env(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "db.host")
+    monkeypatch.setenv("MYSQL_PORT", "3307")
+    monkeypatch.setenv("MYSQL_USER", "trade-lab")
+    monkeypatch.setenv("MYSQL_PASSWORD", "p@ss")
+    monkeypatch.setenv("MYSQL_DB", "trade-lab")
     cfg = mirror_config_from_env()
     assert cfg.host == "db.host"
     assert cfg.port == 3307
@@ -119,14 +121,19 @@ def test_config_parses_url_encoded_credentials(monkeypatch):
     assert cfg.database == "trade-lab"
 
 
-def test_config_rejects_non_mysql_scheme(monkeypatch):
-    monkeypatch.setenv("TRADE_LAB_DB_URL", "postgres://u:p@h/db")
+def test_config_rejects_incomplete(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "db.host")
+    monkeypatch.delenv("MYSQL_USER", raising=False)
+    monkeypatch.delenv("MYSQL_DB", raising=False)
     with pytest.raises(MirrorConfigError):
         mirror_config_from_env()
 
 
 def test_config_repr_masks_password(monkeypatch):
-    monkeypatch.setenv("TRADE_LAB_DB_URL", "mysql://u:supersecret@h:3306/db")
+    monkeypatch.setenv("MYSQL_HOST", "h")
+    monkeypatch.setenv("MYSQL_USER", "u")
+    monkeypatch.setenv("MYSQL_PASSWORD", "supersecret")
+    monkeypatch.setenv("MYSQL_DB", "db")
     assert "supersecret" not in repr(mirror_config_from_env())
 
 
@@ -226,7 +233,9 @@ def test_restore_refuses_existing_files_without_force(tmp_path):
 # ── the post-cycle hook must never raise ─────────────────────────────
 
 def test_mirror_after_cycle_swallows_connection_failure(monkeypatch, caplog):
-    monkeypatch.setenv("TRADE_LAB_DB_URL", "mysql://u:p@h:3306/db")
+    monkeypatch.setenv("MYSQL_HOST", "h")
+    monkeypatch.setenv("MYSQL_USER", "u")
+    monkeypatch.setenv("MYSQL_DB", "db")
 
     def boom(config):
         raise RuntimeError("db down")
@@ -239,7 +248,7 @@ def test_mirror_after_cycle_swallows_connection_failure(monkeypatch, caplog):
 def test_mirror_after_cycle_disabled_without_url(monkeypatch, caplog):
     import logging
 
-    monkeypatch.delenv("TRADE_LAB_DB_URL", raising=False)
+    monkeypatch.delenv("MYSQL_HOST", raising=False)
     with caplog.at_level(logging.INFO):
         mirror_after_cycle()  # must not raise, must say it's disabled
     assert any("disabled" in r.message for r in caplog.records)
