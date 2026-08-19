@@ -40,5 +40,41 @@ module.exports = {
       // only if it grows well past that (guards against a slow leak).
       max_memory_restart: "400M",
     },
+    // Netdata health endpoints (ops/health_server.py) — testnet + mainnet.
+    // Lived only in a hand-typed `pm2 start` (and its dump) until the
+    // russia-03 move lost them; now reproducible from this file.
+    {
+      name: "trade-lab-health",
+      cwd: __dirname,
+      script: "ops/health_server.py",
+      interpreter: ".venv/bin/python",
+      env: {
+        TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles.jsonl",
+        TRADE_LAB_HEALTH_HOST: "127.0.0.1",
+        TRADE_LAB_HEALTH_PORT: "7001",
+        // 2× the 6h dry-run cadence + slack; daily gets 26h.
+        TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "43200",
+        TRADE_LAB_HEALTH_DAILY_MAX_AGE_S: "93600",
+      },
+      autorestart: true,
+      watch: false,
+    },
+    {
+      name: "trade-lab-health-mainnet",
+      cwd: __dirname,
+      script: "ops/health_server.py",
+      interpreter: ".venv/bin/python",
+      env: {
+        TRADE_LAB_MONITORING_JOURNAL_PATH: "data/journal/cycles_mainnet.jsonl",
+        TRADE_LAB_HEALTH_HOST: "127.0.0.1",
+        TRADE_LAB_HEALTH_PORT: "7002",
+        TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "43200",
+        TRADE_LAB_HEALTH_DAILY_MAX_AGE_S: "93600",
+        // Daily probe off for mainnet — matches the pre-move live config.
+        TRADE_LAB_HEALTH_DAILY_DISABLED: "true",
+      },
+      autorestart: true,
+      watch: false,
+    },
   ],
 };
