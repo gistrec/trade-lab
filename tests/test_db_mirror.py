@@ -24,6 +24,7 @@ import pytest
 
 from trade_lab.execution.db_mirror import (
     MirrorConfigError,
+    MirrorIntegrityError,
     collect_journal_lines,
     mirror_after_cycle,
     mirror_config_from_env,
@@ -326,9 +327,27 @@ def test_restore_rejects_a_mirror_blob_that_fails_verification(tmp_path):
     conn.store["vintages"][fake_hash] = (gzip.compress(b"not what it says"), 16)
 
     fresh = tmp_path / "fresh"
-    with pytest.raises(MirrorConfigError, match="failed verification"):
+    with pytest.raises(MirrorIntegrityError, match="failed verification"):
         restore_vintages(conn, fresh)
     assert not (fresh / fake_hash[:2] / f"{fake_hash}.txt").exists()
+
+
+def test_integrity_error_is_not_a_config_error():
+    """A config handler must not swallow data corruption."""
+    assert not issubclass(MirrorIntegrityError, MirrorConfigError)
+
+
+def test_integrity_error_carries_the_verified_count(tmp_path):
+    """One bad blob must not hide that the good ones did land."""
+    root = tmp_path / "vintages"
+    _write_vintage(root, b"good\n")
+    conn = FakeConn()
+    reconcile(conn, tmp_path / "data", root)
+    conn.store["vintages"]["0" * 64] = (gzip.compress(b"lies"), 4)
+
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore_vintages(conn, tmp_path / "fresh")
+    assert excinfo.value.written == 1
 
 
 def test_restore_leaves_an_intact_local_vintage_untouched(tmp_path):

@@ -5,7 +5,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -1316,8 +1316,8 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     ahead of its mirror by up to one cycle.
     """
     from .execution.db_mirror import (
-        MirrorConfigError, connect, mirror_config_from_env, restore,
-        restore_vintages,
+        MirrorConfigError, MirrorIntegrityError, connect,
+        mirror_config_from_env, restore, restore_vintages,
     )
 
     try:
@@ -1330,10 +1330,16 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
             "the MySQL mirror is unconfigured."
         )
     conn = connect(config)
+    integrity: Optional[str] = None
     try:
         written = restore(conn, Path(args.data_dir), force=args.force)
         # No --force for vintages: immutable and self-verifying.
-        n_vintages = restore_vintages(conn, Path(args.vintage_root))
+        try:
+            n_vintages = restore_vintages(conn, Path(args.vintage_root))
+        except MirrorIntegrityError as exc:
+            # Verified vintages are already on disk; report the bad ones
+            # after the summary rather than as an uncaught traceback.
+            n_vintages, integrity = exc.written, str(exc)
     finally:
         conn.close()
     for source in written:
@@ -1341,6 +1347,9 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     print(f"restored {n_vintages} vintage(s) into {args.vintage_root}")
     if not written and not n_vintages:
         print("nothing restored (files already present? see warnings)")
+    if integrity is not None:
+        print(f"MIRROR INTEGRITY ERROR: {integrity}", file=sys.stderr)
+        raise SystemExit(2)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -109,6 +109,19 @@ class MirrorConfigError(RuntimeError):
     """The MYSQL_* env is present but unusable."""
 
 
+class MirrorIntegrityError(RuntimeError):
+    """A mirrored payload does not match its content hash.
+
+    Distinct from MirrorConfigError so `except MirrorConfigError` cannot
+    swallow data corruption along with a typo'd env var. Carries the
+    count of items that DID verify, so a caller can still report them.
+    """
+
+    def __init__(self, message: str, written: int = 0) -> None:
+        super().__init__(message)
+        self.written = written
+
+
 @dataclass(frozen=True)
 class MirrorConfig:
     host: str
@@ -389,9 +402,10 @@ def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
         tmp.rename(target)        # atomic, as in store_vintage
         written += 1
     if corrupt:
-        raise MirrorConfigError(
-            "db-restore: %d mirrored vintage(s) failed verification and were "
-            "NOT written: %s" % (len(corrupt), "; ".join(corrupt))
+        raise MirrorIntegrityError(
+            "%d mirrored vintage(s) failed verification and were NOT "
+            "written: %s" % (len(corrupt), "; ".join(corrupt)),
+            written=written,
         )
     return written
 
