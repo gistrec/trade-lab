@@ -141,8 +141,9 @@ def _cycle_line(sandbox: bool) -> str:
 
 def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     """Two configured sources -> segmented control renders, defaults to
-    testnet, and selecting mainnet swaps the journal (banner flips to
-    the content-derived MAINNET warning)."""
+    mainnet (real money is the environment worth landing on), and
+    selecting testnet swaps the journal (banner flips to the
+    content-derived TESTNET wording)."""
     at = pytest.importorskip("streamlit.testing.v1")
     testnet = tmp_path / "cycles.jsonl"
     mainnet = tmp_path / "cycles_mainnet.jsonl"
@@ -160,14 +161,7 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
 
     assert len(app.segmented_control) == 1
     control = app.segmented_control[0]
-    assert control.value == "testnet"
-    page = " ".join(str(m.value) for m in app.markdown)
-    assert "TESTNET — BINANCE" in page
-    markdown_count_testnet = len(app.markdown)
-
-    control.set_value("mainnet")
-    app.run()
-    assert not app.exception, app.exception
+    assert control.value == "mainnet"
     page = " ".join(str(m.value) for m in app.markdown)
     assert "MAINNET — BINANCE — REAL MONEY" in page
     # No SOURCE MISMATCH: mainnet label points at a mainnet journal.
@@ -176,7 +170,14 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     # the app container is painted over by Streamlit's fixed header).
     assert "border:4px solid #b71c1c" in page
     assert "position:fixed" in page
+    markdown_count_mainnet = len(app.markdown)
+
+    control.set_value("testnet")
+    app.run()
+    assert not app.exception, app.exception
+    page = " ".join(str(m.value) for m in app.markdown)
+    assert "TESTNET — BINANCE" in page
     # Spacing invariant: the frame must NOT be an extra element in the
     # flow — Streamlit's inter-element gap would push the mainnet
     # banner lower than the testnet one. Same element count both ways.
-    assert len(app.markdown) == markdown_count_testnet
+    assert len(app.markdown) == markdown_count_mainnet

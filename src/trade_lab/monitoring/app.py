@@ -66,9 +66,15 @@ MAINNET_JOURNAL_PATH = os.environ.get(
 # environment; the top banner still derives testnet/mainnet from journal
 # CONTENT (context.sandbox), and a label/content disagreement renders a
 # loud error rather than trusting either side.
-JOURNAL_SOURCES: dict[str, str] = {"testnet": JOURNAL_PATH}
+#
+# Mainnet leads when configured: insertion order drives both the switcher
+# layout and the landing source (``next(iter(...))``). Real money is the
+# environment worth seeing first — testnet cannot even warm its SMA(200)
+# gate, so its page is structurally the less informative of the two.
+JOURNAL_SOURCES: dict[str, str] = {}
 if MAINNET_JOURNAL_PATH:
     JOURNAL_SOURCES["mainnet"] = MAINNET_JOURNAL_PATH
+JOURNAL_SOURCES["testnet"] = JOURNAL_PATH
 # Operator-facing labels for the environment switcher, symmetric with
 # the banner wording: the stakes are stated right in the control.
 _SOURCE_LABELS = {
@@ -384,13 +390,25 @@ def _render_status(reader: JournalReader) -> None:
             f"boundary with care."
         )
 
+    # Live-only: a dry-run skips nothing it meant to send, so counting its
+    # sub-min deltas would grow this number with observation time rather
+    # than with trading. The dry-run case gets a point reading below instead.
     drift = reader.cumulative_skipped_drift()
     if drift > 0:
         st.warning(
             f"Cumulative skipped-order drift: ${drift:,.2f} across "
-            f"{stats.valid_cycles} cycles. Sub-min divergence is normal "
-            f"on tiny balances; investigate if it grows steadily."
+            f"{reader.live_cycle_count()} live cycles. Sub-min divergence is "
+            f"normal on tiny balances; investigate if it grows steadily."
         )
+    else:
+        planned_drift = reader.latest_skipped_drift()
+        if planned_drift > 0:
+            st.info(
+                f"Latest cycle could not place ${planned_drift:,.2f} of its "
+                f"planned allocation — below the exchange minimum notional / "
+                f"lot step. This is a plan, not a divergence: no live order "
+                f"cron has run yet, so nothing was skipped in execution."
+            )
 
     _render_read_stats(stats, reader.path)
 
@@ -618,6 +636,28 @@ def _render_read_stats(stats: ReadStats, journal_path: Path | str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _collapse_signal_rows(rows: list[dict]) -> list[dict]:
+    """Collapse runs of identical signal rows, adding a ``cycles`` count.
+
+    Every column of the Recent-cycles table is a daily-bar quantity, while
+    the journal carries one entry per *cycle* — four identical rows per bar
+    at the 6-hourly heartbeat, more when a cycle is run by hand. The table
+    therefore showed under two days of signal in seven rows.
+
+    Only *consecutive* identical rows merge. Two runs over the same ``asof``
+    that disagree on ladder / gate / lookback states stay on separate rows:
+    such a disagreement would mean the signal is not deterministic over a
+    closed bar, which is precisely what this table must not hide.
+    """
+    out: list[dict] = []
+    for row in rows:
+        if out and {k: v for k, v in out[-1].items() if k != "cycles"} == row:
+            out[-1]["cycles"] += 1
+            continue
+        out.append({**row, "cycles": 1})
+    return out
+
+
 def _render_signal(reader: JournalReader) -> None:
     latest = reader.latest_cycle()
     sig = (latest or {}).get("signal") or {}
@@ -733,10 +773,14 @@ def _render_signal(reader: JournalReader) -> None:
 
     # --- Recent cycles table ---
     st.subheader("Recent cycles")
-    recent_n = st.select_slider(
-        "Cycles to show", options=[7, 14, 30, 60], value=14,
+    days_to_show = st.select_slider(
+        "Signal days to show", options=[7, 14, 30, 60], value=14,
     )
-    recent_cycles = reader.cycles(n=recent_n)
+    # Read with headroom, then collapse: the slider counts daily signal bars,
+    # but the journal stores one entry per cycle (4/day at the 6-hourly
+    # heartbeat, plus any manual runs). 8× covers that spread; a denser
+    # cadence simply yields fewer than the requested days.
+    recent_cycles = reader.cycles(n=days_to_show * 8)
     if recent_cycles:
         rows = []
         for c in reversed(recent_cycles):
@@ -750,7 +794,13 @@ def _render_signal(reader: JournalReader) -> None:
                 "28d": cstates.get("28"),
                 "60d": cstates.get("60"),
             })
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        collapsed = _collapse_signal_rows(rows)[:days_to_show]
+        st.dataframe(pd.DataFrame(collapsed), width="stretch", hide_index=True)
+        st.caption(
+            "One row per signal bar — `cycles` counts the runs that observed "
+            "it (the 6-hourly dry-run re-reads the same closed bar). "
+            "Consecutive runs that disagree are never merged."
+        )
 
 
 def _series_return(values: list, n_days_ago: int) -> str:
@@ -1167,10 +1217,19 @@ def _render_portfolio(reader: JournalReader) -> None:
         )
 
     cumulative = reader.cumulative_skipped_drift()
-    st.caption(
-        f"Cumulative skipped-order drift across all cycles: "
-        f"{cumulative:,.2f} {quote}."
-    )
+    live_n = reader.live_cycle_count()
+    if live_n:
+        st.caption(
+            f"Cumulative skipped-order drift across {live_n} live cycles: "
+            f"{cumulative:,.2f} {quote}."
+        )
+    else:
+        st.caption(
+            f"No live cycles yet — cumulative execution drift is 0.00 "
+            f"{quote}. Latest planning cycle left "
+            f"{reader.latest_skipped_drift():,.2f} {quote} unplaceable "
+            f"(below exchange minima)."
+        )
 
     window = reader.cycles(n=500)
     # When the daily paper-place-orders cron first ran: before it the journal

@@ -9,7 +9,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-from trade_lab.monitoring.app import _humanize_iso, _humanize_relative
+from trade_lab.monitoring.app import (
+    _collapse_signal_rows, _humanize_iso, _humanize_relative,
+)
 
 
 NOW = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
@@ -791,7 +793,13 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
         def latest_cycle(self):
             return cycle
 
-        def cumulative_skipped_drift(self):
+        def cumulative_skipped_drift(self, live_only=True):
+            return 0.0
+
+        def live_cycle_count(self):
+            return 0
+
+        def latest_skipped_drift(self):
             return 0.0
 
         def cycles(self, n=20):
@@ -1069,3 +1077,88 @@ def test_app_renders_warmup_banner_not_incident_for_skipped_warmup(
     assert not any("FAILED" in e for e in errors), errors
     successes = [str(s.value) for s in app.success]
     assert any("No failed/partial cycles" in s for s in successes), successes
+
+
+# ---------------------------------------------------------------------------
+# Recent-cycles collapse
+# ---------------------------------------------------------------------------
+
+
+def _sig_row(asof: str, ladder: float = 1.0, gate: str = "OPEN") -> dict:
+    """One Recent-cycles table row, in the shape _render_signal builds."""
+    return {"asof": asof, "basket": 54.03, "ladder": ladder,
+            "gate": gate, "28d": 1, "60d": 1}
+
+
+def test_collapse_merges_repeated_observations_of_one_bar():
+    """Four 6-hourly dry-runs over one closed bar are one signal day."""
+    rows = [_sig_row("2026-08-21")] * 4
+    out = _collapse_signal_rows(rows)
+    assert len(out) == 1
+    assert out[0]["cycles"] == 4
+    assert out[0]["asof"] == "2026-08-21"
+
+
+def test_collapse_keeps_distinct_bars_separate():
+    rows = [_sig_row("2026-08-21")] * 5 + [_sig_row("2026-08-20")] * 2
+    out = _collapse_signal_rows(rows)
+    assert [(r["asof"], r["cycles"]) for r in out] == [
+        ("2026-08-21", 5), ("2026-08-20", 2),
+    ]
+
+
+def test_collapse_never_hides_disagreement_within_a_bar():
+    """Same asof, different ladder ⇒ the signal is not deterministic over a
+    closed bar. Merging would erase exactly the anomaly worth seeing."""
+    rows = [
+        _sig_row("2026-08-21", ladder=1.0),
+        _sig_row("2026-08-21", ladder=0.5),
+        _sig_row("2026-08-21", ladder=1.0),
+    ]
+    out = _collapse_signal_rows(rows)
+    assert len(out) == 3
+    assert [r["ladder"] for r in out] == [1.0, 0.5, 1.0]
+    assert all(r["cycles"] == 1 for r in out)
+
+
+def test_collapse_disagreement_on_gate_also_splits():
+    rows = [
+        _sig_row("2026-08-21", gate="OPEN"),
+        _sig_row("2026-08-21", gate="CLOSED"),
+    ]
+    out = _collapse_signal_rows(rows)
+    assert len(out) == 2
+
+
+def test_collapse_empty_input():
+    assert _collapse_signal_rows([]) == []
+
+
+def test_collapse_does_not_mutate_input_rows():
+    rows = [_sig_row("2026-08-21")] * 2
+    original = [dict(r) for r in rows]
+    _collapse_signal_rows(rows)
+    assert rows == original          # no 'cycles' key leaked into the source
+
+
+# ---------------------------------------------------------------------------
+# Source ordering
+# ---------------------------------------------------------------------------
+
+
+def test_mainnet_is_the_first_and_default_source(monkeypatch):
+    """Insertion order drives both the switcher layout and the landing
+    source (`next(iter(...))`). Real money must be the page you land on."""
+    import importlib
+    import trade_lab.monitoring.app as app
+
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       "data/journal/cycles_mainnet.jsonl")
+    try:
+        reloaded = importlib.reload(app)
+        assert list(reloaded.JOURNAL_SOURCES) == ["mainnet", "testnet"]
+        assert next(iter(reloaded.JOURNAL_SOURCES)) == "mainnet"
+    finally:
+        monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                           raising=False)
+        importlib.reload(app)

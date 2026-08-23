@@ -525,13 +525,54 @@ class JournalReader:
             return Staleness.STALE
         return Staleness.DOWN
 
-    def cumulative_skipped_drift(self) -> float:
-        """Sum of ``total_skipped_quote_drift`` across all cycles."""
+    def cumulative_skipped_drift(self, live_only: bool = True) -> float:
+        """Sum of ``total_skipped_quote_drift`` across cycles.
+
+        **Live cycles only by default.** Drift is the notional we *failed to
+        send* — it measures how far the live portfolio has wandered from the
+        backtest because sub-minimum rebalances were absorbed. A dry-run
+        sends nothing by construction, so its skipped deltas are not
+        divergence: they are a plan that was never meant to execute.
+
+        Summing dry-runs double-counts badly. The 6-hourly heartbeat re-reads
+        the same unchanged portfolio four times a day and re-records the same
+        skips, so the total grows linearly with *observation time* rather
+        than with trading activity. On the mainnet observation journal this
+        produced a "drift" of 8.98 USDT against a 0.06 USDT portfolio — 150×
+        the entire position — which is not a quantity in dollars at all.
+
+        Pass ``live_only=False`` for the raw all-cycle sum (diagnostics).
+        """
         self._refresh_if_changed()
         return sum(
             float(c.get("total_skipped_quote_drift") or 0.0)
             for c in self._cache
+            if not live_only or is_live_cycle(c)
         )
+
+    def live_cycle_count(self) -> int:
+        """How many cycles in the journal placed real orders.
+
+        Denominator for :meth:`cumulative_skipped_drift` — quoting the
+        all-cycle count next to a live-only sum would misstate the base
+        (a dry-run-dominated journal has many cycles and few live ones).
+        """
+        self._refresh_if_changed()
+        return sum(1 for c in self._cache if is_live_cycle(c))
+
+    def latest_skipped_drift(self) -> float:
+        """``total_skipped_quote_drift`` of the most recent cycle, or 0.0.
+
+        The current-state counterpart to :meth:`cumulative_skipped_drift`:
+        on a dry-run-only journal the cumulative (live) figure is 0 by
+        definition, but the latest cycle's skips still say something useful
+        — namely that the *plan* cannot clear the exchange minima right now.
+        A point reading, so re-observing it does not inflate it.
+        """
+        self._refresh_if_changed()
+        if not self._cache:
+            return 0.0
+        return float(self._cache[-1].get("total_skipped_quote_drift") or 0.0)
 
     def stats(self) -> ReadStats:
         """Counters from the most recent file scan."""

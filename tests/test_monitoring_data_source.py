@@ -328,15 +328,81 @@ def test_signal_history_excludes_old_entries(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cumulative_skipped_drift_sums_all_cycles(tmp_path):
+def _live_entry(cycle_id: str, skipped_drift: float) -> dict:
+    """A cycle that attempted real placement (orders_executed is a list)."""
+    entry = _cycle_entry(cycle_id, schema_version=2,
+                         skipped_drift=skipped_drift)
+    entry["orders_executed"] = []
+    return entry
+
+
+def test_cumulative_skipped_drift_counts_live_cycles_only(tmp_path):
+    """Dry-run skips are a plan, not divergence — they must not accumulate.
+
+    The 6-hourly heartbeat re-observes one unchanged portfolio, so summing
+    dry-runs grows the counter with observation time rather than trading.
+    """
     journal = tmp_path / "j.jsonl"
     _write_journal(journal, [
-        _cycle_entry("c1", skipped_drift=5.0),
-        _cycle_entry("c2", skipped_drift=2.5),
+        _cycle_entry("dry1", skipped_drift=5.0),
+        _cycle_entry("dry2", skipped_drift=2.5),
+        _live_entry("live1", skipped_drift=1.25),
         _cycle_entry("failed", outcome="failed"),
     ])
     reader = JournalReader(journal)
-    assert reader.cumulative_skipped_drift() == 7.5
+    assert reader.cumulative_skipped_drift() == 1.25
+
+
+def test_cumulative_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
+    """The mainnet observation journal shape: no live cron has run yet."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("dry1", skipped_drift=0.05),
+        _cycle_entry("dry2", skipped_drift=0.05),
+    ])
+    reader = JournalReader(journal)
+    assert reader.cumulative_skipped_drift() == 0.0
+    assert reader.live_cycle_count() == 0
+
+
+def test_cumulative_skipped_drift_raw_sum_available(tmp_path):
+    """``live_only=False`` keeps the old all-cycle total for diagnostics."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("dry1", skipped_drift=5.0),
+        _live_entry("live1", skipped_drift=2.5),
+    ])
+    reader = JournalReader(journal)
+    assert reader.cumulative_skipped_drift(live_only=False) == 7.5
+
+
+def test_latest_skipped_drift_is_a_point_reading(tmp_path):
+    """Re-observing the same portfolio must not inflate the figure."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("dry1", skipped_drift=0.05),
+        _cycle_entry("dry2", skipped_drift=0.05),
+        _cycle_entry("dry3", skipped_drift=0.10),
+    ])
+    reader = JournalReader(journal)
+    assert reader.latest_skipped_drift() == 0.10
+
+
+def test_latest_skipped_drift_empty_journal(tmp_path):
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    assert reader.latest_skipped_drift() == 0.0
+    assert reader.live_cycle_count() == 0
+
+
+def test_live_cycle_count_counts_only_live(tmp_path):
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("dry1"),
+        _live_entry("live1", skipped_drift=0.0),
+        _live_entry("live2", skipped_drift=0.0),
+    ])
+    reader = JournalReader(journal)
+    assert reader.live_cycle_count() == 2
 
 
 # ---------------------------------------------------------------------------
