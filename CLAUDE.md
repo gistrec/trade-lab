@@ -38,6 +38,7 @@ TSMOM lookbacks `(28, 60)` on an **equal-weight market-basket index** of 7 asset
 - **Tests are mandatory for new modules.** Include defensive tests that fail loudly on regression (e.g., stubs that omit dangerous methods so accidental calls raise immediately).
 - **Mock the exchange in tests; never hit the live API.**
 - **Idempotency via deterministic `clientOrderId`** — derived from the intent (rebalance date, symbol, side), not from the retry attempt.
+- **Comments stay terse.** Explain only what the code cannot say itself: a non-obvious invariant, why the obvious alternative is wrong, a constraint that would otherwise get "fixed". No restating the code, no incident history (that belongs in the commit message), no multi-paragraph docstrings on small helpers. Existing verbose docstrings are legacy, not the target style.
 
 ## Where things live
 - `src/trade_lab/strategies/` — strategy implementations; subclass `Strategy.generate_signals`.
