@@ -22,7 +22,8 @@ from trade_lab.monitoring.data_source import (
     JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, TradeEvent, as_float,
     cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
-    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
+    largest_inter_cycle_gap, max_inter_cycle_gap_seconds,
+    open_order_incidents, parse_iso,
     recent_incidents, trade_events,
 )
 
@@ -743,6 +744,45 @@ def test_max_inter_cycle_gap_detects_mid_window_pause():
 def test_max_inter_cycle_gap_none_with_under_two_timestamps():
     assert max_inter_cycle_gap_seconds([]) is None
     assert max_inter_cycle_gap_seconds([_cycle_entry("c1")]) is None
+
+
+def test_largest_gap_reports_its_boundaries():
+    """The dashboard needs *when* the pause happened, not just how long:
+    a gap the cron recovered from days ago is history, not an incident."""
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    resumed = base + timedelta(days=3)
+    cycles = [
+        _cycle_entry("c1", ended_at=base.isoformat()),
+        _cycle_entry("c2", ended_at=(base + timedelta(hours=1)).isoformat()),
+        _cycle_entry("c3", ended_at=resumed.isoformat()),
+        _cycle_entry("c4", ended_at=(resumed + timedelta(hours=1)).isoformat()),
+    ]
+    gap = largest_inter_cycle_gap(cycles)
+    assert gap is not None
+    assert gap.started == base + timedelta(hours=1)
+    assert gap.ended == resumed
+    assert gap.seconds == pytest.approx(
+        (timedelta(days=3) - timedelta(hours=1)).total_seconds())
+
+
+def test_largest_gap_none_with_under_two_timestamps():
+    assert largest_inter_cycle_gap([]) is None
+    assert largest_inter_cycle_gap([_cycle_entry("c1")]) is None
+
+
+def test_largest_gap_picks_the_longest_not_the_latest():
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    cycles = [
+        _cycle_entry("c1", ended_at=base.isoformat()),
+        # 2-day pause — the longest
+        _cycle_entry("c2", ended_at=(base + timedelta(days=2)).isoformat()),
+        # 6-hour pause — later, but shorter
+        _cycle_entry("c3",
+                     ended_at=(base + timedelta(days=2, hours=6)).isoformat()),
+    ]
+    gap = largest_inter_cycle_gap(cycles)
+    assert gap.started == base
+    assert gap.ended == base + timedelta(days=2)
 
 
 # ---------------------------------------------------------------------------

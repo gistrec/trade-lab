@@ -42,10 +42,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from trade_lab.monitoring.data_source import (
-    DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER, Staleness,
+    CadenceGap, DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER,
+    Staleness,
     as_float, cycle_orders_executed, drift_series, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
-    max_inter_cycle_gap_seconds, open_order_incidents, parse_iso,
+    largest_inter_cycle_gap, open_order_incidents, parse_iso,
     recent_incidents, TradeEvent, trade_events,
 )
 from trade_lab.uikit import render_tab_safely
@@ -85,6 +86,13 @@ EXPECTED_INTERVAL_S = int(
     os.environ.get("MONITORING_EXPECTED_CYCLE_INTERVAL_SECONDS", "21600")
 )
 REFRESH_SECONDS = int(os.environ.get("MONITORING_REFRESH_SECONDS", "30"))
+# How long a recovered cadence gap stays an actionable warning, in units of
+# the expected interval (8 × 6h = 48h). The incident window spans 500 cycles
+# — months at this cadence — so without an age cut a single missed cron from
+# last summer would still be shouting in December.
+GAP_RECENT_MULTIPLIER = float(
+    os.environ.get("MONITORING_GAP_RECENT_MULTIPLIER", "8")
+)
 # The daily `paper-place-orders` cron is the LIVE order path; the 6-hourly
 # dry-run shares the same journal. This is the expected spacing of LIVE
 # cycles (one calendar day) used to flag a silently-dead order cron that
@@ -543,21 +551,42 @@ def _render_warmup_notice(reader: JournalReader) -> None:
     )
 
 
+def _gap_is_recent(
+    gap: CadenceGap, now: Optional[datetime] = None,
+) -> bool:
+    """True while a recovered cadence gap still deserves an operator's eye.
+
+    A gap the cron has since recovered from describes history, not a state
+    needing action — but the incident window spans 500 cycles (months at the
+    6-hourly cadence), so as a warning it would outlive its usefulness by a
+    wide margin. Past this age it drops to a factual note and stops blocking
+    the all-clear. Measured from when the cadence *resumed*, not from when
+    the pause began: a long pause that ended an hour ago is still fresh news.
+    """
+    ref = now or datetime.now(timezone.utc)
+    age = (ref - gap.ended).total_seconds()
+    return age <= EXPECTED_INTERVAL_S * GAP_RECENT_MULTIPLIER
+
+
 def _render_incidents(reader: JournalReader) -> None:
     """Window-level incident view: non-success cycles, unresolved orders,
     and cadence gaps that the latest-cycle-only alerts above cannot show."""
     cycles = reader.cycles(n=500)
     incidents = recent_incidents(cycles)
     open_orders = open_order_incidents(cycles)
-    gap = max_inter_cycle_gap_seconds(cycles)
-    gap_overdue = gap is not None and gap > EXPECTED_INTERVAL_S * STALE_MULTIPLIER
+    gap = largest_inter_cycle_gap(cycles)
+    gap_overdue = (
+        gap is not None
+        and gap.seconds > EXPECTED_INTERVAL_S * STALE_MULTIPLIER
+    )
+    gap_recent = gap_overdue and _gap_is_recent(gap)
 
     st.subheader("Incidents (last 500 cycles)")
 
-    if not incidents and not open_orders and not gap_overdue:
+    if not incidents and not open_orders and not gap_recent:
         st.success(
-            "No failed/partial cycles, unresolved orders, or cadence gaps "
-            "in the window."
+            "No failed/partial cycles, unresolved orders, or recent cadence "
+            "gaps in the window."
         )
 
     if incidents:
@@ -591,12 +620,22 @@ def _render_incidents(reader: JournalReader) -> None:
         } for o in open_orders]
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    if gap_overdue:
+    if gap_recent:
         st.warning(
-            f"Largest gap between consecutive cycles: {gap / 3600:.1f}h "
-            f"(> {STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
+            f"Largest gap between consecutive cycles: {gap.seconds / 3600:.1f}h "
+            f"({_humanize_iso(gap.started.isoformat())} → "
+            f"{_humanize_iso(gap.ended.isoformat())}, > "
+            f"{STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
             f"cycle may have been missed mid-window — the single-latest "
             f"Staleness check cannot see this."
+        )
+    elif gap_overdue:
+        st.caption(
+            f"Longest cadence gap in the window: {gap.seconds / 3600:.1f}h "
+            f"({_humanize_iso(gap.started.isoformat())} → "
+            f"{_humanize_iso(gap.ended.isoformat())}), "
+            f"{_humanize_relative(gap.ended.isoformat())} — cadence has been "
+            f"healthy since, so this is history, not an open incident."
         )
 
     # The structural SMA(200) warm-up notice is NOT rendered here: cycles
@@ -707,10 +746,13 @@ def _render_signal(reader: JournalReader) -> None:
     cols2 = st.columns(3)
     cols2[0].metric("vs 7d ago", _series_return(values, 7))
     cols2[1].metric("vs 30d ago", _series_return(values, 30))
-    days_since = _days_since_gate_last_open(reader)
+    # Label follows the state: "days the regime has been on" is the useful
+    # reading during an open gate, "days since it was last on" while closed.
+    gate_state, gate_days = _gate_state_duration_days(reader)
     cols2[2].metric(
-        "Days since gate OPEN",
-        str(days_since) if days_since is not None else "—",
+        "Days since gate OPEN" if gate_state is None
+        else f"Days gate {gate_state}",
+        "—" if gate_days is None else str(gate_days),
     )
 
     # --- Basket close chart with current SMA reference ---
@@ -873,33 +915,54 @@ def _commit_link(sha: str) -> str:
     return f"`{sha}`"
 
 
-def _days_since_gate_last_open(reader: JournalReader) -> Optional[int]:
-    """Distinct signal *days* since the most recent OPEN gate.
+def _gate_state_duration_days(
+    reader: JournalReader,
+) -> tuple[Optional[str], Optional[int]]:
+    """Current gate state and how many distinct signal days it has held.
 
-    Counts dates (signal ``asof``), not cycles: with the 6-hourly
-    dry-run sharing the journal, one closed day produces ~4 cycles
-    and a per-cycle count overstates by that factor. Cycles without a
-    signal (failed, reconstruction) say nothing about the gate and are
-    skipped. Walks newest-first across up to 500 cycles; returns None
-    if no OPEN gate is visible in that window.
+    Returns ``("OPEN", n)`` / ``("CLOSED", n)``, or ``(None, None)`` when no
+    cycle in the window carries a gate reading at all.
+
+    Symmetric by design. The previous metric only counted *closed* days
+    ("days since the last OPEN"), so it collapsed to 0 the moment the
+    regime turned on and said nothing about how long it had been on —
+    precisely the question during an open regime.
+
+    Counts dates (signal ``asof``), not cycles: the 6-hourly dry-run shares
+    the journal, so one bar yields ~4 cycles and a per-cycle count would
+    overstate by that factor. Cycles without a signal (failed,
+    reconstruction) say nothing about the gate and are skipped. Walks
+    newest-first across up to 500 cycles.
     """
     cycles = reader.cycles(n=500)
-    closed_dates: set = set()
+    # Fold to one verdict per signal date, newest-first. A date carrying any
+    # OPEN reading counts as OPEN — the same intraday-flip rule the previous
+    # metric used: the regime was on at some point that day.
+    by_date: dict = {}
+    order: list = []
     for c in reversed(cycles):  # newest-first
         sig = c.get("signal") or {}
         gate = sig.get("sma_gate_open")
         if gate is None:
             continue
         dt = parse_iso(sig.get("asof"))
-        date = dt.date() if dt is not None else None
-        if gate is True:
-            # An intraday flip means the same date sits on both sides;
-            # it has seen an OPEN gate, so don't count it as closed.
-            closed_dates.discard(date)
-            return len(closed_dates)
-        if date is not None:
-            closed_dates.add(date)
-    return None
+        if dt is None:
+            continue
+        date = dt.date()
+        if date not in by_date:
+            by_date[date] = bool(gate)
+            order.append(date)
+        elif gate:
+            by_date[date] = True
+    if not order:
+        return None, None
+    current = by_date[order[0]]
+    days = 0
+    for date in order:
+        if by_date[date] != current:
+            break
+        days += 1
+    return ("OPEN" if current else "CLOSED"), days
 
 
 def _basket_close_figure(

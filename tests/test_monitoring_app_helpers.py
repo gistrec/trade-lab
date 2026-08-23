@@ -6,7 +6,7 @@ are pure and worth pinning so a future refactor does not silently
 regress the narrow-screen layout."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 from trade_lab.monitoring.app import (
@@ -195,37 +195,63 @@ def _sig_cycle(asof: str, gate_open: bool) -> dict:
     return {"signal": {"asof": asof, "sma_gate_open": gate_open}}
 
 
-def test_days_since_gate_counts_days_not_cycles():
+def test_gate_duration_counts_days_not_cycles():
     """With the hourly dry-run sharing the journal, one closed day is
     ~24 cycles. The metric says 'Days' — it must dedupe by asof date."""
-    from trade_lab.monitoring.app import _days_since_gate_last_open
+    from trade_lab.monitoring.app import _gate_state_duration_days
 
     cycles = [_sig_cycle("2026-06-10T00:00:00+00:00", True)]
     for hour in range(24):  # one full closed day of hourly dry-runs
         cycles.append(_sig_cycle(f"2026-06-11T{hour:02d}:00:00+00:00", False))
-    assert _days_since_gate_last_open(_FakeReader(cycles)) == 1
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("CLOSED", 1)
 
 
-def test_days_since_gate_zero_when_latest_open():
-    from trade_lab.monitoring.app import _days_since_gate_last_open
+def test_gate_duration_reports_open_streak_not_zero():
+    """The regression this metric was rebuilt for: while the gate is OPEN
+    the old 'days since OPEN' collapsed to 0 and hid how long the regime
+    had been running. Now it reports the length of the open streak."""
+    from trade_lab.monitoring.app import _gate_state_duration_days
+
+    cycles = [
+        _sig_cycle("2026-08-18T00:00:00+00:00", False),
+        _sig_cycle("2026-08-19T00:00:00+00:00", False),
+        _sig_cycle("2026-08-20T00:00:00+00:00", True),
+        _sig_cycle("2026-08-21T00:00:00+00:00", True),
+    ]
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("OPEN", 2)
+
+
+def test_gate_duration_open_streak_dedupes_repeated_cycles():
+    """Four 6-hourly dry-runs over one open bar are one open day."""
+    from trade_lab.monitoring.app import _gate_state_duration_days
+
+    cycles = [_sig_cycle("2026-08-20T00:00:00+00:00", False)]
+    cycles += [_sig_cycle("2026-08-21T00:00:00+00:00", True)] * 4
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("OPEN", 1)
+
+
+def test_gate_duration_closed_streak_when_never_open():
+    """No OPEN in the window is still a usable reading, not a dash: the
+    gate is closed and has been for every bar we can see."""
+    from trade_lab.monitoring.app import _gate_state_duration_days
 
     cycles = [
         _sig_cycle("2026-06-10T00:00:00+00:00", False),
-        _sig_cycle("2026-06-11T00:00:00+00:00", True),
+        _sig_cycle("2026-06-11T00:00:00+00:00", False),
     ]
-    assert _days_since_gate_last_open(_FakeReader(cycles)) == 0
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("CLOSED", 2)
 
 
-def test_days_since_gate_none_when_never_open():
-    from trade_lab.monitoring.app import _days_since_gate_last_open
+def test_gate_duration_none_without_any_gate_reading():
+    from trade_lab.monitoring.app import _gate_state_duration_days
 
-    cycles = [_sig_cycle("2026-06-11T00:00:00+00:00", False)]
-    assert _days_since_gate_last_open(_FakeReader(cycles)) is None
+    cycles = [{"signal": None, "outcome": "failed"}, {"outcome": "recon"}]
+    assert _gate_state_duration_days(_FakeReader(cycles)) == (None, None)
 
 
-def test_days_since_gate_skips_cycles_without_signal():
+def test_gate_duration_skips_cycles_without_signal():
     """Failed and reconstruction cycles say nothing about the gate."""
-    from trade_lab.monitoring.app import _days_since_gate_last_open
+    from trade_lab.monitoring.app import _gate_state_duration_days
 
     cycles = [
         _sig_cycle("2026-06-09T00:00:00+00:00", True),
@@ -233,7 +259,20 @@ def test_days_since_gate_skips_cycles_without_signal():
         {"outcome": "reconstructed"},
         _sig_cycle("2026-06-11T00:00:00+00:00", False),
     ]
-    assert _days_since_gate_last_open(_FakeReader(cycles)) == 1
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("CLOSED", 1)
+
+
+def test_gate_duration_intraday_flip_counts_date_as_open():
+    """A date carrying any OPEN reading counts as OPEN — the regime was on
+    at some point that day (rule inherited from the previous metric)."""
+    from trade_lab.monitoring.app import _gate_state_duration_days
+
+    cycles = [
+        _sig_cycle("2026-06-10T00:00:00+00:00", True),
+        _sig_cycle("2026-06-11T00:00:00+00:00", False),
+        _sig_cycle("2026-06-11T12:00:00+00:00", True),
+    ]
+    assert _gate_state_duration_days(_FakeReader(cycles)) == ("OPEN", 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1162,3 +1201,52 @@ def test_mainnet_is_the_first_and_default_source(monkeypatch):
         monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
                            raising=False)
         importlib.reload(app)
+
+
+# ---------------------------------------------------------------------------
+# Cadence-gap ageing — a recovered gap must stop shouting
+# ---------------------------------------------------------------------------
+
+
+def test_gap_recent_when_cadence_just_resumed():
+    """A long pause that ended an hour ago is still fresh news."""
+    from trade_lab.monitoring.app import _gap_is_recent
+    from trade_lab.monitoring.data_source import CadenceGap
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    gap = CadenceGap(
+        seconds=15 * 3600,
+        started=now - timedelta(hours=16),
+        ended=now - timedelta(hours=1),
+    )
+    assert _gap_is_recent(gap, now=now) is True
+
+
+def test_gap_stale_after_the_attention_window():
+    """The regression: a 15h gap from 19 Aug sat in the 500-cycle window
+    as a warning for months after the cron had recovered."""
+    from trade_lab.monitoring.app import _gap_is_recent
+    from trade_lab.monitoring.data_source import CadenceGap
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    gap = CadenceGap(
+        seconds=15 * 3600,
+        started=datetime(2026, 8, 19, 0, 35, tzinfo=timezone.utc),
+        ended=datetime(2026, 8, 19, 15, 32, tzinfo=timezone.utc),
+    )
+    assert _gap_is_recent(gap, now=now) is False
+
+
+def test_gap_age_is_measured_from_resumption_not_onset():
+    """A pause that STARTED long ago but only ended just now is recent —
+    measuring from onset would mute an incident that just closed."""
+    from trade_lab.monitoring.app import _gap_is_recent
+    from trade_lab.monitoring.data_source import CadenceGap
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    gap = CadenceGap(
+        seconds=30 * 86400,
+        started=now - timedelta(days=30),
+        ended=now - timedelta(minutes=10),
+    )
+    assert _gap_is_recent(gap, now=now) is True

@@ -186,20 +186,41 @@ def open_order_incidents(cycles: list[dict]) -> list[dict]:
     return out
 
 
-def max_inter_cycle_gap_seconds(cycles: list[dict]) -> Optional[float]:
-    """Largest gap (seconds) between consecutive cycles' ``ended_at``.
+@dataclass(frozen=True)
+class CadenceGap:
+    """The longest pause between consecutive cycles, with its boundaries.
+
+    ``ended`` is what makes a gap actionable or historical: a pause that
+    closed days ago describes an incident the cron has long since recovered
+    from, while one that closed an hour ago may still be ongoing.
+    """
+
+    seconds: float
+    started: datetime   # ended_at of the last cycle before the pause
+    ended: datetime     # ended_at of the cycle that resumed the cadence
+
+
+def largest_inter_cycle_gap(cycles: list[dict]) -> Optional[CadenceGap]:
+    """Largest pause between consecutive cycles' ``ended_at``, with dates.
 
     ``staleness`` only inspects the newest cycle's age, so a pause in the
-    *middle* of the window (the daily cron skipped a day but has fired
-    since) is invisible to it. This looks at every consecutive pair.
-    Returns ``None`` when fewer than two timestamps parse.
+    *middle* of the window (the cron skipped a day but has fired since) is
+    invisible to it. This looks at every consecutive pair. Returns ``None``
+    when fewer than two timestamps parse.
     """
     times = sorted(
         t for t in (parse_iso(c.get("ended_at")) for c in cycles) if t is not None
     )
     if len(times) < 2:
         return None
-    return max((b - a).total_seconds() for a, b in zip(times, times[1:]))
+    a, b = max(zip(times, times[1:]), key=lambda pair: pair[1] - pair[0])
+    return CadenceGap(seconds=(b - a).total_seconds(), started=a, ended=b)
+
+
+def max_inter_cycle_gap_seconds(cycles: list[dict]) -> Optional[float]:
+    """Largest gap in seconds — :func:`largest_inter_cycle_gap` without dates."""
+    gap = largest_inter_cycle_gap(cycles)
+    return None if gap is None else gap.seconds
 
 
 # ---------------------------------------------------------------------------
