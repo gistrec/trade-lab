@@ -1332,9 +1332,7 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     conn = connect(config)
     try:
         written = restore(conn, Path(args.data_dir), force=args.force)
-        # Vintages need no --force: content-addressed and immutable, so an
-        # existing file that hashes to its own name is already the right
-        # bytes and is left untouched.
+        # No --force for vintages: immutable and self-verifying.
         n_vintages = restore_vintages(conn, Path(args.vintage_root))
     finally:
         conn.close()

@@ -8,14 +8,10 @@ mirrors ``data/journal/*.jsonl`` (line-by-line, append-only),
 managed MySQL, and can rematerialise them on a fresh host
 (``trade-lab db-restore``).
 
-Why vintages belong here
-========================
-A vintage is the exact OHLCV bytes the harness saw on one decision day;
-the look-ahead detector replays against them. They are unreproducible
-after the fact — data providers revise history, so re-fetching a lost
-day is not guaranteed to return the same bytes. A 2026-08-19 host
-re-provisioning wiped 82 of 85 of them and only a machine backup got
-them back. Roughly 267 KB/day raw, ~4x smaller gzipped.
+Vintages are the exact OHLCV bytes the harness saw on one decision day
+(the look-ahead detector replays against them) and are not reliably
+reproducible after the fact — re-fetching a lost day may return revised
+history. ~267 KB/day raw, ~4x smaller gzipped.
 
 Strictly one-way
 ================
@@ -73,8 +69,7 @@ import pymysql
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATA_DIR = Path("data")
-# Vintages live outside data/ — they belong to the paper-trading harness,
-# not the execution layer — so they carry their own root.
+# Vintages live outside data/ (harness, not execution) — own root.
 DEFAULT_VINTAGE_ROOT = Path("paper_trading/vintages")
 
 _SCHEMA = (
@@ -95,11 +90,9 @@ _SCHEMA = (
         PRIMARY KEY (source)
     ) DEFAULT CHARSET=utf8mb4
     """,
-    # Vintages are content-addressed OHLCV snapshots (see
-    # paper_trading/vintage_store.py): the SHA-256 of the payload IS the
-    # identity, which makes it the natural primary key and every insert
-    # idempotent. Stored gzipped as a BLOB — the look-ahead detector needs
-    # the exact bytes back, so this must not be normalised into rows.
+    # Content-addressed: the SHA-256 IS the identity, so it is the PK and
+    # inserts are idempotent. Gzipped BLOB, never normalised into rows —
+    # the detector needs the exact bytes back.
     """
     CREATE TABLE IF NOT EXISTS vintages (
         content_hash CHAR(64)      NOT NULL,
@@ -244,11 +237,9 @@ def plan_journal_inserts(
 def collect_vintage_files(vintage_root: Path) -> dict[str, Path]:
     """``{content_hash: path}`` for every vintage under ``vintage_root``.
 
-    The hash is taken from the filename (the store's two-level
-    ``hh/hash.txt`` layout), NOT by reading the file — a full rescan would
-    otherwise hash ~22 MB on every cycle just to discover there is nothing
-    new. Contents are verified later, but only for the ones actually being
-    inserted.
+    Hash comes from the filename (``hh/hash.txt`` layout), not from
+    reading the file — a rescan would otherwise hash ~22 MB every cycle.
+    Contents are verified only for the ones actually inserted.
     """
     out: dict[str, Path] = {}
     if not vintage_root.exists():
@@ -336,10 +327,8 @@ def reconcile(
                 raw = path.read_bytes()
                 actual = hashlib.sha256(raw).hexdigest()
                 if actual != content_hash:
-                    # Never mirror a snapshot whose bytes disagree with its
-                    # name: the mirror would then vouch for corruption. Same
-                    # verdict load_vintage reaches, reported as drift here
-                    # so a full reconcile still finishes.
+                    # Bytes disagree with the name — never mirror that, or
+                    # the mirror starts vouching for corruption.
                     msg = (
                         f"vintage {path} hashes to {actual} but is named "
                         f"{content_hash} — NOT mirrored"
@@ -362,15 +351,11 @@ def reconcile(
 def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
     """Rematerialise mirrored vintages under ``vintage_root``. Returns count.
 
-    No ``force`` flag, unlike journal/state: a vintage is content-addressed
-    and immutable, so a local file whose bytes hash to its own name IS the
-    mirrored one and is left alone. A local file that does NOT hash to its
-    name is corruption, and gets overwritten from the (verified) mirror.
-
-    Every payload is decompressed and re-hashed before it touches the disk.
-    A blob that fails that check is never written; the failures are
-    collected and raised at the end, so one bad row cannot silently
-    withhold the good ones — but it also cannot pass unnoticed.
+    No ``force`` flag: a local file hashing to its own name IS the
+    mirrored one and is left alone; one that does not is corruption and
+    gets repaired. Every payload is re-hashed before it touches the disk;
+    failures are collected and raised at the end, so a bad row neither
+    passes unnoticed nor withholds the good ones.
     """
     written = 0
     corrupt: list[str] = []
@@ -393,7 +378,7 @@ def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
         target = vintage_root / content_hash[:2] / f"{content_hash}.txt"
         if target.exists():
             if hashlib.sha256(target.read_bytes()).hexdigest() == content_hash:
-                continue          # already the same immutable bytes
+                continue
             logger.warning(
                 "db-restore: local vintage %s is corrupt — repairing from "
                 "the mirror", target,
@@ -401,7 +386,7 @@ def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_bytes(raw)
-        tmp.rename(target)        # atomic, same contract as store_vintage
+        tmp.rename(target)        # atomic, as in store_vintage
         written += 1
     if corrupt:
         raise MirrorConfigError(

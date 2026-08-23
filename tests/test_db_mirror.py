@@ -270,7 +270,7 @@ def test_mirror_after_cycle_disabled_without_url(monkeypatch, caplog):
 # ── vintages ─────────────────────────────────────────────────────────
 
 def _write_vintage(root: Path, payload: bytes) -> str:
-    """Store payload the way vintage_store does: hh/<sha256>.txt."""
+    """Store payload as vintage_store does: hh/<sha256>.txt."""
     h = hashlib.sha256(payload).hexdigest()
     target = root / h[:2] / f"{h}.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -279,8 +279,7 @@ def _write_vintage(root: Path, payload: bytes) -> str:
 
 
 def test_vintages_mirror_and_restore_round_trip(tmp_path):
-    """The detector needs the exact bytes back — a gzip round-trip through
-    the mirror must be byte-identical, not merely equivalent."""
+    """Round-trip through the mirror must be byte-identical."""
     root = tmp_path / "vintages"
     payload = b"BTC|2026-08-21T00:00:00+00:00|1.00000000\n" * 500
     h = _write_vintage(root, payload)
@@ -296,8 +295,7 @@ def test_vintages_mirror_and_restore_round_trip(tmp_path):
 
 
 def test_vintages_mirror_is_incremental(tmp_path):
-    """Content-addressed identity makes re-mirroring a no-op — otherwise
-    every cycle would re-upload the whole ~22 MB store."""
+    """Re-mirroring is a no-op; otherwise every cycle re-uploads ~22 MB."""
     root = tmp_path / "vintages"
     _write_vintage(root, b"first\n")
     conn = FakeConn()
@@ -309,8 +307,7 @@ def test_vintages_mirror_is_incremental(tmp_path):
 
 
 def test_corrupt_local_vintage_is_drift_not_mirrored(tmp_path):
-    """A file whose bytes disagree with its name must never enter the
-    mirror — otherwise the mirror starts vouching for corruption."""
+    """Bytes disagreeing with the name must never enter the mirror."""
     root = tmp_path / "vintages"
     h = _write_vintage(root, b"honest bytes\n")
     (root / h[:2] / f"{h}.txt").write_bytes(b"tampered\n")
@@ -323,8 +320,7 @@ def test_corrupt_local_vintage_is_drift_not_mirrored(tmp_path):
 
 
 def test_restore_rejects_a_mirror_blob_that_fails_verification(tmp_path):
-    """Corruption in the mirror itself must be loud and must not land on
-    disk — a silently wrong vintage would invalidate the detector."""
+    """Corruption in the mirror must be loud and must not land on disk."""
     conn = FakeConn()
     fake_hash = "0" * 64
     conn.store["vintages"][fake_hash] = (gzip.compress(b"not what it says"), 16)
@@ -336,8 +332,7 @@ def test_restore_rejects_a_mirror_blob_that_fails_verification(tmp_path):
 
 
 def test_restore_leaves_an_intact_local_vintage_untouched(tmp_path):
-    """Immutable by construction: same name means same bytes, so there is
-    nothing to rewrite and no --force question to ask."""
+    """Same name means same bytes — nothing to rewrite."""
     root = tmp_path / "vintages"
     payload = b"already here\n"
     h = _write_vintage(root, payload)
@@ -351,8 +346,7 @@ def test_restore_leaves_an_intact_local_vintage_untouched(tmp_path):
 
 
 def test_restore_repairs_a_corrupt_local_vintage(tmp_path):
-    """The one case where restore does overwrite: local bytes no longer
-    hash to their own filename, so they are corruption, not data."""
+    """The one overwrite case: local bytes no longer hash to their name."""
     root = tmp_path / "vintages"
     payload = b"good bytes\n"
     h = _write_vintage(root, payload)
@@ -365,8 +359,7 @@ def test_restore_repairs_a_corrupt_local_vintage(tmp_path):
 
 
 def test_missing_vintage_root_is_not_an_error(tmp_path):
-    """A host that never ran the harness has no vintage store; mirroring
-    must still reconcile journals rather than blowing up."""
+    """A host that never ran the harness still reconciles journals."""
     conn = FakeConn()
     report = reconcile(conn, tmp_path / "data", tmp_path / "absent")
     assert report.vintages_mirrored == 0
