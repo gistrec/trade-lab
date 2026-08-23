@@ -15,6 +15,8 @@ is pure and tested directly. What must hold:
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 from pathlib import Path
 
@@ -22,12 +24,14 @@ import pytest
 
 from trade_lab.execution.db_mirror import (
     MirrorConfigError,
+    MirrorIntegrityError,
     collect_journal_lines,
     mirror_after_cycle,
     mirror_config_from_env,
     plan_journal_inserts,
     reconcile,
     restore,
+    restore_vintages,
 )
 
 
@@ -54,6 +58,16 @@ class FakeCursor:
             self._rows = sorted(self.store["state"].items())
         elif s.startswith("INSERT INTO state_files"):
             self.store["state"][params[0]] = params[1]
+        elif s.startswith("SELECT content_hash FROM vintages"):
+            self._rows = [(k,) for k in sorted(self.store["vintages"])]
+        elif s.startswith("SELECT content_hash, payload, bytes_raw"):
+            self._rows = [
+                (h, payload, n)
+                for h, (payload, n) in sorted(self.store["vintages"].items())
+            ]
+        elif s.startswith("INSERT IGNORE INTO vintages"):
+            h, payload, n, _ = params
+            self.store["vintages"].setdefault(h, (payload, n))
         else:  # pragma: no cover - unexpected SQL is a test failure
             raise AssertionError(f"unexpected SQL: {s}")
 
@@ -79,7 +93,7 @@ class FakeCursor:
 
 class FakeConn:
     def __init__(self):
-        self.store = {"journal": {}, "state": {}}
+        self.store = {"journal": {}, "state": {}, "vintages": {}}
         self.commits = 0
 
     def cursor(self):
@@ -173,18 +187,18 @@ def test_reconcile_is_incremental_and_round_trips(tmp_path):
     (data / "state" / "orders.json").write_text('{"__meta__": {}}')
 
     conn = FakeConn()
-    first = reconcile(conn, data)
+    first = reconcile(conn, data, tmp_path / "vintages")
     assert first.journal_lines_inserted == 3
     assert first.state_files_mirrored == 1
     assert not first.drift
 
     # Same files again: nothing new to send.
-    assert reconcile(conn, data).journal_lines_inserted == 0
+    assert reconcile(conn, data, tmp_path / "vintages").journal_lines_inserted == 0
 
     # One appended cycle: exactly one new row.
     with open(data / "journal" / "cycles.jsonl", "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"cycle_id": "c"}) + "\n")
-    assert reconcile(conn, data).journal_lines_inserted == 1
+    assert reconcile(conn, data, tmp_path / "vintages").journal_lines_inserted == 1
 
     # Fresh-host restore reproduces the files exactly.
     fresh = tmp_path / "fresh"
@@ -206,10 +220,10 @@ def test_reconcile_flags_local_truncation(tmp_path):
         data / "journal" / "cycles.jsonl", [{"a": 1}, {"b": 2}]
     )
     conn = FakeConn()
-    reconcile(conn, data)
+    reconcile(conn, data, tmp_path / "vintages")
 
     _write_journal(data / "journal" / "cycles.jsonl", [{"a": 1}])
-    report = reconcile(conn, data)
+    report = reconcile(conn, data, tmp_path / "vintages")
     assert report.drift and "cycles.jsonl" in report.drift[0]
 
 
@@ -217,7 +231,7 @@ def test_restore_refuses_existing_files_without_force(tmp_path):
     data = tmp_path / "data"
     _write_journal(data / "journal" / "cycles.jsonl", [{"a": 1}])
     conn = FakeConn()
-    reconcile(conn, data)
+    reconcile(conn, data, tmp_path / "vintages")
 
     # The live file is ahead of the mirror — must not be rolled back.
     with open(data / "journal" / "cycles.jsonl", "a", encoding="utf-8") as fh:
@@ -252,3 +266,120 @@ def test_mirror_after_cycle_disabled_without_url(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         mirror_after_cycle()  # must not raise, must say it's disabled
     assert any("disabled" in r.message for r in caplog.records)
+
+
+# ── vintages ─────────────────────────────────────────────────────────
+
+def _write_vintage(root: Path, payload: bytes) -> str:
+    """Store payload as vintage_store does: hh/<sha256>.txt."""
+    h = hashlib.sha256(payload).hexdigest()
+    target = root / h[:2] / f"{h}.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    return h
+
+
+def test_vintages_mirror_and_restore_round_trip(tmp_path):
+    """Round-trip through the mirror must be byte-identical."""
+    root = tmp_path / "vintages"
+    payload = b"BTC|2026-08-21T00:00:00+00:00|1.00000000\n" * 500
+    h = _write_vintage(root, payload)
+
+    conn = FakeConn()
+    report = reconcile(conn, tmp_path / "data", root)
+    assert report.vintages_mirrored == 1
+    assert not report.drift
+
+    fresh = tmp_path / "fresh_vintages"
+    assert restore_vintages(conn, fresh) == 1
+    assert (fresh / h[:2] / f"{h}.txt").read_bytes() == payload
+
+
+def test_vintages_mirror_is_incremental(tmp_path):
+    """Re-mirroring is a no-op; otherwise every cycle re-uploads ~22 MB."""
+    root = tmp_path / "vintages"
+    _write_vintage(root, b"first\n")
+    conn = FakeConn()
+    assert reconcile(conn, tmp_path / "data", root).vintages_mirrored == 1
+    assert reconcile(conn, tmp_path / "data", root).vintages_mirrored == 0
+
+    _write_vintage(root, b"second\n")
+    assert reconcile(conn, tmp_path / "data", root).vintages_mirrored == 1
+
+
+def test_corrupt_local_vintage_is_drift_not_mirrored(tmp_path):
+    """Bytes disagreeing with the name must never enter the mirror."""
+    root = tmp_path / "vintages"
+    h = _write_vintage(root, b"honest bytes\n")
+    (root / h[:2] / f"{h}.txt").write_bytes(b"tampered\n")
+
+    conn = FakeConn()
+    report = reconcile(conn, tmp_path / "data", root)
+    assert report.vintages_mirrored == 0
+    assert report.drift and "NOT mirrored" in report.drift[0]
+    assert conn.store["vintages"] == {}
+
+
+def test_restore_rejects_a_mirror_blob_that_fails_verification(tmp_path):
+    """Corruption in the mirror must be loud and must not land on disk."""
+    conn = FakeConn()
+    fake_hash = "0" * 64
+    conn.store["vintages"][fake_hash] = (gzip.compress(b"not what it says"), 16)
+
+    fresh = tmp_path / "fresh"
+    with pytest.raises(MirrorIntegrityError, match="failed verification"):
+        restore_vintages(conn, fresh)
+    assert not (fresh / fake_hash[:2] / f"{fake_hash}.txt").exists()
+
+
+def test_integrity_error_is_not_a_config_error():
+    """A config handler must not swallow data corruption."""
+    assert not issubclass(MirrorIntegrityError, MirrorConfigError)
+
+
+def test_integrity_error_carries_the_verified_count(tmp_path):
+    """One bad blob must not hide that the good ones did land."""
+    root = tmp_path / "vintages"
+    _write_vintage(root, b"good\n")
+    conn = FakeConn()
+    reconcile(conn, tmp_path / "data", root)
+    conn.store["vintages"]["0" * 64] = (gzip.compress(b"lies"), 4)
+
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore_vintages(conn, tmp_path / "fresh")
+    assert excinfo.value.written == 1
+
+
+def test_restore_leaves_an_intact_local_vintage_untouched(tmp_path):
+    """Same name means same bytes — nothing to rewrite."""
+    root = tmp_path / "vintages"
+    payload = b"already here\n"
+    h = _write_vintage(root, payload)
+    conn = FakeConn()
+    reconcile(conn, tmp_path / "data", root)
+
+    target = root / h[:2] / f"{h}.txt"
+    before = target.stat().st_mtime_ns
+    assert restore_vintages(conn, root) == 0
+    assert target.stat().st_mtime_ns == before
+
+
+def test_restore_repairs_a_corrupt_local_vintage(tmp_path):
+    """The one overwrite case: local bytes no longer hash to their name."""
+    root = tmp_path / "vintages"
+    payload = b"good bytes\n"
+    h = _write_vintage(root, payload)
+    conn = FakeConn()
+    reconcile(conn, tmp_path / "data", root)
+
+    (root / h[:2] / f"{h}.txt").write_bytes(b"rotted\n")
+    assert restore_vintages(conn, root) == 1
+    assert (root / h[:2] / f"{h}.txt").read_bytes() == payload
+
+
+def test_missing_vintage_root_is_not_an_error(tmp_path):
+    """A host that never ran the harness still reconciles journals."""
+    conn = FakeConn()
+    report = reconcile(conn, tmp_path / "data", tmp_path / "absent")
+    assert report.vintages_mirrored == 0
+    assert not report.drift
