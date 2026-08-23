@@ -1298,7 +1298,8 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
         )
     conn = connect(config)
     try:
-        report = reconcile(conn, Path(args.data_dir))
+        report = reconcile(conn, Path(args.data_dir),
+                           Path(args.vintage_root))
     finally:
         conn.close()
     print(report.summary())
@@ -1316,6 +1317,7 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     """
     from .execution.db_mirror import (
         MirrorConfigError, connect, mirror_config_from_env, restore,
+        restore_vintages,
     )
 
     try:
@@ -1330,11 +1332,16 @@ def cmd_db_restore(args: argparse.Namespace) -> None:
     conn = connect(config)
     try:
         written = restore(conn, Path(args.data_dir), force=args.force)
+        # Vintages need no --force: content-addressed and immutable, so an
+        # existing file that hashes to its own name is already the right
+        # bytes and is left untouched.
+        n_vintages = restore_vintages(conn, Path(args.vintage_root))
     finally:
         conn.close()
     for source in written:
         print(f"restored {args.data_dir}/{source}")
-    if not written:
+    print(f"restored {n_vintages} vintage(s) into {args.vintage_root}")
+    if not written and not n_vintages:
         print("nothing restored (files already present? see warnings)")
 
 
@@ -1708,6 +1715,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir", default="data",
         help="Data directory to mirror (default: data).",
     )
+    p_dbm.add_argument(
+        "--vintage-root", default="paper_trading/vintages",
+        help="Harness vintage store to mirror (default: "
+             "paper_trading/vintages).",
+    )
     p_dbm.set_defaults(func=cmd_db_mirror)
 
     p_dbr = sub.add_parser(
@@ -1722,9 +1734,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Data directory to restore into (default: data).",
     )
     p_dbr.add_argument(
+        "--vintage-root", default="paper_trading/vintages",
+        help="Harness vintage store to restore into (default: "
+             "paper_trading/vintages).",
+    )
+    p_dbr.add_argument(
         "--force", action="store_true",
         help="Overwrite existing non-empty files (a live host is ahead "
-             "of its mirror by up to one cycle — use deliberately).",
+             "of its mirror by up to one cycle — use deliberately). Does "
+             "not apply to vintages: they are immutable and verified.",
     )
     p_dbr.set_defaults(func=cmd_db_restore)
 

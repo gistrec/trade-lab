@@ -2,9 +2,20 @@
 
 Fleet data-locality policy: a host must be disposable — the forward-test
 journal and order state must never exist ONLY on its disk. This module
-mirrors ``data/journal/*.jsonl`` (line-by-line, append-only) and
-``data/state/*.json`` (whole file) into the fleet's managed MySQL, and
-can rematerialise them on a fresh host (``trade-lab db-restore``).
+mirrors ``data/journal/*.jsonl`` (line-by-line, append-only),
+``data/state/*.json`` (whole file) and the harness vintage store
+(``paper_trading/vintages/``, content-addressed blobs) into the fleet's
+managed MySQL, and can rematerialise them on a fresh host
+(``trade-lab db-restore``).
+
+Why vintages belong here
+========================
+A vintage is the exact OHLCV bytes the harness saw on one decision day;
+the look-ahead detector replays against them. They are unreproducible
+after the fact — data providers revise history, so re-fetching a lost
+day is not guaranteed to return the same bytes. A 2026-08-19 host
+re-provisioning wiped 82 of 85 of them and only a machine backup got
+them back. Roughly 267 KB/day raw, ~4x smaller gzipped.
 
 Strictly one-way
 ================
@@ -46,6 +57,8 @@ mirror is disabled and says so once per run.
 """
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import logging
 import os
@@ -60,6 +73,9 @@ import pymysql
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATA_DIR = Path("data")
+# Vintages live outside data/ — they belong to the paper-trading harness,
+# not the execution layer — so they carry their own root.
+DEFAULT_VINTAGE_ROOT = Path("paper_trading/vintages")
 
 _SCHEMA = (
     """
@@ -77,6 +93,20 @@ _SCHEMA = (
         payload     MEDIUMTEXT    NOT NULL,
         mirrored_at DATETIME(3)   NOT NULL,
         PRIMARY KEY (source)
+    ) DEFAULT CHARSET=utf8mb4
+    """,
+    # Vintages are content-addressed OHLCV snapshots (see
+    # paper_trading/vintage_store.py): the SHA-256 of the payload IS the
+    # identity, which makes it the natural primary key and every insert
+    # idempotent. Stored gzipped as a BLOB — the look-ahead detector needs
+    # the exact bytes back, so this must not be normalised into rows.
+    """
+    CREATE TABLE IF NOT EXISTS vintages (
+        content_hash CHAR(64)      NOT NULL,
+        payload      MEDIUMBLOB    NOT NULL,
+        bytes_raw    INT UNSIGNED  NOT NULL,
+        mirrored_at  DATETIME(3)   NOT NULL,
+        PRIMARY KEY (content_hash)
     ) DEFAULT CHARSET=utf8mb4
     """,
 )
@@ -211,26 +241,49 @@ def plan_journal_inserts(
     return to_insert, drift
 
 
+def collect_vintage_files(vintage_root: Path) -> dict[str, Path]:
+    """``{content_hash: path}`` for every vintage under ``vintage_root``.
+
+    The hash is taken from the filename (the store's two-level
+    ``hh/hash.txt`` layout), NOT by reading the file — a full rescan would
+    otherwise hash ~22 MB on every cycle just to discover there is nothing
+    new. Contents are verified later, but only for the ones actually being
+    inserted.
+    """
+    out: dict[str, Path] = {}
+    if not vintage_root.exists():
+        return out
+    for path in sorted(vintage_root.glob("*/*.txt")):
+        out[path.stem] = path
+    return out
+
+
 # ── reconcile / restore ──────────────────────────────────────────────
 
 @dataclass
 class MirrorReport:
     journal_lines_inserted: int = 0
     state_files_mirrored: int = 0
+    vintages_mirrored: int = 0
     drift: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         out = (
             f"journal lines inserted: {self.journal_lines_inserted}, "
-            f"state files mirrored: {self.state_files_mirrored}"
+            f"state files mirrored: {self.state_files_mirrored}, "
+            f"vintages mirrored: {self.vintages_mirrored}"
         )
         if self.drift:
             out += f", DRIFT: {'; '.join(self.drift)}"
         return out
 
 
-def reconcile(conn, data_dir: Path = DEFAULT_DATA_DIR) -> MirrorReport:
-    """Mirror every journal/state file under ``data_dir`` into MySQL."""
+def reconcile(
+    conn,
+    data_dir: Path = DEFAULT_DATA_DIR,
+    vintage_root: Path = DEFAULT_VINTAGE_ROOT,
+) -> MirrorReport:
+    """Mirror journal/state files and harness vintages into MySQL."""
     now = datetime.now(timezone.utc)
     report = MirrorReport()
 
@@ -273,8 +326,89 @@ def reconcile(conn, data_dir: Path = DEFAULT_DATA_DIR) -> MirrorReport:
             )
             report.state_files_mirrored += 1
 
+        local_vintages = collect_vintage_files(vintage_root)
+        if local_vintages:
+            cur.execute("SELECT content_hash FROM vintages")
+            already = {row[0] for row in cur.fetchall()}
+            for content_hash, path in sorted(local_vintages.items()):
+                if content_hash in already:
+                    continue
+                raw = path.read_bytes()
+                actual = hashlib.sha256(raw).hexdigest()
+                if actual != content_hash:
+                    # Never mirror a snapshot whose bytes disagree with its
+                    # name: the mirror would then vouch for corruption. Same
+                    # verdict load_vintage reaches, reported as drift here
+                    # so a full reconcile still finishes.
+                    msg = (
+                        f"vintage {path} hashes to {actual} but is named "
+                        f"{content_hash} — NOT mirrored"
+                    )
+                    report.drift.append(msg)
+                    logger.warning("db mirror drift — %s", msg)
+                    continue
+                cur.execute(
+                    "INSERT IGNORE INTO vintages "
+                    "(content_hash, payload, bytes_raw, mirrored_at) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (content_hash, gzip.compress(raw), len(raw), now),
+                )
+                report.vintages_mirrored += 1
+
     conn.commit()
     return report
+
+
+def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
+    """Rematerialise mirrored vintages under ``vintage_root``. Returns count.
+
+    No ``force`` flag, unlike journal/state: a vintage is content-addressed
+    and immutable, so a local file whose bytes hash to its own name IS the
+    mirrored one and is left alone. A local file that does NOT hash to its
+    name is corruption, and gets overwritten from the (verified) mirror.
+
+    Every payload is decompressed and re-hashed before it touches the disk.
+    A blob that fails that check is never written; the failures are
+    collected and raised at the end, so one bad row cannot silently
+    withhold the good ones — but it also cannot pass unnoticed.
+    """
+    written = 0
+    corrupt: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT content_hash, payload, bytes_raw FROM vintages")
+        rows = cur.fetchall()
+    for content_hash, payload, bytes_raw in rows:
+        try:
+            raw = gzip.decompress(payload)
+        except (OSError, EOFError) as exc:
+            corrupt.append(f"{content_hash}: undecompressable payload ({exc})")
+            continue
+        actual = hashlib.sha256(raw).hexdigest()
+        if actual != content_hash or len(raw) != int(bytes_raw):
+            corrupt.append(
+                f"{content_hash}: mirror payload hashes to {actual} "
+                f"({len(raw)} bytes, expected {bytes_raw})"
+            )
+            continue
+        target = vintage_root / content_hash[:2] / f"{content_hash}.txt"
+        if target.exists():
+            if hashlib.sha256(target.read_bytes()).hexdigest() == content_hash:
+                continue          # already the same immutable bytes
+            logger.warning(
+                "db-restore: local vintage %s is corrupt — repairing from "
+                "the mirror", target,
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.rename(target)        # atomic, same contract as store_vintage
+        written += 1
+    if corrupt:
+        raise MirrorConfigError(
+            "db-restore: %d mirrored vintage(s) failed verification and were "
+            "NOT written: %s" % (len(corrupt), "; ".join(corrupt))
+        )
+    return written
 
 
 def restore(
@@ -327,7 +461,10 @@ def restore(
     return written
 
 
-def mirror_after_cycle(data_dir: Path = DEFAULT_DATA_DIR) -> None:
+def mirror_after_cycle(
+    data_dir: Path = DEFAULT_DATA_DIR,
+    vintage_root: Path = DEFAULT_VINTAGE_ROOT,
+) -> None:
     """Best-effort post-cycle mirror — never raises.
 
     A completed (even failed) cycle is already journaled on disk; the
@@ -342,7 +479,7 @@ def mirror_after_cycle(data_dir: Path = DEFAULT_DATA_DIR) -> None:
             return
         conn = connect(config)
         try:
-            report = reconcile(conn, data_dir)
+            report = reconcile(conn, data_dir, vintage_root)
         finally:
             conn.close()
         logger.info("db mirror: %s", report.summary())
