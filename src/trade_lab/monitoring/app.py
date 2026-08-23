@@ -630,7 +630,7 @@ def _render_incidents(reader: JournalReader) -> None:
             f"Staleness check cannot see this."
         )
     elif gap_overdue:
-        st.caption(
+        st.info(
             f"Longest cadence gap in the window: {gap.seconds / 3600:.1f}h "
             f"({_humanize_iso(gap.started.isoformat())} → "
             f"{_humanize_iso(gap.ended.isoformat())}), "
