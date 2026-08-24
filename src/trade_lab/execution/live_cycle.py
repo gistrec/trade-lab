@@ -229,6 +229,17 @@ def run_live_cycle(
                 reason="pending_order",
             ))
 
+        # plan.skipped bypasses the loop above, but the same staleness
+        # applies: a sub-min delta on a pending pair was computed against
+        # a balance the pending fill will change — transient, not
+        # unfillable drift.
+        submin_skips: list[SkippedDelta] = []
+        for s in plan.skipped:
+            if pending_by_pair.get(s.symbol):
+                pending_skips.append(replace(s, reason="pending_order"))
+            else:
+                submin_skips.append(s)
+
         sorted_intents = sort_orders_for_placement(sendable)
         for i, intent in enumerate(sorted_intents):
             if i > 0:
@@ -260,6 +271,7 @@ def run_live_cycle(
             allocation=allocation,
             current_holdings_quote=current_holdings_quote,
             plan=plan,
+            submin_skips=submin_skips,
             pending_skips=pending_skips,
             order_results=order_results,
         )
@@ -633,6 +645,7 @@ def _write_main_cycle(
     allocation,
     current_holdings_quote: dict,
     plan,
+    submin_skips: list[SkippedDelta],
     pending_skips: list[SkippedDelta],
     order_results: list[OrderResult],
 ) -> None:
@@ -675,11 +688,13 @@ def _write_main_cycle(
         current_holdings_quote=current_holdings_quote,
         orders_planned=[_intent_dict(o) for o in plan.orders],
         orders_skipped=[
-            _skipped_dict(s) for s in list(plan.skipped) + pending_skips
+            _skipped_dict(s) for s in submin_skips + pending_skips
         ],
-        # plan.skipped only: a pending_order skip is transient (retried
+        # submin_skips only: a pending_order skip is transient (retried
         # next cycle), while this metric tracks unfillable sub-min drift.
-        total_skipped_quote_drift=total_skipped_quote_drift(plan),
+        total_skipped_quote_drift=total_skipped_quote_drift(
+            replace(plan, skipped=submin_skips)
+        ),
         orders_executed=[r.to_dict() for r in order_results],
     )
     try:
