@@ -221,12 +221,6 @@ def largest_inter_cycle_gap(cycles: list[dict]) -> Optional[CadenceGap]:
     return CadenceGap(seconds=(b - a).total_seconds(), started=a, ended=b)
 
 
-def max_inter_cycle_gap_seconds(cycles: list[dict]) -> Optional[float]:
-    """Largest gap in seconds — :func:`largest_inter_cycle_gap` without dates."""
-    gap = largest_inter_cycle_gap(cycles)
-    return None if gap is None else gap.seconds
-
-
 # ---------------------------------------------------------------------------
 # Time-series extraction for charts (Theme 2). Each is a total function over
 # external journal input: a null/garbage field drops that point, never raises.
@@ -274,30 +268,12 @@ def duration_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
     return out
 
 
-def cycle_total_drift(cycle: dict) -> Optional[float]:
-    """Sum of |target - current| across assets, or None if unavailable.
-
-    The strategy deliberately lets weights drift between monthly rebalances
-    (the C3 profile), so a per-cycle total-drift trend should be a sawtooth
-    that resets on rebalance days — a monotonic climb would flag a problem.
-    """
-    target = cycle.get("target_allocation")
-    current = cycle.get("current_holdings_quote")
-    if not isinstance(target, dict) or not isinstance(current, dict):
-        return None
-    total = 0.0
-    for asset in set(target) | set(current):
-        total += abs(_as_float(target.get(asset)) - _as_float(current.get(asset)))
-    return total
-
-
 def unfillable_drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
     """(ended_at, skipped notional) for LIVE cycles — work the bot refused.
 
-    Distinct from :func:`drift_series`, which measures distance to target and
-    therefore spikes on every ordinary signal change: cash arrives, the next
-    cycle deploys it, back to zero. That sawtooth is predictable and carries
-    no information.
+    Distance-to-target drift is deliberately NOT plotted: it spikes on every
+    ordinary signal change — cash arrives, the next cycle deploys it, back to
+    zero — a predictable sawtooth that carries no information.
 
     This series is the part that will NOT be closed — deltas below the
     exchange minimum notional / lot step, absorbed and logged instead of
@@ -315,22 +291,6 @@ def unfillable_drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
         if dt is None:
             continue
         out.append((dt, float(c.get("total_skipped_quote_drift") or 0.0)))
-    return out
-
-
-def drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
-    """(ended_at, total_drift) for successful cycles where drift is defined."""
-    out: list[tuple[datetime, float]] = []
-    for c in cycles:
-        if c.get("outcome") != "success":
-            continue
-        dt = parse_iso(c.get("ended_at"))
-        if dt is None:
-            continue
-        drift = cycle_total_drift(c)
-        if drift is None:
-            continue
-        out.append((dt, drift))
     return out
 
 
@@ -366,7 +326,8 @@ def trade_events(cycles: list[dict]) -> list[TradeEvent]:
     Total over external journal input: a corrupt order row (non-dict, garbage
     numbers) degrades that one order, never raises. Cycles arrive chronological
     (cache order), so the output is chronological — the same contract as
-    ``equity_series`` / ``drift_series`` so markers align with those curves.
+    ``equity_series`` / ``unfillable_drift_series`` so markers align with
+    those curves.
     """
     out: list[TradeEvent] = []
     for c in cycles:
@@ -485,10 +446,6 @@ def as_float(value, default: float = 0.0) -> float:
         return default
 
 
-# Internal alias retained for the module's own historical call sites.
-_as_float = as_float
-
-
 class JournalReader:
     """Cached, fail-soft reader for a journal file.
 
@@ -556,7 +513,7 @@ class JournalReader:
                 continue
             out.append((
                 asof,
-                _as_float(sig.get("ladder_value")),
+                as_float(sig.get("ladder_value")),
                 bool(sig.get("sma_gate_open", False)),
             ))
         return out
