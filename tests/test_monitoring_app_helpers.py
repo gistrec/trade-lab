@@ -396,6 +396,22 @@ def test_series_return_tolerates_null_and_garbage_elements():
     assert _series_return([100.0, 110.0], 1) == "+10.00%"  # still works
 
 
+def test_return_chip_colors_follow_direction():
+    from trade_lab.monitoring.app import _return_chip
+
+    assert _return_chip([100.0, 110.0], 1) == ":green[↑ +10.00% vs 1d ago]"
+    assert _return_chip([100.0, 90.0], 1) == ":red[↓ -10.00% vs 1d ago]"
+
+
+def test_return_chip_zero_and_missing_are_neutral_gray():
+    """Flat and no-data chips stay gray — mirrors the Ladder delta, which
+    switches delta_color to 'off' when the day-over-day change is zero."""
+    from trade_lab.monitoring.app import _return_chip
+
+    assert _return_chip([100.0, 100.0], 1) == ":gray[+0.00% vs 1d ago]"
+    assert _return_chip([], 7) == ":gray[— vs 7d ago]"
+
+
 def test_render_read_stats_warns_on_corrupt_and_errors_on_read_error(monkeypatch):
     import trade_lab.monitoring.app as app
     from trade_lab.monitoring.data_source import ReadStats
@@ -1348,3 +1364,76 @@ def test_sim_equity_metric_loss_reads_negative():
 def test_sim_equity_metric_flat():
     _, delta = _sim_equity_metric(10_000.0, 10_000.0)
     assert delta == "+0.00% since start"
+
+
+# ---------------------------------------------------------------------------
+# Runtime verify (AppTest): Signal tab folds direction/persistence into the
+# top metric row — 7d/30d chips under Basket close, days chip under the gate
+# ---------------------------------------------------------------------------
+
+
+def test_signal_tab_renders_chips_not_second_metric_row(tmp_path, monkeypatch):
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, signal):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": "success", "error": None,
+            "git_commit": "aaaa111", "python_version": "3.11.0",
+            "context": {"mode": "dry_run", "exchange": "binance",
+                        "sandbox": True, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": signal, "basket_close_series": None, "balance": None,
+            "equity_usd": None, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": 0.0,
+            "orders_executed": None, "schema_version": 2,
+        }
+
+    def _signal(asof):
+        return {
+            "asof": asof.isoformat(), "ladder_value": 1.0,
+            "sma_gate_open": True, "basket_close": 110.0, "sma_value": 100.0,
+            "per_lookback_states": {"28": 1, "60": 1},
+            "per_lookback_returns": {"28": 0.05, "60": 0.10},
+        }
+
+    # values[-8] = 100 → 7d chip +10.00%; values[-31] = 88 → 30d chip +25.00%.
+    series = [88.0] * 23 + [100.0] * 7 + [110.0]
+    c1 = _cycle("c1", now - timedelta(days=1), _signal(now - timedelta(days=1)))
+    c2 = _cycle("c2", now, _signal(now))
+    c2["basket_close_series"] = {
+        "values": series,
+        "start_ts": (now - timedelta(days=len(series) - 1)).isoformat(),
+    }
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text(json.dumps(c1) + "\n" + json.dumps(c2) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    metrics = {m.label: m for m in app.metric}
+    gate = metrics["SMA(200) gate"]
+    assert gate.value == "OPEN"
+    assert gate.delta == "2d OPEN"        # both fixture dates carry OPEN
+    # The old second row is gone — its readings live on the tiles now.
+    for label in ("vs 7d ago", "vs 30d ago", "Days gate OPEN"):
+        assert label not in metrics, sorted(metrics)
+
+    captions = [str(c.value) for c in app.caption]
+    assert ":green[↑ +10.00% vs 7d ago]" in captions, captions
+    assert ":green[↑ +25.00% vs 30d ago]" in captions, captions

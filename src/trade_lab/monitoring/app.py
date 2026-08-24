@@ -714,7 +714,10 @@ def _render_signal(reader: JournalReader) -> None:
     sma_value = sig.get("sma_value")
     gate_open = sig.get("sma_gate_open")
 
-    # --- Top row: 4 metrics ---
+    # --- Top row: 4 metrics, direction/persistence folded in as chips ---
+    bcs_dict = latest.get("basket_close_series") or {}
+    values = bcs_dict.get("values") or []
+    gate_state, gate_days = _gate_state_duration_days(reader)
     cols = st.columns(4)
     # as_float, not .get(default): a present JSON-null ladder_value makes
     # .get return None and f"{None:.2f}" raise — the data layer is hardened
@@ -730,11 +733,19 @@ def _render_signal(reader: JournalReader) -> None:
     cols[1].metric(
         "SMA(200) gate",
         "OPEN" if gate_open else ("CLOSED" if gate_open is False else "—"),
+        # State-explicit ("12d OPEN", not "12d in this state"): the days come
+        # from the journal history, the big value from the latest cycle — if
+        # they ever disagree, the chip must not claim they match.
+        delta=(None if gate_days is None else f"{gate_days}d {gate_state}"),
+        delta_color="off",
+        delta_arrow="off",
     )
     cols[2].metric(
         "Basket close",
         f"{basket_close:,.2f}" if basket_close is not None else "—",
     )
+    cols[2].caption(_return_chip(values, 7))
+    cols[2].caption(_return_chip(values, 30))
     if basket_close is not None and sma_value:
         dist_pct = (basket_close / sma_value - 1.0) * 100
         cols[3].metric(
@@ -742,24 +753,10 @@ def _render_signal(reader: JournalReader) -> None:
             f"{dist_pct:+.2f}%",
             delta=f"SMA = {sma_value:.2f}",
             delta_color="off",
+            delta_arrow="off",
         )
     else:
         cols[3].metric("Basket vs SMA(200)", "—")
-
-    # --- Second row: direction + persistence metrics ---
-    bcs_dict = latest.get("basket_close_series") or {}
-    values = bcs_dict.get("values") or []
-    cols2 = st.columns(3)
-    cols2[0].metric("vs 7d ago", _series_return(values, 7))
-    cols2[1].metric("vs 30d ago", _series_return(values, 30))
-    # Label follows the state: "days the regime has been on" is the useful
-    # reading during an open gate, "days since it was last on" while closed.
-    gate_state, gate_days = _gate_state_duration_days(reader)
-    cols2[2].metric(
-        "Days since gate OPEN" if gate_state is None
-        else f"Days gate {gate_state}",
-        "—" if gate_days is None else str(gate_days),
-    )
 
     # --- Basket close chart with current SMA reference ---
     if len(values) >= 2:
@@ -868,6 +865,20 @@ def _series_return(values: list, n_days_ago: int) -> str:
     if past == 0:
         return "—"
     return f"{(today / past - 1.0) * 100:+.2f}%"
+
+
+def _return_chip(values: list, n_days_ago: int) -> str:
+    # Caption markdown standing in for a second metric delta — st.metric
+    # renders exactly one delta and Basket close carries two horizons.
+    ret = _series_return(values, n_days_ago)
+    label = f"vs {n_days_ago}d ago"
+    if ret == "—":
+        return f":gray[— {label}]"
+    if ret.startswith("-"):
+        return f":red[↓ {ret} {label}]"
+    if ret == "+0.00%":
+        return f":gray[{ret} {label}]"
+    return f":green[↑ {ret} {label}]"
 
 
 def _latest_ladder_by_day(reader: JournalReader) -> dict:
