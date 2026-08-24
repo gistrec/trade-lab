@@ -29,16 +29,12 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import Optional
 
 
 ID_PREFIX = "tsmom"
 MAX_ID_LEN = 32
 
 _SYMBOL_RE = re.compile(r"^([A-Z0-9]{2,10})/([A-Z0-9]{2,10})$")
-_ID_RE = re.compile(
-    rf"^{ID_PREFIX}_(\d{{8}})_([A-Z0-9]{{4,20}})_(buy|sell)$"
-)
 
 
 def make_client_order_id(
@@ -89,28 +85,3 @@ def normalize_symbol(symbol: str) -> str:
             "(both 2-10 uppercase alphanumeric)."
         )
     return m.group(1) + m.group(2)
-
-
-def parse_client_order_id(coid) -> Optional[dict]:
-    """Reverse-parse for monitoring / diagnostics.
-
-    Returns ``{"prefix", "rebal_date", "symbol_normalized", "side"}`` or
-    None if the ID doesn't match the expected format. Tolerates
-    non-string input so monitoring code can call it without prior type
-    checks.
-    """
-    if not isinstance(coid, str):
-        return None
-    m = _ID_RE.match(coid)
-    if m is None:
-        return None
-    try:
-        rebal_date = datetime.strptime(m.group(1), "%Y%m%d").date()
-    except ValueError:
-        return None
-    return {
-        "prefix": ID_PREFIX,
-        "rebal_date": rebal_date,
-        "symbol_normalized": m.group(2),
-        "side": m.group(3),
-    }
