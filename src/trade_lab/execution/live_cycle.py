@@ -229,6 +229,32 @@ def run_live_cycle(
                 reason="pending_order",
             ))
 
+        # A blocked SELL breaks the sells-fund-buys ordering invariant
+        # (sort_orders_for_placement): the buys were sized against equity
+        # that counts the blocked pair's base, but its proceeds are not
+        # in free quote — the exchange would reject them. Defer them the
+        # same transient way instead of collecting the rejection.
+        # Unblocked sells still go: they need no funding and reduce risk.
+        if any(s.desired_side == "sell" for s in pending_skips):
+            deferred_buys = [i for i in sendable if i.side == "buy"]
+            sendable = [i for i in sendable if i.side != "buy"]
+            for intent in deferred_buys:
+                logger.warning(
+                    "DEFER buy %s (%.2f %s): a sell this cycle is blocked "
+                    "by a pending order, so its proceeds are not in free "
+                    "quote. Will retry next cycle.",
+                    intent.symbol, intent.notional_quote, quote,
+                )
+                pending_skips.append(SkippedDelta(
+                    symbol=intent.symbol,
+                    desired_side=intent.side,
+                    desired_amount=intent.base_amount,
+                    desired_notional=intent.notional_quote,
+                    constraint_min_amount=None,
+                    constraint_min_cost=None,
+                    reason="pending_funding_sell",
+                ))
+
         # plan.skipped bypasses the loop above, but the same staleness
         # applies: a sub-min delta on a pending pair was computed against
         # a balance the pending fill will change — transient, not

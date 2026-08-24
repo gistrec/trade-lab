@@ -763,6 +763,57 @@ def test_pending_order_symbol_excluded_from_next_plan(tmp_path):
     assert cycle["total_skipped_quote_drift"] == 0.0
 
 
+def test_buys_deferred_when_funding_sell_is_pending_blocked(tmp_path):
+    """Sells place before buys because their proceeds fund the buys.
+    When a pending foreign-coid order blocks a SELL, the buys were sized
+    against equity that counts the blocked base — its proceeds are not
+    in free quote, so sending them collects an InsufficientFunds
+    rejection. They must sit out as first-class transient skips;
+    unblocked sells still place (they reduce risk and need no funding)."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "sell")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="sell",
+        intended_amount=0.05, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+
+    # Equity 15000 → target 5000/asset. BTC sell 2500 (blocked by the
+    # pending order), ADA sell 1000, ETH buy 5000 — but free quote is
+    # only 1500: the ETH buy needs the blocked BTC sell's proceeds.
+    stub = _LiveStub(
+        basket=("BTC", "ETH", "ADA"),
+        balance_usdt=1500.0,
+        asset_holdings={"BTC": 0.15, "ADA": 0.12},
+    )
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub, basket=("BTC", "ETH", "ADA")),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    placed = [(c["symbol"], c["side"]) for c in stub.create_order_calls]
+    assert placed == [("ADA/USDT", "sell")], (
+        "the buy must not reach the exchange without its funding sell"
+    )
+    cycle = _read_cycles(tmp_path)[-1]
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons["BTC/USDT"] == "pending_order"
+    assert reasons["ETH/USDT"] == "pending_funding_sell"
+    # Both skips are transient — neither belongs in the drift metric.
+    assert cycle["total_skipped_quote_drift"] == 0.0
+
+
 def test_submin_skip_on_pending_pair_reclassified_as_pending(tmp_path):
     """A pending pair whose stale-balance delta falls below the exchange
     minimum lands in plan.skipped, bypassing the pending filter over
