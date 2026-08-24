@@ -25,9 +25,9 @@ shrunken position misses part of the rebound.
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
+from ._trend_layers import vol_weight
 from .base import Strategy
 
 
@@ -74,21 +74,13 @@ class VolatilityTargetWrapper(Strategy):
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         inner_signal = self.inner.generate_signals(candles)
         inner_signal = inner_signal.reindex(candles.index).fillna(0.0).astype(float)
-        weight = self._vol_weight(candles["close"].astype(float))
+        weight = vol_weight(
+            candles["close"].astype(float),
+            self.vol_lookback,
+            self.annual_vol_target,
+            self.annualization_factor,
+        )
         scaled = (inner_signal * weight).clip(
             lower=0.0, upper=self.max_position_size
         ).fillna(0.0)
         return scaled
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _vol_weight(self, close: pd.Series) -> pd.Series:
-        """``target_vol / realized_vol``, NaN/inf → 0 (never lever up)."""
-        daily_returns = close.pct_change(fill_method=None)
-        realized_vol_daily = daily_returns.rolling(self.vol_lookback).std()
-        realized_vol_annual = realized_vol_daily * np.sqrt(self.annualization_factor)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            weight = self.annual_vol_target / realized_vol_annual
-        return weight.replace([np.inf, -np.inf], np.nan).fillna(0.0)
