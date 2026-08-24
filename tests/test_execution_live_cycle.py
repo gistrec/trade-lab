@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import functools
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import ccxt
 import numpy as np
@@ -783,6 +783,257 @@ def test_crash_between_create_and_persist_recovered_next_cycle(tmp_path):
     assert recon["client_order_id"] == coid
     assert recon["terminal_status"] == "closed"
     assert recon["filled_amount"] == pytest.approx(entry.intended_amount)
+
+
+def _still_open_order(coid: str, symbol: str, exchange_id: str) -> dict:
+    return {
+        "id": exchange_id, "clientOrderId": coid, "symbol": symbol,
+        "side": "buy", "status": "open", "filled": 0.0, "cost": 0.0,
+        "average": None, "fee": {"cost": 0.0}, "timestamp": 1717000000000,
+    }
+
+
+def test_pending_order_symbol_excluded_from_next_plan(tmp_path):
+    """Day-boundary half of the idempotency hole: yesterday's BUY is
+    still live on the exchange (its expected fill is not in the balance)
+    and today's coid is a different date, so neither the state fast-path
+    nor query-before-place stops a fresh BUY for the same pair — the
+    position doubles once both fill. The pair must sit out this cycle as
+    a first-class 'pending_order' skip; other pairs trade normally."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "buy")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.05, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    # Reconstruction finds the order STILL open on the exchange.
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    placed_pairs = [c["symbol"] for c in stub.create_order_calls]
+    assert placed_pairs == ["ETH/USDT"], (
+        "BTC has a live foreign-coid order — a fresh BTC buy doubles "
+        "the position once both fill"
+    )
+    assert result.outcome == "success"
+    cycle = _read_cycles(tmp_path)[-1]
+    skips = [s for s in cycle["orders_skipped"]
+             if s["reason"] == "pending_order"]
+    assert len(skips) == 1 and skips[0]["symbol"] == "BTC/USDT"
+    # The transient pending skip must NOT inflate the sub-min drift
+    # metric (it resolves next cycle; the metric tracks unfillable
+    # divergence).
+    assert cycle["total_skipped_quote_drift"] == 0.0
+
+
+def test_buys_deferred_when_funding_sell_is_pending_blocked(tmp_path):
+    """Sells place before buys because their proceeds fund the buys.
+    When a pending foreign-coid order blocks a SELL, the buys were sized
+    against equity that counts the blocked base — its proceeds are not
+    in free quote, so sending them collects an InsufficientFunds
+    rejection. They must sit out as first-class transient skips;
+    unblocked sells still place (they reduce risk and need no funding)."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "sell")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="sell",
+        intended_amount=0.05, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+
+    # Equity 15000 → target 5000/asset. BTC sell 2500 (blocked by the
+    # pending order), ADA sell 1000, ETH buy 5000 — but free quote is
+    # only 1500: the ETH buy needs the blocked BTC sell's proceeds.
+    stub = _LiveStub(
+        basket=("BTC", "ETH", "ADA"),
+        balance_usdt=1500.0,
+        asset_holdings={"BTC": 0.15, "ADA": 0.12},
+    )
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub, basket=("BTC", "ETH", "ADA")),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    placed = [(c["symbol"], c["side"]) for c in stub.create_order_calls]
+    assert placed == [("ADA/USDT", "sell")], (
+        "the buy must not reach the exchange without its funding sell"
+    )
+    cycle = _read_cycles(tmp_path)[-1]
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons["BTC/USDT"] == "pending_order"
+    assert reasons["ETH/USDT"] == "pending_funding_sell"
+    # Both skips are transient — neither belongs in the drift metric.
+    assert cycle["total_skipped_quote_drift"] == 0.0
+
+
+def test_submin_skip_on_pending_pair_reclassified_as_pending(tmp_path):
+    """A pending pair whose stale-balance delta falls below the exchange
+    minimum lands in plan.skipped, bypassing the pending filter over
+    plan.orders — the journal would label it sub-min drift and count it
+    in total_skipped_quote_drift, though the pending fill invalidates
+    the delta. It must be reclassified 'pending_order' and excluded from
+    the drift metric; a genuine sub-min pair (ADA) keeps both."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "buy")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.05, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+
+    # Equity 15000 → target 5000/asset. BTC delta = 5 USDT (sub-min,
+    # pending order live), ADA delta = 2 USDT (sub-min, no pending),
+    # ETH delta = 5000 USDT (trades normally).
+    stub = _LiveStub(
+        basket=("BTC", "ETH", "ADA"),
+        balance_usdt=5007.0,
+        asset_holdings={"BTC": 0.0999, "ADA": 0.09996},
+    )
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub, basket=("BTC", "ETH", "ADA")),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    assert [c["symbol"] for c in stub.create_order_calls] == ["ETH/USDT"]
+    cycle = _read_cycles(tmp_path)[-1]
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons["BTC/USDT"] == "pending_order", (
+        "sub-min delta on a pending pair is computed against a stale "
+        "balance — it is transient, not unfillable drift"
+    )
+    assert "min_cost" in reasons["ADA/USDT"]
+    assert cycle["total_skipped_quote_drift"] == pytest.approx(2.0)
+
+
+def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
+    """A same-day retry plans the SAME coid the pending entry carries —
+    query-before-place finds that exact order and waits on it (no
+    duplicate is possible), so the pending_order skip must not fire:
+    blocking would defer the resolution a full day for nothing."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    today_coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state.put(OrderStateEntry(
+        client_order_id=today_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.1, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=now_iso, last_seen_at=now_iso,
+    ))
+
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[today_coid] = [
+        # reconstruction: still open → left in state
+        _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
+        # query-before-place inside place_order: found, then terminal
+        _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
+        # $10k / 2 assets / $50k = the 0.1 BTC the plan will intend
+        _closed_order(today_coid, "BTC/USDT", filled=0.1),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.outcome == "success"
+    # BTC resolved via query-before-place (no create), ETH created.
+    assert [c["symbol"] for c in stub.create_order_calls] == ["ETH/USDT"]
+    cycle = _read_cycles(tmp_path)[-1]
+    assert [s for s in cycle["orders_skipped"]
+            if s["reason"] == "pending_order"] == []
+    assert state.get(today_coid).status == "closed"
+
+
+def test_day_two_rerun_after_filled_day_one_places_nothing(tmp_path, monkeypatch):
+    """Day-boundary pin of the recompute-from-balance property: day 1's
+    buys FILLED and the balance reflects them → a day-2 run (new coid,
+    so no idempotency layer applies) must compute delta ≈ 0 and place
+    nothing. This property was emergent and unpinned — the cron has
+    already mis-fired across a date boundary once (MSK/UTC)."""
+    from trade_lab.execution import live_cycle as lc
+
+    state = _state(tmp_path)
+    stub1 = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    result1 = run_live_cycle(
+        _broker(stub1), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result1.outcome == "success"
+    bought = {
+        c["symbol"].split("/")[0]: c["amount"]
+        for c in stub1.create_order_calls
+    }
+    assert set(bought) == {"BTC", "ETH"}
+
+    # Day 2: same market, balance now holds day 1's fills.
+    quote_spent = sum(amt * 50_000.0 for amt in bought.values())
+    stub2 = _LiveStub(
+        basket=("BTC", "ETH"),
+        balance_usdt=10_000.0 - quote_spent,
+        asset_holdings=bought,
+    )
+
+    real_datetime = datetime
+
+    class _DayTwo:
+        @staticmethod
+        def now(tz=None):
+            return real_datetime.now(tz) + timedelta(days=1)
+
+        @staticmethod
+        def fromtimestamp(*a, **k):
+            return real_datetime.fromtimestamp(*a, **k)
+
+    monkeypatch.setattr(lc, "datetime", _DayTwo)
+    result2 = run_live_cycle(
+        _broker(stub2), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result2.outcome == "success"
+    assert stub2.create_order_calls == [], (
+        "with fills reflected in the balance, the day-2 delta must be "
+        "below exchange minimums — a placement here doubles the position"
+    )
 
 
 def test_timeout_on_create_itself_recovered_next_cycle(tmp_path):
