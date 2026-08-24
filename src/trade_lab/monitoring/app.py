@@ -744,8 +744,7 @@ def _render_signal(reader: JournalReader) -> None:
         "Basket close",
         f"{basket_close:,.2f}" if basket_close is not None else "—",
     )
-    cols[2].caption(_return_chip(values, 7))
-    cols[2].caption(_return_chip(values, 30))
+    cols[2].markdown(f"{_return_chip(values, 7)} {_return_chip(values, 30)}")
     if basket_close is not None and sma_value:
         dist_pct = (basket_close / sma_value - 1.0) * 100
         cols[3].metric(
@@ -868,17 +867,19 @@ def _series_return(values: list, n_days_ago: int) -> str:
 
 
 def _return_chip(values: list, n_days_ago: int) -> str:
-    # Caption markdown standing in for a second metric delta — st.metric
+    # Badge markdown standing in for a second metric delta — st.metric
     # renders exactly one delta and Basket close carries two horizons.
+    # Badges share the delta pill's color tokens and material arrows, so
+    # the chips read as native deltas.
     ret = _series_return(values, n_days_ago)
     label = f"vs {n_days_ago}d ago"
     if ret == "—":
-        return f":gray[— {label}]"
+        return f":gray-badge[— {label}]"
     if ret.startswith("-"):
-        return f":red[↓ {ret} {label}]"
+        return f":red-badge[:material/arrow_downward: {ret} {label}]"
     if ret == "+0.00%":
-        return f":gray[{ret} {label}]"
-    return f":green[↑ {ret} {label}]"
+        return f":gray-badge[{ret} {label}]"
+    return f":green-badge[:material/arrow_upward: {ret} {label}]"
 
 
 def _latest_ladder_by_day(reader: JournalReader) -> dict:

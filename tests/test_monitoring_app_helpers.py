@@ -399,17 +399,19 @@ def test_series_return_tolerates_null_and_garbage_elements():
 def test_return_chip_colors_follow_direction():
     from trade_lab.monitoring.app import _return_chip
 
-    assert _return_chip([100.0, 110.0], 1) == ":green[↑ +10.00% vs 1d ago]"
-    assert _return_chip([100.0, 90.0], 1) == ":red[↓ -10.00% vs 1d ago]"
+    assert _return_chip([100.0, 110.0], 1) == \
+        ":green-badge[:material/arrow_upward: +10.00% vs 1d ago]"
+    assert _return_chip([100.0, 90.0], 1) == \
+        ":red-badge[:material/arrow_downward: -10.00% vs 1d ago]"
 
 
 def test_return_chip_zero_and_missing_are_neutral_gray():
-    """Flat and no-data chips stay gray — mirrors the Ladder delta, which
-    switches delta_color to 'off' when the day-over-day change is zero."""
+    """Flat and no-data chips stay gray and arrowless — mirrors the Ladder
+    delta, which switches delta_color to 'off' when the change is zero."""
     from trade_lab.monitoring.app import _return_chip
 
-    assert _return_chip([100.0, 100.0], 1) == ":gray[+0.00% vs 1d ago]"
-    assert _return_chip([], 7) == ":gray[— vs 7d ago]"
+    assert _return_chip([100.0, 100.0], 1) == ":gray-badge[+0.00% vs 1d ago]"
+    assert _return_chip([], 7) == ":gray-badge[— vs 7d ago]"
 
 
 def test_render_read_stats_warns_on_corrupt_and_errors_on_read_error(monkeypatch):
@@ -1434,6 +1436,10 @@ def test_signal_tab_renders_chips_not_second_metric_row(tmp_path, monkeypatch):
     for label in ("vs 7d ago", "vs 30d ago", "Days gate OPEN"):
         assert label not in metrics, sorted(metrics)
 
-    captions = [str(c.value) for c in app.caption]
-    assert ":green[↑ +10.00% vs 7d ago]" in captions, captions
-    assert ":green[↑ +25.00% vs 30d ago]" in captions, captions
+    chip_lines = [str(m.value) for m in app.markdown
+                  if "-badge[" in str(m.value)]
+    assert any(
+        ":green-badge[:material/arrow_upward: +10.00% vs 7d ago] "
+        ":green-badge[:material/arrow_upward: +25.00% vs 30d ago]" == line
+        for line in chip_lines
+    ), chip_lines
