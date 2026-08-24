@@ -317,7 +317,5 @@ def test_state_meta_is_reserved_in_mutators(tmp_path):
     store = OrderStateStore(p, expected_env=_TESTNET)
     store.put(_entry())
 
-    with pytest.raises(KeyError):
-        store.mark_terminal("__meta__", "closed")
     with pytest.raises(ValueError, match="reserved"):
         store.put(_entry("__meta__"))

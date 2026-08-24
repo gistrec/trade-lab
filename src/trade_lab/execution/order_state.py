@@ -203,26 +203,6 @@ class OrderStateStore:
             del state[client_order_id]
             self._write_atomic(state)
 
-    def mark_terminal(self, client_order_id: str, status: str) -> None:
-        """Update an existing entry's status to a terminal value.
-
-        Raises :class:`KeyError` if the ID is unknown — the caller has a
-        bug if they try to terminate something that was never placed.
-        """
-        if status not in TERMINAL_STATUSES:
-            raise ValueError(
-                f"mark_terminal requires a terminal status, got {status!r}; "
-                f"valid: {sorted(TERMINAL_STATUSES)}"
-            )
-        state = self._read()
-        # _META_KEY is present in the raw dict but is not an entry — it
-        # must behave as unknown here, per get()/all_entries().
-        if client_order_id == _META_KEY or client_order_id not in state:
-            raise KeyError(f"Unknown client_order_id: {client_order_id!r}")
-        state[client_order_id]["status"] = status
-        state[client_order_id]["last_seen_at"] = utcnow_iso()
-        self._write_atomic(state)
-
     # ------------------------------------------------------------------
     # Read / write internals
     # ------------------------------------------------------------------
