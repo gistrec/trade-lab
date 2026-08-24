@@ -381,6 +381,27 @@ def test_incidents_warns_on_failed_cycle(monkeypatch):
     app._render_incidents(_LiveReader(cycles=cycles))
     assert cap["warning"]                    # non-success cycle surfaced
     assert not cap["success"]
+    # The table rides inside the alert body, not as a sibling dataframe.
+    assert "| FAILED |" in cap["warning"][0]
+    assert not cap["dataframe"]
+
+
+def test_md_cell_escapes_pipes_and_newlines_in_journal_text():
+    """A ccxt error carrying a pipe or newline must not split the row into
+    extra columns — journal text is external input."""
+    from trade_lab.monitoring.app import _md_cell
+
+    assert _md_cell("a|b") == "a\\|b"
+    assert _md_cell("line1\nline2") == "line1 line2"
+    assert _md_cell(None) == ""
+    assert _md_cell(r"back\slash") == "back\\\\slash"
+
+
+def test_md_table_shape():
+    from trade_lab.monitoring.app import _md_table
+
+    out = _md_table(["a", "b"], [[1, 2], [3, 4]]).splitlines()
+    assert out == ["| a | b |", "| --- | --- |", "| 1 | 2 |", "| 3 | 4 |"]
 
 
 # ---------------------------------------------------------------------------
@@ -1129,8 +1150,11 @@ def test_app_renders_warmup_banner_not_incident_for_skipped_warmup(
     assert len(banner) == 1, warnings          # one banner, no duplicates
     assert "36 of 200" in banner[0]
     assert "not an incident" in banner[0]
-    # No incident surface anywhere: the skip is a healthy state.
-    assert not any("non-success cycle" in w for w in warnings), warnings
+    # No incident surface anywhere: the skip is a healthy state. Scan titles
+    # too — the incident headline lives in the alert title, not the body.
+    titles = [str(w.proto.title) for w in app.warning]
+    assert not any("non-success cycle" in t for t in warnings + titles), \
+        warnings + titles
     errors = [str(e.value) for e in app.error]
     assert not any("FAILED" in e for e in errors), errors
     successes = [str(s.value) for s in app.success]

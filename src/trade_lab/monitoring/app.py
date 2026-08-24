@@ -571,6 +571,22 @@ def _gap_is_recent(
     return age <= EXPECTED_INTERVAL_S * GAP_RECENT_MULTIPLIER
 
 
+def _md_cell(value) -> str:
+    # Journal error text is external input: a literal pipe or newline would
+    # split the row into the wrong columns. Escape, never drop — the
+    # operator needs the message verbatim.
+    text = " ".join(str(value if value is not None else "").split())
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _md_table(headers: list, rows: list) -> str:
+    """GFM table for an alert body — st.dataframe cannot render inside one."""
+    head = "| " + " | ".join(headers) + " |"
+    sep = "| " + " | ".join("---" for _ in headers) + " |"
+    body = ["| " + " | ".join(_md_cell(c) for c in row) + " |" for row in rows]
+    return "\n".join([head, sep, *body])
+
+
 def _render_incidents(reader: JournalReader) -> None:
     """Window-level incident view: non-success cycles, unresolved orders,
     and cadence gaps that the latest-cycle-only alerts above cannot show."""
@@ -605,18 +621,15 @@ def _render_incidents(reader: JournalReader) -> None:
 
     if incidents:
         st.warning(
-            f"{len(incidents)} non-success cycle(s) in the window "
-            f"(failed / unknown_orders / partial)."
+            _md_table(
+                ["when", "mode", "outcome", "cycle", "error", "message"],
+                [[_humanize_iso(i["ended_at"]), i["mode"],
+                  i["outcome"].upper(), i["cycle_id"], i["error_type"],
+                  (i["error_message"] or "")[:80]] for i in incidents],
+            ),
+            title=(f"{len(incidents)} non-success cycle(s) in the window "
+                   f"(failed / unknown_orders / partial)."),
         )
-        rows = [{
-            "ended_at": _humanize_iso(i["ended_at"]),
-            "mode": i["mode"],
-            "outcome": i["outcome"].upper(),
-            "cycle": i["cycle_id"],
-            "error": i["error_type"] or "",
-            "message": (i["error_message"] or "")[:80],
-        } for i in incidents]
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     if gap_recent:
         st.warning(
@@ -630,19 +643,18 @@ def _render_incidents(reader: JournalReader) -> None:
 
     if open_orders:
         st.error(
-            f"{len(open_orders)} executed order(s) NOT in a resolved terminal "
-            f"state (partial / rejected / lost_track / timeout). A lost_track "
-            f"keeps the CLI exit code non-zero until resolved."
+            _md_table(
+                ["when", "cycle", "side", "symbol", "status", "clientOrderId"],
+                [[_humanize_iso(o["ended_at"]), o["cycle_id"], o["side"],
+                  o["symbol"], o["status"], o["client_order_id"]]
+                 for o in open_orders],
+            ),
+            title=(
+                f"{len(open_orders)} executed order(s) NOT in a resolved "
+                f"terminal state (partial / rejected / lost_track / timeout). "
+                f"A lost_track keeps the CLI exit code non-zero until resolved."
+            ),
         )
-        rows = [{
-            "ended_at": _humanize_iso(o["ended_at"]),
-            "cycle": o["cycle_id"],
-            "side": o["side"],
-            "symbol": o["symbol"],
-            "status": o["status"],
-            "client_order_id": o["client_order_id"],
-        } for o in open_orders]
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # The structural SMA(200) warm-up notice is NOT rendered here: cycles
     # with outcome='skipped_warmup' are healthy testnet states, not
