@@ -23,6 +23,7 @@ from trade_lab.monitoring.data_source import (
     cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
     largest_inter_cycle_gap, max_inter_cycle_gap_seconds,
+    unfillable_drift_series,
     open_order_incidents, parse_iso,
     recent_incidents, trade_events,
 )
@@ -1046,3 +1047,45 @@ def test_trade_events_preserves_chronological_order():
     assert [e.kind for e in events] == ["entry", "exit"]
     assert events[0].at < events[1].at
     assert isinstance(events[0], TradeEvent)
+
+
+# ---------------------------------------------------------------------------
+# Unfillable drift series
+# ---------------------------------------------------------------------------
+
+
+def test_unfillable_drift_series_counts_live_only(tmp_path):
+    """A dry-run refuses nothing — it plans. Only a live cycle can decline."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _cycle_entry("dry", skipped_drift=5.0),
+        _live_entry("live", skipped_drift=1.5),
+    ])
+    series = unfillable_drift_series(JournalReader(journal).cycles(n=10))
+    assert [v for _, v in series] == [1.5]
+
+
+def test_unfillable_drift_series_zero_on_a_clean_live_cycle(tmp_path):
+    """Zero is the healthy reading, and must be plotted, not dropped —
+    otherwise the line silently skips the days that went well."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_live_entry("clean", skipped_drift=0.0)])
+    series = unfillable_drift_series(JournalReader(journal).cycles(n=10))
+    assert [v for _, v in series] == [0.0]
+
+
+def test_unfillable_drift_series_skips_failed_cycles(tmp_path):
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _live_entry("ok", skipped_drift=2.0),
+        _cycle_entry("boom", outcome="failed"),
+    ])
+    series = unfillable_drift_series(JournalReader(journal).cycles(n=10))
+    assert len(series) == 1
+
+
+def test_unfillable_drift_series_empty_without_live_cycles(tmp_path):
+    """The mainnet observation journal shape: chart has nothing to draw."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_cycle_entry("dry", skipped_drift=0.05)])
+    assert unfillable_drift_series(JournalReader(journal).cycles(n=10)) == []

@@ -44,10 +44,10 @@ import streamlit as st
 from trade_lab.monitoring.data_source import (
     CadenceGap, DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER,
     Staleness,
-    as_float, cycle_orders_executed, drift_series, duration_series,
+    as_float, cycle_orders_executed, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
     largest_inter_cycle_gap, open_order_incidents, parse_iso,
-    recent_incidents, TradeEvent, trade_events,
+    recent_incidents, TradeEvent, trade_events, unfillable_drift_series,
 )
 from trade_lab.uikit import render_tab_safely
 from trade_lab.monitoring import research
@@ -1335,12 +1335,12 @@ def _render_portfolio(reader: JournalReader) -> None:
     else:
         st.info("Not enough successful cycles yet to chart equity.")
 
-    st.subheader("Index-vs-holdings drift over time")
-    dr = drift_series(window)
-    if len(dr) >= 2:
+    st.subheader("Unfillable rebalance drift")
+    dr = unfillable_drift_series(window)
+    if dr:
         st.plotly_chart(
             _timeseries_figure(
-                dr, y_title=f"total drift ({quote})",
+                dr, y_title=f"skipped notional ({quote})",
                 color="#9467bd", fill="tozeroy",
                 vline=exec_started, vline_label="live execution started",
                 markers=markers,
@@ -1348,14 +1348,21 @@ def _render_portfolio(reader: JournalReader) -> None:
             width="stretch",
         )
         st.caption(
-            "Sum of |target − current| per cycle. By design a sawtooth that "
-            "resets on the monthly rebalance (the drifted-weight profile from "
-            "C3); a steady monotonic climb would flag a problem." + exec_note
+            "Per live cycle: notional the bot refused to send because the "
+            "delta was below the exchange minimum / lot step. Zero is "
+            "healthy. Non-zero is how far the live portfolio just drifted "
+            "from the backtest — on a small balance monthly rebalances land "
+            "here instead of executing. Distance-to-target is deliberately "
+            "NOT plotted: it spikes on every ordinary signal change and is "
+            "back to zero the next cycle." + exec_note
         )
         if marker_note:
             st.caption(marker_note)
     else:
-        st.info("Not enough successful cycles yet to chart drift.")
+        st.info(
+            "No live cycles yet — this chart only counts work a real order "
+            "cycle declined to send."
+        )
 
 
 # ---------------------------------------------------------------------------

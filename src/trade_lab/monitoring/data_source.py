@@ -287,6 +287,33 @@ def cycle_total_drift(cycle: dict) -> Optional[float]:
     return total
 
 
+def unfillable_drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
+    """(ended_at, skipped notional) for LIVE cycles — work the bot refused.
+
+    Distinct from :func:`drift_series`, which measures distance to target and
+    therefore spikes on every ordinary signal change: cash arrives, the next
+    cycle deploys it, back to zero. That sawtooth is predictable and carries
+    no information.
+
+    This series is the part that will NOT be closed — deltas below the
+    exchange minimum notional / lot step, absorbed and logged instead of
+    sent. Zero on a healthy cycle; non-zero means the live portfolio just
+    diverged from the backtest by that much.
+
+    Live-only for the same reason the cumulative counter is: a dry-run
+    refuses nothing, it merely plans.
+    """
+    out: list[tuple[datetime, float]] = []
+    for c in cycles:
+        if c.get("outcome") != "success" or not is_live_cycle(c):
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        if dt is None:
+            continue
+        out.append((dt, float(c.get("total_skipped_quote_drift") or 0.0)))
+    return out
+
+
 def drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
     """(ended_at, total_drift) for successful cycles where drift is defined."""
     out: list[tuple[datetime, float]] = []
