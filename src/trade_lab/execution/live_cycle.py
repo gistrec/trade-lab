@@ -52,6 +52,16 @@ from typing import Callable, Optional, Sequence
 from .allocator import compute_target_allocation
 from .broker import Broker, BrokerError, MarketConstraints
 from .clientorder import make_client_order_id
+from .cycle_common import (
+    balance_dict,
+    basket_close_series_dict,
+    build_context,
+    failed_cycle,
+    intent_dict,
+    signal_dict,
+    skipped_dict,
+    skipped_warmup_cycle,
+)
 from .delta import SkippedDelta, compute_delta_plan, total_skipped_quote_drift
 from .journal import (
     Cycle,
@@ -138,7 +148,7 @@ def run_live_cycle(
     CLI exposes it as ``--max-signal-age-h``)."""
 
     started_at = datetime.now(timezone.utc)
-    context = _build_context(broker)
+    context = build_context(broker, mode="live")
     main_cycle_id = new_cycle_id()
     set_cycle_id(main_cycle_id)  # tag every log line in this run with the id
 
@@ -615,20 +625,6 @@ def _placed_at_ms(placed_at: str) -> Optional[int]:
     return int(dt.timestamp() * 1000)
 
 
-def _build_context(broker: Broker) -> dict:
-    return {
-        # Durable live/dry marker for read-only monitoring (the health
-        # server). Present even when a cycle fails before placing an order,
-        # so a failed live attempt is never misread as a dry-run. Metadata
-        # only — changes no trading behaviour.
-        "mode": "live",
-        "exchange": broker.config.exchange_id,
-        "sandbox": broker.config.sandbox,
-        "quote_currency": broker.config.quote_currency,
-        "basket": list(broker.config.basket),
-    }
-
-
 def _gather_ticker_prices(broker: Broker, snap: SignalSnapshot) -> dict[str, float]:
     """Live ticker prices, falling back to candle close on per-pair failure."""
     ticker_prices: dict[str, float] = {}
@@ -661,21 +657,6 @@ def _gather_constraints(
                 "disabled for this pair.", pair, exc,
             )
     return constraints
-
-
-def _ts_iso(ts) -> str:
-    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-
-
-def _basket_close_series_dict(tail) -> Optional[dict]:
-    if tail is None or len(tail) == 0:
-        return None
-    # 6 decimals on an index normalized to start at 100 — full-precision
-    # floats here roughly double the serialized cycle size for nothing.
-    return {
-        "start_ts": _ts_iso(tail.index[0]),
-        "values": [round(float(v), 6) for v in tail.tolist()],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -757,36 +738,15 @@ def _write_main_cycle(
         git_commit=get_git_commit_short(),
         python_version=get_python_version(),
         context=context,
-        signal={
-            "asof": _ts_iso(snap.asof),
-            "ladder_value": snap.signal,
-            "sma_gate_open": snap.sma_gate_open,
-            "sma_value": snap.sma_value,
-            "per_lookback_states": {
-                str(k): int(v) for k, v in snap.per_lookback_states.items()
-            },
-            "per_lookback_returns": {
-                str(k): float(v) for k, v in snap.per_lookback_returns.items()
-            },
-            "basket_close": snap.basket_close,
-            "asset_closes": snap.asset_closes,
-            "basket_weights": dict(snap.basket_weights),
-            "decision_age_s": round(decision_age_s, 1),
-        },
-        basket_close_series=_basket_close_series_dict(snap.basket_close_tail),
-        balance={
-            "quote_currency": balance.quote_currency,
-            "quote_total": balance.quote_total,
-            "quote_free": balance.quote_free,
-            "quote_used": balance.quote_used,
-            "asset_totals": balance.asset_totals,
-        },
+        signal=signal_dict(snap, decision_age_s=decision_age_s),
+        basket_close_series=basket_close_series_dict(snap.basket_close_tail),
+        balance=balance_dict(balance),
         equity_usd=equity,
         target_allocation=dict(allocation.target_quote_per_asset),
         current_holdings_quote=current_holdings_quote,
-        orders_planned=[_intent_dict(o) for o in plan.orders],
+        orders_planned=[intent_dict(o) for o in plan.orders],
         orders_skipped=[
-            _skipped_dict(s) for s in submin_skips + pending_skips
+            skipped_dict(s) for s in submin_skips + pending_skips
         ],
         # submin_skips only: a pending_order skip is transient (retried
         # next cycle), while this metric tracks unfillable sub-min drift.
@@ -812,30 +772,8 @@ def _write_failed_cycle(
     exc: BaseException,
     partial_orders: list[OrderResult],
 ) -> None:
-    """Failed cycle still gets a journal entry — silently dropping is
-    the failure mode the journal exists to prevent. Partially-placed
-    orders go in ``orders_executed`` so they are not lost to history.
-    """
-    ended_at = datetime.now(timezone.utc)
-    cycle = Cycle(
-        cycle_id=cycle_id,
-        started_at=started_at.isoformat(),
-        ended_at=ended_at.isoformat(),
-        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
-        outcome="failed",
-        error={"type": type(exc).__name__, "message": str(exc)[:512]},
-        git_commit=get_git_commit_short(),
-        python_version=get_python_version(),
-        context=context,
-        signal=None,
-        basket_close_series=None,
-        balance=None,
-        equity_usd=None,
-        target_allocation=None,
-        current_holdings_quote=None,
-        orders_planned=None,
-        orders_skipped=None,
-        total_skipped_quote_drift=None,
+    cycle = failed_cycle(
+        cycle_id, started_at, datetime.now(timezone.utc), context, exc,
         orders_executed=(
             [r.to_dict() for r in partial_orders] if partial_orders else None
         ),
@@ -857,38 +795,10 @@ def _write_skipped_warmup_cycle(
     context: dict,
     skip_reason: dict,
 ) -> None:
-    """Testnet-only first-class skip (SMA warm-up structurally impossible).
-
-    ``error`` stays None — monitoring and the health server key
-    incidents off ``outcome``/``error`` — and the depth facts live in
-    the explicit ``skip_reason`` block. ``orders_executed=[]`` (a list,
-    like every main live cycle) keeps the cycle recognizable as the
-    daily live cron's run, so the dashboard's live-cron freshness clock
-    and /healthz/daily do not misread a perpetually-skipping testnet as
-    a dead cron.
-    """
-    ended_at = datetime.now(timezone.utc)
-    cycle = Cycle(
-        cycle_id=cycle_id,
-        started_at=started_at.isoformat(),
-        ended_at=ended_at.isoformat(),
-        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
-        outcome="skipped_warmup",
-        error=None,
-        git_commit=get_git_commit_short(),
-        python_version=get_python_version(),
-        context=context,
-        signal=None,
-        basket_close_series=None,
-        balance=None,
-        equity_usd=None,
-        target_allocation=None,
-        current_holdings_quote=None,
-        orders_planned=None,
-        orders_skipped=None,
-        total_skipped_quote_drift=None,
-        orders_executed=[],
+    cycle = skipped_warmup_cycle(
+        cycle_id, started_at, datetime.now(timezone.utc), context,
         skip_reason=skip_reason,
+        orders_executed=[],
     )
     try:
         journal.append(cycle)
@@ -897,23 +807,3 @@ def _write_skipped_warmup_cycle(
             "Could not write skipped_warmup journal entry %s: %s",
             cycle_id, journal_exc,
         )
-
-
-def _intent_dict(intent) -> dict:
-    return {
-        "symbol": intent.symbol,
-        "side": intent.side,
-        "base_amount": intent.base_amount,
-        "notional_quote": intent.notional_quote,
-        "price_used": intent.price_used,
-    }
-
-
-def _skipped_dict(skipped) -> dict:
-    return {
-        "symbol": skipped.symbol,
-        "desired_side": skipped.desired_side,
-        "desired_amount": skipped.desired_amount,
-        "desired_notional": skipped.desired_notional,
-        "reason": skipped.reason,
-    }
