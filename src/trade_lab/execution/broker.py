@@ -78,9 +78,10 @@ class BrokerError(RuntimeError):
 
 
 class ConnectionRefused(BrokerError):
-    """Raised at construction time if the broker refuses to point at
-    mainnet without explicit operator clearance. Distinct from network
-    errors so paper-trading scripts can fail loudly on this case."""
+    """Raised when the broker refuses a mainnet action without explicit
+    operator clearance — at construction (two-flag gate) or at order
+    placement (third flag). Distinct from network errors so
+    paper-trading scripts can fail loudly on this case."""
 
 
 class _CcxtExchange(Protocol):
@@ -626,6 +627,16 @@ class Broker:
         means mapping its param here AND in :meth:`fetch_order_by_coid`,
         then extending that list.
         """
+        # Full three-flag gate: a hand-built config skips both
+        # load_paper_config and connect(), the two ALLOW_MAINNET checks.
+        if not self.config.sandbox and not (
+            self.config.allow_mainnet and self.config.mainnet_live_orders
+        ):
+            raise ConnectionRefused(
+                "Refusing create_order on MAINNET: placing real orders "
+                "requires TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true. "
+                "SANDBOX=false + ALLOW_MAINNET=true unlock read paths only."
+            )
         if side not in ("buy", "sell"):
             raise ValueError(f"side must be buy or sell, got {side!r}")
         if amount <= 0:
