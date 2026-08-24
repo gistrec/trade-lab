@@ -69,11 +69,25 @@ from .orders import (
     reconstruct_status,
     sort_orders_for_placement,
 )
-from .signal import InsufficientWarmupError, SignalSnapshot, compute_live_signal
+from .signal import (
+    InsufficientWarmupError,
+    SignalComputationError,
+    SignalSnapshot,
+    compute_live_signal,
+    decision_age_seconds,
+)
 from ..logging_setup import set_cycle_id
 
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on how long after the decision bar's close a LIVE cycle may
+# still place orders. The backtest trades each signal right after its
+# bar closes; a cycle hours later is a different, unvalidated timing
+# (the MSK-scheduled-cron incident shape). 6h keeps room for a same-
+# morning manual recovery re-run while catching any wrong-timezone
+# schedule (the nearest such error lands at ≥21h).
+MAX_DECISION_AGE_S = 6 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -115,8 +129,13 @@ def run_live_cycle(
     total_timeout_s: float = TOTAL_TIMEOUT_S,
     sleep_fn: Callable[[float], None] = time.sleep,
     time_fn: Callable[[], float] = time.monotonic,
+    max_decision_age_s: Optional[float] = MAX_DECISION_AGE_S,
 ) -> LiveCycleResult:
-    """Execute one live cycle: reconstruct, plan, place, journal."""
+    """Execute one live cycle: reconstruct, plan, place, journal.
+
+    ``max_decision_age_s`` — refuse to place orders when the decision
+    bar closed more than this many seconds ago (``None`` disables; the
+    CLI exposes it as ``--max-signal-age-h``)."""
 
     started_at = datetime.now(timezone.utc)
     context = _build_context(broker)
@@ -171,6 +190,16 @@ def run_live_cycle(
             fee_rate=fee_rate,
             slippage_rate=slippage_rate,
         )
+        decision_age_s = decision_age_seconds(snap.asof)
+        if max_decision_age_s is not None and decision_age_s > max_decision_age_s:
+            raise SignalComputationError(
+                f"Decision bar closed {decision_age_s / 3600:.1f}h ago "
+                f"(limit {max_decision_age_s / 3600:.1f}h). The backtest "
+                f"trades each signal right after its bar closes; placing "
+                f"orders this late is an unvalidated timing. Check the "
+                f"cron schedule / host UTC clock; for a deliberate late "
+                f"manual entry raise --max-signal-age-h."
+            )
         balance = broker.fetch_balance_snapshot()
         equity = broker.estimate_total_equity_usd(snapshot=balance)
         ticker_prices = _gather_ticker_prices(broker, snap)
@@ -300,6 +329,7 @@ def run_live_cycle(
             submin_skips=submin_skips,
             pending_skips=pending_skips,
             order_results=order_results,
+            decision_age_s=decision_age_s,
         )
         return LiveCycleResult(
             cycle_id=main_cycle_id,
@@ -404,6 +434,34 @@ def _reconstruct_open_orders(
         )
 
         if order is None:
+            if entry.status == "pending_create":
+                # The create request never reached the exchange: nothing
+                # was placed, nothing to track. NOT a lost_track incident.
+                # The entry is removed (not marked terminal) so a
+                # same-day retry's state fast-path cannot skip the real
+                # placement.
+                logger.info(
+                    "Order %s was never created on the exchange "
+                    "(pending_create intent, no record found); resolving "
+                    "as not_created.", coid,
+                )
+                state.remove(coid)
+                resolved.append({
+                    "client_order_id": coid,
+                    "exchange_order_id": None,
+                    "symbol": entry.symbol,
+                    "side": entry.side,
+                    "intended_amount": entry.intended_amount,
+                    "terminal_status": "not_created",
+                    "filled_amount": 0.0,
+                    "filled_notional_quote": 0.0,
+                    "average_price": None,
+                    "fees_paid_quote": None,
+                    "placed_at": entry.placed_at,
+                    "terminal_at": utcnow_iso(),
+                    "error": None,
+                })
+                continue
             if entry.status == "lost_track":
                 logger.info(
                     "Order %s still lost_track — exchange has no record; "
@@ -461,6 +519,18 @@ def _reconstruct_open_orders(
             terminal = "partial" if filled > 0 else status_str
         else:
             # Still non-terminal — leave entry for next cycle to retry.
+            if entry.status == "pending_create":
+                # Now confirmed on the exchange: upgrade the intent so
+                # state reflects what is known.
+                state.put(replace(
+                    entry,
+                    status="open",
+                    exchange_order_id=(
+                        str(exchange_id) if exchange_id is not None
+                        else entry.exchange_order_id
+                    ),
+                    last_seen_at=utcnow_iso(),
+                ))
             logger.info(
                 "Order %s still non-terminal at reconstruction (status=%s); "
                 "leaving in state.", coid, status_str,
@@ -674,6 +744,7 @@ def _write_main_cycle(
     submin_skips: list[SkippedDelta],
     pending_skips: list[SkippedDelta],
     order_results: list[OrderResult],
+    decision_age_s: float,
 ) -> None:
     ended_at = datetime.now(timezone.utc)
     cycle = Cycle(
@@ -700,6 +771,7 @@ def _write_main_cycle(
             "basket_close": snap.basket_close,
             "asset_closes": snap.asset_closes,
             "basket_weights": dict(snap.basket_weights),
+            "decision_age_s": round(decision_age_s, 1),
         },
         basket_close_series=_basket_close_series_dict(snap.basket_close_tail),
         balance={

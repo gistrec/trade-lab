@@ -29,7 +29,12 @@ from .journal import (
     Cycle, JournalWriter, get_git_commit_short, get_python_version,
     new_cycle_id,
 )
-from .signal import InsufficientWarmupError, SignalSnapshot, compute_live_signal
+from .signal import (
+    InsufficientWarmupError,
+    SignalSnapshot,
+    compute_live_signal,
+    decision_age_seconds,
+)
 from ..logging_setup import set_cycle_id
 
 
@@ -91,6 +96,16 @@ def run_dry_cycle(
             candles_per_asset=candles_per_asset,
             fee_rate=fee_rate,
             slippage_rate=slippage_rate,
+        )
+
+        # Journaled only: a 6-hourly dry-run watch legitimately runs up
+        # to ~18h after the decision bar's close, so no threshold here —
+        # the live cycle's gate owns the hard limit. Stale DATA (a
+        # missing newest bar) already raised inside compute_live_signal.
+        decision_age_s = decision_age_seconds(snap.asof)
+        logger.info(
+            "signal decision age %.0fs", decision_age_s,
+            extra={"decision_age_s": round(decision_age_s, 1)},
         )
 
         balance = broker.fetch_balance_snapshot()
@@ -190,6 +205,7 @@ def run_dry_cycle(
             journal,
             _success_cycle(
                 cycle_id, started_at, context, snap, balance, equity, result,
+                decision_age_s=decision_age_s,
             ),
         )
     return result
@@ -290,6 +306,8 @@ def _success_cycle(
     balance: BalanceSnapshot,
     equity: float,
     result: DryRunResult,
+    *,
+    decision_age_s: float,
 ) -> Cycle:
     ended_at = datetime.now(timezone.utc)
     return Cycle(
@@ -316,6 +334,7 @@ def _success_cycle(
             "basket_close": snap.basket_close,
             "asset_closes": snap.asset_closes,
             "basket_weights": dict(snap.basket_weights),
+            "decision_age_s": round(decision_age_s, 1),
         },
         basket_close_series=_basket_close_series(snap.basket_close_tail),
         balance={

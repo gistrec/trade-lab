@@ -78,9 +78,10 @@ class BrokerError(RuntimeError):
 
 
 class ConnectionRefused(BrokerError):
-    """Raised at construction time if the broker refuses to point at
-    mainnet without explicit operator clearance. Distinct from network
-    errors so paper-trading scripts can fail loudly on this case."""
+    """Raised when the broker refuses a mainnet action without explicit
+    operator clearance — at construction (two-flag gate) or at order
+    placement (third flag). Distinct from network errors so
+    paper-trading scripts can fail loudly on this case."""
 
 
 class _CcxtExchange(Protocol):
@@ -108,7 +109,6 @@ class _CcxtExchange(Protocol):
         self, id: str, symbol: Optional[str] = ...,
         params: Optional[dict] = ...,
     ) -> dict: ...
-    def fetch_open_orders(self, symbol: Optional[str] = ...) -> list: ...
     def fetch_my_trades(
         self, symbol: Optional[str] = ...,
         since: Optional[int] = ..., limit: Optional[int] = ...,
@@ -627,13 +627,25 @@ class Broker:
         means mapping its param here AND in :meth:`fetch_order_by_coid`,
         then extending that list.
         """
+        # Full three-flag gate: a hand-built config skips both
+        # load_paper_config and connect(), the two ALLOW_MAINNET checks.
+        if not self.config.sandbox and not (
+            self.config.allow_mainnet and self.config.mainnet_live_orders
+        ):
+            raise ConnectionRefused(
+                "Refusing create_order on MAINNET: placing real orders "
+                "requires TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true. "
+                "SANDBOX=false + ALLOW_MAINNET=true unlock read paths only."
+            )
         if side not in ("buy", "sell"):
             raise ValueError(f"side must be buy or sell, got {side!r}")
         if amount <= 0:
             raise ValueError(f"amount must be positive, got {amount}")
         # NOTE: create_order is timed but deliberately NOT retried here — a
-        # transient failure is resolved by the reconstruction path (query by
-        # clientOrderId next cycle), which keeps placement idempotency-safe.
+        # blind retry could double-place. A create that dies in flight is
+        # covered by the pending_create intent orders.py persists before
+        # this call: a same-day re-run recovers via query-before-place,
+        # later cycles via reconstruction.
         return self._timed_call(
             "create_order", self.exchange.create_order,
             symbol, "market", side, amount, None,
@@ -661,17 +673,6 @@ class Broker:
             client_order_id, symbol,
             {"origClientOrderId": client_order_id},
         )
-
-    def fetch_open_orders(self, symbol: Optional[str] = None) -> list:
-        """Open orders, optionally filtered to one symbol.
-
-        Used at cycle startup to discover orders that exist on the
-        exchange but are not in our local state — for example because
-        the state file was wiped or a previous cycle crashed before
-        persisting.
-        """
-        return self._read_call(
-            "fetch_open_orders", self.exchange.fetch_open_orders, symbol)
 
     def fetch_my_trades_since(
         self,

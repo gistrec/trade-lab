@@ -7,6 +7,7 @@ network, no API keys.
 """
 from __future__ import annotations
 
+import functools
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -18,8 +19,15 @@ import pytest
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.journal import JournalWriter
-from trade_lab.execution.live_cycle import run_live_cycle
+from trade_lab.execution.live_cycle import run_live_cycle as _real_run_live_cycle
 from trade_lab.execution.order_state import OrderStateEntry, OrderStateStore
+
+# The stub's candles end at yesterday's UTC midnight, so inside these e2e
+# tests the decision bar's age equals the wall-clock hour of the run — the
+# 6h decision-age gate would flake by time of day. Disabled here; the gate
+# has its own deterministic tests (decision-age section below), which call
+# _real_run_live_cycle via the lc module.
+run_live_cycle = functools.partial(_real_run_live_cycle, max_decision_age_s=None)
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +103,12 @@ class _LiveStub:
     def fetch_status(self): return {"status": "ok"}
 
     def fetch_ohlcv(self, symbol, timeframe="1d", limit=400):
+        # End at yesterday's UTC midnight — the most recently closed daily
+        # bar — so the signal's asof-freshness guard passes at any hour.
+        end = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1)
         ts = pd.date_range(
-            "2023-01-01", periods=len(self._closes), freq="1D", tz="UTC",
-        ).astype("int64") // 10**6
+            end=end, periods=len(self._closes), freq="1D", tz="UTC",
+        ).as_unit("ns").astype("int64") // 10**6
         rows = [[int(t), c, c, c, c, 1.0] for t, c in zip(ts, self._closes)]
         return rows[-limit:]
 
@@ -153,8 +164,6 @@ class _LiveStub:
         intended = matching[0]["amount"] if matching else 0.001
         return _closed_order(coid, symbol, filled=intended)
 
-    def fetch_open_orders(self, symbol=None): return []
-
     def fetch_my_trades(self, symbol=None, since=None, limit=None):
         return list(self.my_trades)
 
@@ -190,6 +199,74 @@ def _read_cycles(tmp_path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Decision-age gate: a live cycle must run shortly after the decision
+# bar's close — anything later is a timing the backtest never validated
+# ---------------------------------------------------------------------------
+
+
+def _hand_snap(asof):
+    from trade_lab.execution.signal import SignalSnapshot
+    return SignalSnapshot(
+        asof=asof, signal=1.0, basket_close=150.0,
+        asset_closes={"BTC": 50_000.0, "ETH": 50_000.0},
+        sma_gate_open=True, n_assets_in_basket=2,
+        basket_weights={"BTC": 0.5, "ETH": 0.5},
+    )
+
+
+def test_live_cycle_refuses_stale_decision_bar(tmp_path, monkeypatch):
+    """The MSK-cron scenario: the signal itself is data-fresh, but the
+    decision bar closed ~21h before the cycle runs (cron scheduled in
+    the wrong timezone). Placing orders then is a different, unvalidated
+    strategy timing — the cycle must fail loud with zero orders."""
+    from trade_lab.execution import live_cycle as lc
+    from trade_lab.execution.signal import SignalComputationError
+
+    stale_asof = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=45)
+    monkeypatch.setattr(
+        lc, "compute_live_signal", lambda *a, **k: _hand_snap(stale_asof),
+    )
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    with pytest.raises(SignalComputationError, match=r"[Dd]ecision bar"):
+        lc.run_live_cycle(              # real default gate, not the partial
+            _broker(stub), journal=_journal(tmp_path),
+            state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert stub.create_order_calls == []
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "SignalComputationError"
+
+
+def test_live_cycle_accepts_fresh_decision_bar_and_journals_age(
+        tmp_path, monkeypatch):
+    """A decision bar that closed 45 minutes ago (the 00:45 UTC cron
+    shape) passes the gate, and the journaled signal block carries the
+    measured decision age for schedule-drift monitoring."""
+    from trade_lab.execution import live_cycle as lc
+
+    fresh_asof = (
+        pd.Timestamp.now(tz="UTC")
+        - pd.Timedelta(days=1) - pd.Timedelta(minutes=45)
+    )
+    monkeypatch.setattr(
+        lc, "compute_live_signal", lambda *a, **k: _hand_snap(fresh_asof),
+    )
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    result = lc.run_live_cycle(         # real default gate, not the partial
+        _broker(stub), journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.outcome == "success"
+    cycle = _read_cycles(tmp_path)[-1]
+    age = cycle["signal"]["decision_age_s"]
+    assert age == pytest.approx(45 * 60, abs=120)
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +732,8 @@ def test_crash_between_create_and_persist_recovered_next_cycle(tmp_path):
     fails loud — but the order must land in state as 'open' so cycle 2's
     reconstruction finds the fill and journals it. Before the fix the
     order was invisible forever: no state entry, no journal record, the
-    fill silently dissolved into the balance, and fetch_open_orders
-    discovery does not exist."""
+    fill silently dissolved into the balance, and no startup open-order
+    discovery exists."""
     from trade_lab.execution.clientorder import make_client_order_id
 
     state = _state(tmp_path)
@@ -957,6 +1034,96 @@ def test_day_two_rerun_after_filled_day_one_places_nothing(tmp_path, monkeypatch
         "with fills reflected in the balance, the day-2 delta must be "
         "below exchange minimums — a placement here doubles the position"
     )
+
+
+def test_timeout_on_create_itself_recovered_next_cycle(tmp_path):
+    """The other half of M3: the create *request* dies in flight after
+    reaching Binance. Cycle 1 fails loud leaving a 'pending_create'
+    intent; the next cycle's reconstruction finds the order by coid and
+    journals its fill. Before the fix there was no state entry at all —
+    the fill silently dissolved into the balance."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+
+    # --- Cycle 1: create raises after the request reached the exchange --
+    stub1 = _LiveStub(
+        basket=("BTC",), create_raises=ccxt.RequestTimeout("response lost"),
+    )
+    clock = _MockClock()
+    with pytest.raises(ccxt.RequestTimeout):
+        run_live_cycle(
+            broker=_broker(stub1, basket=("BTC",)),
+            journal=_journal(tmp_path), state=state,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert len(stub1.create_order_calls) == 1
+    entry = state.get(coid)
+    assert entry is not None, "lost create must be visible in state"
+    assert entry.status == "pending_create"
+
+    # --- Cycle 2: the order DID land on the exchange ---------------------
+    stub2 = _LiveStub(basket=("BTC",))
+    stub2.fetch_order_responses[coid] = [
+        _closed_order(coid, "BTC/USDT", filled=entry.intended_amount),
+    ]
+    result = run_live_cycle(
+        broker=_broker(stub2, basket=("BTC",)),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    assert stub2.create_order_calls == []          # recovered, not re-placed
+    assert state.get(coid).status == "closed"
+    recon = [c for c in _read_cycles(tmp_path) if c["outcome"] == "reconstructed"][-1]
+    assert recon["orders_executed"][0]["client_order_id"] == coid
+    assert recon["orders_executed"][0]["terminal_status"] == "closed"
+
+
+def test_never_created_pending_resolves_clean_and_same_day_retry_places(tmp_path):
+    """Create timed out and the request never reached the exchange.
+    Reconstruction must resolve the pending intent as 'not_created' —
+    a clean resolution, NOT a lost_track incident — and remove it from
+    state so a same-day retry's state fast-path cannot skip the real
+    placement."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+
+    stub1 = _LiveStub(
+        basket=("BTC",), create_raises=ccxt.RequestTimeout("never arrived"),
+    )
+    clock = _MockClock()
+    with pytest.raises(ccxt.RequestTimeout):
+        run_live_cycle(
+            broker=_broker(stub1, basket=("BTC",)),
+            journal=_journal(tmp_path), state=state,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert state.get(coid).status == "pending_create"
+
+    # --- Same-day retry: exchange has no record of the coid --------------
+    stub2 = _LiveStub(basket=("BTC",))
+    result = run_live_cycle(
+        broker=_broker(stub2, basket=("BTC",)),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    assert result.lost_track_count == 0, "not an incident: nothing was placed"
+    recon = [c for c in _read_cycles(tmp_path) if c["outcome"] == "reconstructed"][-1]
+    assert recon["orders_executed"][0]["terminal_status"] == "not_created"
+    assert recon["orders_executed"][0]["error"] is None
+    # The retry re-placed the order for real — the resolved intent must
+    # not satisfy the state fast-path.
+    assert len(stub2.create_order_calls) == 1
+    assert state.get(coid).status == "closed"
 
 
 def test_reconstruction_lost_track(tmp_path):

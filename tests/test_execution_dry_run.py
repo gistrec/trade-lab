@@ -47,9 +47,12 @@ class _StubExchange:
         return {"status": "ok"}
 
     def fetch_ohlcv(self, symbol, timeframe="1d", limit=400):
+        # End at yesterday's UTC midnight — the most recently closed daily
+        # bar — so the signal's asof-freshness guard passes at any hour.
+        end = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1)
         timestamps = pd.date_range(
-            "2023-01-01", periods=len(self._closes), freq="1D", tz="UTC",
-        ).astype("int64") // 10**6
+            end=end, periods=len(self._closes), freq="1D", tz="UTC",
+        ).as_unit("ns").astype("int64") // 10**6
         rows = [
             [int(ts), c, c, c, c, 1.0]
             for ts, c in zip(timestamps, self._closes)

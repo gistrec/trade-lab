@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 TERMINAL_STATUSES = frozenset({"closed", "canceled", "rejected", "expired"})
-NON_TERMINAL_STATUSES = frozenset({"open", "partial", "timeout", "lost_track"})
+NON_TERMINAL_STATUSES = frozenset(
+    {"pending_create", "open", "partial", "timeout", "lost_track"}
+)
 ALL_STATUSES = TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 
 # Reserved root key that stamps which environment (exchange + sandbox
@@ -182,6 +184,24 @@ class OrderStateStore:
             for coid, entry in self.all_entries().items()
             if entry.status not in TERMINAL_STATUSES
         }
+
+    def remove(self, client_order_id: str) -> None:
+        """Delete an entry. Missing IDs are a no-op.
+
+        Used when the exchange authoritatively has no record of a
+        ``pending_create`` intent: keeping any record would either
+        zombie reconstruction (non-terminal) or make the state
+        fast-path skip a real same-day retry (terminal).
+        """
+        if client_order_id == _META_KEY:
+            raise ValueError(
+                f"{_META_KEY!r} is a reserved metadata key, "
+                f"not a clientOrderId."
+            )
+        state = self._read()
+        if client_order_id in state:
+            del state[client_order_id]
+            self._write_atomic(state)
 
     def mark_terminal(self, client_order_id: str, status: str) -> None:
         """Update an existing entry's status to a terminal value.

@@ -273,7 +273,7 @@ def test_all_known_statuses_covered():
     """Quick guard: if anyone adds a status, it must land in one bucket."""
     expected = {
         "closed", "canceled", "rejected", "expired",
-        "open", "partial", "timeout", "lost_track",
+        "pending_create", "open", "partial", "timeout", "lost_track",
     }
     assert TERMINAL_STATUSES | NON_TERMINAL_STATUSES == expected
 
