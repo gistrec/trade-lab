@@ -1118,6 +1118,81 @@ def test_app_renders_warmup_banner_not_incident_for_skipped_warmup(
     assert any("No failed/partial cycles" in s for s in successes), successes
 
 
+def test_incidents_section_orders_alerts_success_info_warning(
+    tmp_path, monkeypatch,
+):
+    """The Incidents section reads top-down in ascending severity:
+    green all-clear, then blue context notes, then yellow warnings.
+    Fixture fires all three: healthy cycles (green), a latest dry-run
+    with planned sub-min drift (blue), two distinct git commits in the
+    window (yellow)."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, commit, drift):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": "success", "error": None,
+            "git_commit": commit, "python_version": "3.11.0",
+            "context": {"mode": "dry_run", "exchange": "binance",
+                        "sandbox": True, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": None, "basket_close_series": None, "balance": None,
+            "equity_usd": None, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": drift,
+            # None = dry-run (is_live_cycle keys on orders_executed).
+            "orders_executed": None, "schema_version": 2,
+        }
+
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        _cycle("c1", now - timedelta(hours=6), "aaaa111", 0.0),
+        _cycle("c2", now, "bbbb222", 1.16),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    from streamlit.testing.v1 import element_tree as et
+
+    def _walk(node):
+        children = getattr(node, "children", None)
+        if children:
+            for child in children.values():
+                yield from _walk(child)
+        elif isinstance(node, et.AlertBase):
+            yield node
+
+    markers = {
+        "No failed/partial cycles": "success",
+        "could not place": "info",
+        "Observation window spans": "warning",
+    }
+    seq = []
+    for el in _walk(app.main):
+        text = str(el.value)
+        for marker, kind in markers.items():
+            if marker in text:
+                seq.append(kind)
+    assert seq == ["success", "info", "warning"], (
+        f"Incidents must read green -> blue -> yellow, got {seq}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Recent-cycles collapse
 # ---------------------------------------------------------------------------

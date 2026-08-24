@@ -388,6 +388,22 @@ def _render_status(reader: JournalReader) -> None:
     _render_live_cron_health(reader)
     _render_incidents(reader)
 
+    # Below the incident blocks the section reads in ascending severity:
+    # blue context notes before yellow warnings.
+    # Live-only: a dry-run skips nothing it meant to send, so counting its
+    # sub-min deltas would grow this number with observation time rather
+    # than with trading. The dry-run case gets a point reading instead.
+    drift = reader.cumulative_skipped_drift()
+    if drift <= 0:
+        planned_drift = reader.latest_skipped_drift()
+        if planned_drift > 0:
+            st.info(
+                f"Latest cycle could not place ${planned_drift:,.2f} of its "
+                f"planned allocation — below the exchange minimum notional / "
+                f"lot step. This is a plan, not a divergence: no live order "
+                f"cron has run yet, so nothing was skipped in execution."
+            )
+
     commits = _distinct_commits(reader.cycles(n=500))
     if len(commits) > 1:
         links = ", ".join(_commit_link(c) for c in commits)
@@ -398,25 +414,12 @@ def _render_status(reader: JournalReader) -> None:
             f"boundary with care."
         )
 
-    # Live-only: a dry-run skips nothing it meant to send, so counting its
-    # sub-min deltas would grow this number with observation time rather
-    # than with trading. The dry-run case gets a point reading below instead.
-    drift = reader.cumulative_skipped_drift()
     if drift > 0:
         st.warning(
             f"Cumulative skipped-order drift: ${drift:,.2f} across "
             f"{reader.live_cycle_count()} live cycles. Sub-min divergence is "
             f"normal on tiny balances; investigate if it grows steadily."
         )
-    else:
-        planned_drift = reader.latest_skipped_drift()
-        if planned_drift > 0:
-            st.info(
-                f"Latest cycle could not place ${planned_drift:,.2f} of its "
-                f"planned allocation — below the exchange minimum notional / "
-                f"lot step. This is a plan, not a divergence: no live order "
-                f"cron has run yet, so nothing was skipped in execution."
-            )
 
     _render_read_stats(stats, reader.path)
 
@@ -583,10 +586,21 @@ def _render_incidents(reader: JournalReader) -> None:
 
     st.subheader("Incidents (last 500 cycles)")
 
+    # The section reads top-down in ascending severity: green all-clear,
+    # blue context notes, yellow warnings, red errors.
     if not incidents and not open_orders and not gap_recent:
         st.success(
             "No failed/partial cycles, unresolved orders, or recent cadence "
             "gaps in the window."
+        )
+
+    if gap_overdue and not gap_recent:
+        st.info(
+            f"Longest cadence gap in the window: {gap.seconds / 3600:.1f}h "
+            f"({_humanize_iso(gap.started.isoformat())} → "
+            f"{_humanize_iso(gap.ended.isoformat())}), "
+            f"{_humanize_relative(gap.ended.isoformat())} — cadence has been "
+            f"healthy since, so this is history, not an open incident."
         )
 
     if incidents:
@@ -604,6 +618,16 @@ def _render_incidents(reader: JournalReader) -> None:
         } for i in incidents]
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
+    if gap_recent:
+        st.warning(
+            f"Largest gap between consecutive cycles: {gap.seconds / 3600:.1f}h "
+            f"({_humanize_iso(gap.started.isoformat())} → "
+            f"{_humanize_iso(gap.ended.isoformat())}, > "
+            f"{STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
+            f"cycle may have been missed mid-window — the single-latest "
+            f"Staleness check cannot see this."
+        )
+
     if open_orders:
         st.error(
             f"{len(open_orders)} executed order(s) NOT in a resolved terminal "
@@ -619,24 +643,6 @@ def _render_incidents(reader: JournalReader) -> None:
             "client_order_id": o["client_order_id"],
         } for o in open_orders]
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-    if gap_recent:
-        st.warning(
-            f"Largest gap between consecutive cycles: {gap.seconds / 3600:.1f}h "
-            f"({_humanize_iso(gap.started.isoformat())} → "
-            f"{_humanize_iso(gap.ended.isoformat())}, > "
-            f"{STALE_MULTIPLIER:g}× expected {EXPECTED_INTERVAL_S}s). A "
-            f"cycle may have been missed mid-window — the single-latest "
-            f"Staleness check cannot see this."
-        )
-    elif gap_overdue:
-        st.info(
-            f"Longest cadence gap in the window: {gap.seconds / 3600:.1f}h "
-            f"({_humanize_iso(gap.started.isoformat())} → "
-            f"{_humanize_iso(gap.ended.isoformat())}), "
-            f"{_humanize_relative(gap.ended.isoformat())} — cadence has been "
-            f"healthy since, so this is history, not an open incident."
-        )
 
     # The structural SMA(200) warm-up notice is NOT rendered here: cycles
     # with outcome='skipped_warmup' are healthy testnet states, not
