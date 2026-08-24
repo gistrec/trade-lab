@@ -22,9 +22,19 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from .allocator import compute_target_allocation
-from .broker import BalanceSnapshot, Broker, BrokerError, MarketConstraints
-from .delta import compute_delta_plan, total_skipped_quote_drift
+from .broker import BalanceSnapshot, Broker
+from .cycle_common import (
+    balance_dict,
+    basket_close_series_dict,
+    build_context,
+    failed_cycle,
+    intent_dict,
+    run_read_phase,
+    signal_dict,
+    skipped_dict,
+    skipped_warmup_cycle,
+)
+from .delta import total_skipped_quote_drift
 from .journal import (
     Cycle, JournalWriter, get_git_commit_short, get_python_version,
     new_cycle_id,
@@ -86,7 +96,7 @@ def run_dry_cycle(
     cycle_id = new_cycle_id()
     set_cycle_id(cycle_id)  # tag every log line in this cycle with the id
     started_at = datetime.now(timezone.utc)
-    context = _build_context(broker)
+    context = build_context(broker, mode="dry_run")
 
     try:
         snap = compute_live_signal(
@@ -108,65 +118,20 @@ def run_dry_cycle(
             extra={"decision_age_s": round(decision_age_s, 1)},
         )
 
-        balance = broker.fetch_balance_snapshot()
-        equity = broker.estimate_total_equity_usd(snapshot=balance)
-
-        # Use the broker's ticker prices, not the candle closes from the
-        # signal step — the broker's prices are the freshest and reflect
-        # what the order will actually fill against.
-        ticker_prices: dict[str, float] = {}
-        quote = broker.config.quote_currency
-        for sym in broker.config.basket:
-            try:
-                ticker_prices[sym] = broker.fetch_ticker_price(f"{sym}/{quote}")
-            except BrokerError as exc:
-                logger.warning("Ticker for %s failed: %s — using candle close.", sym, exc)
-                # Direct indexing: a missing basket symbol must raise
-                # here, not become a 0.0 price inside the allocator.
-                ticker_prices[sym] = snap.asset_closes[sym]
-
-        allocation = compute_target_allocation(
-            signal=snap.signal,
-            total_equity=equity,
-            prices=ticker_prices,
-            basket=broker.config.basket,
-            weights=snap.basket_weights,
-        )
-
-        constraints = _gather_constraints(broker, broker.config.basket, quote)
-
-        plan = compute_delta_plan(
-            allocation=allocation,
-            current_holdings=balance.asset_totals,
-            constraints=constraints,
-            quote_currency=quote,
-        )
-
-        current_holdings_quote = {
-            sym: float(balance.asset_totals.get(sym, 0.0)) * ticker_prices[sym]
-            for sym in broker.config.basket
-        }
+        read = run_read_phase(broker, snap, log=logger)
+        balance = read.balance
+        equity = read.equity
 
         result = DryRunResult(
             asof=snap.asof,
             signal=snap.signal,
             sma_gate_open=snap.sma_gate_open,
             total_equity=equity,
-            target_allocation=allocation.target_quote_per_asset,
-            current_holdings_quote=current_holdings_quote,
-            orders_planned=[
-                {"symbol": o.symbol, "side": o.side, "base_amount": o.base_amount,
-                 "notional_quote": o.notional_quote, "price_used": o.price_used}
-                for o in plan.orders
-            ],
-            orders_skipped=[
-                {"symbol": s.symbol, "desired_side": s.desired_side,
-                 "desired_amount": s.desired_amount,
-                 "desired_notional": s.desired_notional,
-                 "reason": s.reason}
-                for s in plan.skipped
-            ],
-            total_skipped_quote_drift=total_skipped_quote_drift(plan),
+            target_allocation=read.allocation.target_quote_per_asset,
+            current_holdings_quote=read.current_holdings_quote,
+            orders_planned=[intent_dict(o) for o in read.plan.orders],
+            orders_skipped=[skipped_dict(s) for s in read.plan.skipped],
+            total_skipped_quote_drift=total_skipped_quote_drift(read.plan),
         )
     except InsufficientWarmupError as exc:
         # Environment branch lives HERE (the orchestrator), never inside
@@ -180,12 +145,14 @@ def run_dry_cycle(
         # way — no plan exists, and the caller must not think one does.
         if journal is not None:
             context["exchange_latency"] = broker.exchange_call_stats()
+            ended_at = datetime.now(timezone.utc)
             if broker.config.sandbox is True:
-                cycle = _skipped_warmup_cycle(
-                    cycle_id, started_at, context, exc,
+                cycle = skipped_warmup_cycle(
+                    cycle_id, started_at, ended_at, context,
+                    skip_reason=exc.reason_dict(),
                 )
             else:
-                cycle = _failed_cycle(cycle_id, started_at, context, exc)
+                cycle = failed_cycle(cycle_id, started_at, ended_at, context, exc)
             _try_write(journal, cycle)
         raise
     except BaseException as exc:
@@ -195,7 +162,13 @@ def run_dry_cycle(
         # the unconditional re-raise preserves interrupt/exit semantics.
         if journal is not None:
             context["exchange_latency"] = broker.exchange_call_stats()
-            _try_write(journal, _failed_cycle(cycle_id, started_at, context, exc))
+            _try_write(
+                journal,
+                failed_cycle(
+                    cycle_id, started_at, datetime.now(timezone.utc),
+                    context, exc,
+                ),
+            )
         raise
 
     if journal is not None:
@@ -211,18 +184,6 @@ def run_dry_cycle(
     return result
 
 
-def _build_context(broker: Broker) -> dict:
-    return {
-        # Durable live/dry marker for read-only monitoring (the health
-        # server), mirroring live_cycle._build_context. Metadata only.
-        "mode": "dry_run",
-        "exchange": broker.config.exchange_id,
-        "sandbox": broker.config.sandbox,
-        "quote_currency": broker.config.quote_currency,
-        "basket": list(broker.config.basket),
-    }
-
-
 def _try_write(journal: JournalWriter, cycle: Cycle) -> None:
     """Append a cycle; log and swallow any error.
 
@@ -234,68 +195,6 @@ def _try_write(journal: JournalWriter, cycle: Cycle) -> None:
         journal.append(cycle)
     except Exception as exc:
         logger.error("Could not write journal entry %s: %s", cycle.cycle_id, exc)
-
-
-def _failed_cycle(
-    cycle_id: str, started_at: datetime, context: dict, exc: BaseException,
-) -> Cycle:
-    ended_at = datetime.now(timezone.utc)
-    return Cycle(
-        cycle_id=cycle_id,
-        started_at=started_at.isoformat(),
-        ended_at=ended_at.isoformat(),
-        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
-        outcome="failed",
-        error={"type": type(exc).__name__, "message": str(exc)[:512]},
-        git_commit=get_git_commit_short(),
-        python_version=get_python_version(),
-        context=context,
-        signal=None,
-        basket_close_series=None,
-        balance=None,
-        equity_usd=None,
-        target_allocation=None,
-        current_holdings_quote=None,
-        orders_planned=None,
-        orders_skipped=None,
-        total_skipped_quote_drift=None,
-    )
-
-
-def _skipped_warmup_cycle(
-    cycle_id: str,
-    started_at: datetime,
-    context: dict,
-    exc: InsufficientWarmupError,
-) -> Cycle:
-    """Testnet-only first-class skip: the basket structurally cannot warm
-    SMA(200) (~monthly candle wipe), so this is a healthy state of that
-    environment, not an incident. ``error`` stays None — monitoring and
-    health checks key incidents off ``outcome``/``error`` — and the
-    depth facts go into the explicit ``skip_reason`` block instead.
-    """
-    ended_at = datetime.now(timezone.utc)
-    return Cycle(
-        cycle_id=cycle_id,
-        started_at=started_at.isoformat(),
-        ended_at=ended_at.isoformat(),
-        duration_ms=int((ended_at - started_at).total_seconds() * 1000),
-        outcome="skipped_warmup",
-        error=None,
-        git_commit=get_git_commit_short(),
-        python_version=get_python_version(),
-        context=context,
-        signal=None,
-        basket_close_series=None,
-        balance=None,
-        equity_usd=None,
-        target_allocation=None,
-        current_holdings_quote=None,
-        orders_planned=None,
-        orders_skipped=None,
-        total_skipped_quote_drift=None,
-        skip_reason=exc.reason_dict(),
-    )
 
 
 def _success_cycle(
@@ -320,30 +219,9 @@ def _success_cycle(
         git_commit=get_git_commit_short(),
         python_version=get_python_version(),
         context=context,
-        signal={
-            "asof": _ts_iso(snap.asof),
-            "ladder_value": snap.signal,
-            "sma_gate_open": snap.sma_gate_open,
-            "sma_value": snap.sma_value,
-            "per_lookback_states": {
-                str(k): int(v) for k, v in snap.per_lookback_states.items()
-            },
-            "per_lookback_returns": {
-                str(k): float(v) for k, v in snap.per_lookback_returns.items()
-            },
-            "basket_close": snap.basket_close,
-            "asset_closes": snap.asset_closes,
-            "basket_weights": dict(snap.basket_weights),
-            "decision_age_s": round(decision_age_s, 1),
-        },
-        basket_close_series=_basket_close_series(snap.basket_close_tail),
-        balance={
-            "quote_currency": balance.quote_currency,
-            "quote_total": balance.quote_total,
-            "quote_free": balance.quote_free,
-            "quote_used": balance.quote_used,
-            "asset_totals": balance.asset_totals,
-        },
+        signal=signal_dict(snap, decision_age_s=decision_age_s),
+        basket_close_series=basket_close_series_dict(snap.basket_close_tail),
+        balance=balance_dict(balance),
         equity_usd=equity,
         target_allocation=dict(result.target_allocation),
         current_holdings_quote=dict(result.current_holdings_quote),
@@ -351,44 +229,6 @@ def _success_cycle(
         orders_skipped=list(result.orders_skipped),
         total_skipped_quote_drift=result.total_skipped_quote_drift,
     )
-
-
-def _ts_iso(ts) -> str:
-    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-
-
-def _basket_close_series(tail) -> Optional[dict]:
-    if tail is None or len(tail) == 0:
-        return None
-    # 6 decimals on an index normalized to start at 100 — full-precision
-    # floats here roughly double the serialized cycle size for nothing.
-    return {
-        "start_ts": _ts_iso(tail.index[0]),
-        "values": [round(float(v), 6) for v in tail.tolist()],
-    }
-
-
-def _gather_constraints(
-    broker: Broker, basket: Sequence[str], quote: str,
-) -> dict[str, MarketConstraints]:
-    """Pull min-amount / min-cost constraints for every basket pair.
-
-    A pair that fails to load constraints is **excluded from the
-    constraint map** so the delta planner treats it as "trust the
-    allocator" rather than blocking. Logged as a warning so the
-    operator sees which pairs lacked exchange-side metadata.
-    """
-    constraints: dict[str, MarketConstraints] = {}
-    for sym in basket:
-        pair = f"{sym}/{quote}"
-        try:
-            constraints[pair] = broker.fetch_market_constraints(pair)
-        except BrokerError as exc:
-            logger.warning(
-                "Constraints for %s unavailable: %s — sub-min filter "
-                "disabled for this pair.", pair, exc,
-            )
-    return constraints
 
 
 def print_dry_run(result: DryRunResult, *, quote: str) -> None:
