@@ -7,6 +7,7 @@ network, no API keys.
 """
 from __future__ import annotations
 
+import functools
 import json
 from datetime import datetime, timezone
 
@@ -18,8 +19,15 @@ import pytest
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.journal import JournalWriter
-from trade_lab.execution.live_cycle import run_live_cycle
+from trade_lab.execution.live_cycle import run_live_cycle as _real_run_live_cycle
 from trade_lab.execution.order_state import OrderStateEntry, OrderStateStore
+
+# The stub's candles end at yesterday's UTC midnight, so inside these e2e
+# tests the decision bar's age equals the wall-clock hour of the run — the
+# 6h decision-age gate would flake by time of day. Disabled here; the gate
+# has its own deterministic tests (decision-age section below), which call
+# _real_run_live_cycle via the lc module.
+run_live_cycle = functools.partial(_real_run_live_cycle, max_decision_age_s=None)
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +103,12 @@ class _LiveStub:
     def fetch_status(self): return {"status": "ok"}
 
     def fetch_ohlcv(self, symbol, timeframe="1d", limit=400):
+        # End at yesterday's UTC midnight — the most recently closed daily
+        # bar — so the signal's asof-freshness guard passes at any hour.
+        end = pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1)
         ts = pd.date_range(
-            "2023-01-01", periods=len(self._closes), freq="1D", tz="UTC",
-        ).astype("int64") // 10**6
+            end=end, periods=len(self._closes), freq="1D", tz="UTC",
+        ).as_unit("ns").astype("int64") // 10**6
         rows = [[int(t), c, c, c, c, 1.0] for t, c in zip(ts, self._closes)]
         return rows[-limit:]
 
@@ -190,6 +201,74 @@ def _read_cycles(tmp_path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Decision-age gate: a live cycle must run shortly after the decision
+# bar's close — anything later is a timing the backtest never validated
+# ---------------------------------------------------------------------------
+
+
+def _hand_snap(asof):
+    from trade_lab.execution.signal import SignalSnapshot
+    return SignalSnapshot(
+        asof=asof, signal=1.0, basket_close=150.0,
+        asset_closes={"BTC": 50_000.0, "ETH": 50_000.0},
+        sma_gate_open=True, n_assets_in_basket=2,
+        basket_weights={"BTC": 0.5, "ETH": 0.5},
+    )
+
+
+def test_live_cycle_refuses_stale_decision_bar(tmp_path, monkeypatch):
+    """The MSK-cron scenario: the signal itself is data-fresh, but the
+    decision bar closed ~21h before the cycle runs (cron scheduled in
+    the wrong timezone). Placing orders then is a different, unvalidated
+    strategy timing — the cycle must fail loud with zero orders."""
+    from trade_lab.execution import live_cycle as lc
+    from trade_lab.execution.signal import SignalComputationError
+
+    stale_asof = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=45)
+    monkeypatch.setattr(
+        lc, "compute_live_signal", lambda *a, **k: _hand_snap(stale_asof),
+    )
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    with pytest.raises(SignalComputationError, match=r"[Dd]ecision bar"):
+        lc.run_live_cycle(              # real default gate, not the partial
+            _broker(stub), journal=_journal(tmp_path),
+            state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert stub.create_order_calls == []
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    assert cycle["error"]["type"] == "SignalComputationError"
+
+
+def test_live_cycle_accepts_fresh_decision_bar_and_journals_age(
+        tmp_path, monkeypatch):
+    """A decision bar that closed 45 minutes ago (the 00:45 UTC cron
+    shape) passes the gate, and the journaled signal block carries the
+    measured decision age for schedule-drift monitoring."""
+    from trade_lab.execution import live_cycle as lc
+
+    fresh_asof = (
+        pd.Timestamp.now(tz="UTC")
+        - pd.Timedelta(days=1) - pd.Timedelta(minutes=45)
+    )
+    monkeypatch.setattr(
+        lc, "compute_live_signal", lambda *a, **k: _hand_snap(fresh_asof),
+    )
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    result = lc.run_live_cycle(         # real default gate, not the partial
+        _broker(stub), journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.outcome == "success"
+    cycle = _read_cycles(tmp_path)[-1]
+    age = cycle["signal"]["decision_age_s"]
+    assert age == pytest.approx(45 * 60, abs=120)
 
 
 # ---------------------------------------------------------------------------

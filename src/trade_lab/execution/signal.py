@@ -113,6 +113,7 @@ def compute_live_signal(
     fetch_candles: Optional[
         Callable[[Broker, str, int], pd.DataFrame]
     ] = None,
+    now: Optional[pd.Timestamp] = None,
 ) -> SignalSnapshot:
     """Run the deployable strategy on freshly-fetched candles.
 
@@ -129,6 +130,9 @@ def compute_live_signal(
     ``fetch_candles`` defaults to ``_fetch_recent_candles`` via the
     broker's underlying CCXT exchange. Tests pass a stub returning
     canned OHLCV frames.
+
+    ``now`` (tz-aware UTC) defaults to the wall clock; tests inject it
+    to pin the freshness guard against fixed historical frames.
     """
     required = required_basket_bars(lookbacks, sma_filter_period)
     # +1: a live fetch's last row is the in-progress daily candle, which
@@ -151,7 +155,9 @@ def compute_live_signal(
     # (signals.shift(1) in the engine); including the partial bar
     # shifts every lookback window by one bar and lets intraday noise
     # into the SMA gate. Drop it.
-    cutoff = pd.Timestamp.now(tz="UTC").normalize()
+    if now is None:
+        now = pd.Timestamp.now(tz="UTC")
+    cutoff = now.normalize()
     for sym in broker.config.basket:
         pair = f"{sym}/{quote}"
         try:
@@ -217,6 +223,19 @@ def compute_live_signal(
     if signal_series.empty:
         raise SignalComputationError("Strategy returned an empty signal series.")
     asof = signal_series.index[-1]
+    # Freshness: asof must be the most recently CLOSED daily bar. Klines
+    # that are uniformly stale across all assets (frozen cache, degraded
+    # endpoint, clock far ahead) pass every depth/gap/uneven-start guard
+    # above — this equality is the only thing standing between them and
+    # a real order on yesterday's (or older) signal.
+    expected_asof = cutoff - pd.Timedelta(days=1)
+    if asof != expected_asof:
+        raise SignalComputationError(
+            f"Stale signal data: asof {asof.isoformat()} is not the most "
+            f"recently closed daily bar (expected "
+            f"{expected_asof.isoformat()}, cutoff {cutoff.isoformat()}). "
+            f"Refusing to trade a stale signal."
+        )
     signal_value = float(signal_series.iloc[-1])
 
     # Per-asset drifted weight at asof (same code path as the backtest,
@@ -344,6 +363,23 @@ def _fetch_recent_candles(
     df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     return df.set_index("timestamp").sort_index()
+
+
+def decision_age_seconds(
+    asof, now: Optional[pd.Timestamp] = None,
+) -> float:
+    """Seconds between the decision bar's close (``asof`` + 1 day) and now.
+
+    ``asof`` is a daily bar's OPEN timestamp; the backtest's convention
+    (``signals.shift(1)``) trades each signal right after that bar
+    CLOSES. This gap is the schedule-drift measure: ~minutes for a
+    correctly scheduled live cron, ~hours for a cron running in the
+    wrong timezone.
+    """
+    if now is None:
+        now = pd.Timestamp.now(tz="UTC")
+    close = pd.Timestamp(asof) + pd.Timedelta(days=1)
+    return float((now - close).total_seconds())
 
 
 class SignalComputationError(RuntimeError):

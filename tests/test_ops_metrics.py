@@ -92,6 +92,21 @@ def test_render_basic_shape(tmp_path):
     assert "# TYPE tradelab_cycles_total counter" in text
 
 
+def test_signal_decision_age_gauge(tmp_path):
+    """decision_age_s from the latest cycle's signal block becomes the
+    schedule-drift gauge; absent field → no gauge (older journals)."""
+    entry = _entry(ended_at=NOW - timedelta(minutes=20), outcome="success",
+                   live=False, ladder=1.0)
+    entry["signal"]["decision_age_s"] = 2700.0
+    m = _parse(metrics.render_metrics(_journal(tmp_path, [entry]), NOW))
+    assert m["tradelab_signal_decision_age_seconds"] == 2700.0
+
+    old = _entry(ended_at=NOW - timedelta(minutes=20), outcome="success",
+                 live=False, ladder=1.0)
+    m2 = _parse(metrics.render_metrics(_journal(tmp_path, [old]), NOW))
+    assert "tradelab_signal_decision_age_seconds" not in m2
+
+
 def test_outcome_counter_labels(tmp_path):
     reader = _journal(tmp_path, [
         _entry(ended_at=NOW - timedelta(hours=5), outcome="success", live=True),

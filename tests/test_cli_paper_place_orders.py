@@ -37,6 +37,7 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         state=str(tmp_path / "orders.json"),
         candles=400,
         timeout_s=5.0,
+        max_signal_age_h=6.0,
     )
 
 
