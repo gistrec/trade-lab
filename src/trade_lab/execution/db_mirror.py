@@ -264,6 +264,18 @@ def collect_vintage_files(vintage_root: Path) -> dict[str, Path]:
 
 # ── reconcile / restore ──────────────────────────────────────────────
 
+def _insert_journal_lines(
+    cur, source: str, lines: list[tuple[int, str]], now: datetime
+) -> None:
+    # IGNORE: a concurrent mirror of the same tail must be a no-op, not
+    # a PK explosion.
+    cur.executemany(
+        "INSERT IGNORE INTO journal_lines "
+        "(source, line_no, payload, mirrored_at) "
+        "VALUES (%s, %s, %s, %s)",
+        [(source, n, p, now) for n, p in lines],
+    )
+
 @dataclass
 class MirrorReport:
     journal_lines_inserted: int = 0
@@ -308,14 +320,7 @@ def reconcile(
                 report.drift.append(f"{source}: {drift}")
                 logger.warning("db mirror drift — %s: %s", source, drift)
             if to_insert:
-                # IGNORE: a concurrent mirror of the same tail must be a
-                # no-op, not a PK explosion.
-                cur.executemany(
-                    "INSERT IGNORE INTO journal_lines "
-                    "(source, line_no, payload, mirrored_at) "
-                    "VALUES (%s, %s, %s, %s)",
-                    [(source, n, p, now) for n, p in to_insert],
-                )
+                _insert_journal_lines(cur, source, to_insert, now)
                 report.journal_lines_inserted += len(to_insert)
 
         for path in sorted(data_dir.glob("state/*.json")):
@@ -447,7 +452,13 @@ def restore(
     Refuses to overwrite an existing non-empty file unless ``force`` —
     a live host's files are ahead of the mirror by up to one cycle, and
     silently rolling them back would be data loss.
+
+    A restored journal file is compact (torn lines' reserved numbers
+    collapse), so each written source's mirror rows are renumbered to
+    the restored file in the same transaction — a stale high-water mark
+    would filter the next appended cycle out of every future reconcile.
     """
+    now = datetime.now(timezone.utc)
     written: list[str] = []
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT source FROM journal_lines")
@@ -475,10 +486,17 @@ def restore(
                 "ORDER BY line_no",
                 (source,),
             )
+            payloads = [payload for (payload,) in cur.fetchall()]
             target.parent.mkdir(parents=True, exist_ok=True)
             with open(target, "w", encoding="utf-8") as fh:
-                for (payload,) in cur.fetchall():
+                for payload in payloads:
                     fh.write(payload + "\n")
+            cur.execute(
+                "DELETE FROM journal_lines WHERE source = %s", (source,)
+            )
+            _insert_journal_lines(
+                cur, source, list(enumerate(payloads, start=1)), now
+            )
             written.append(source)
 
         for source, payload in state_rows:
@@ -495,6 +513,7 @@ def restore(
             # Same contract as OrderStateStore: owner rw, group r.
             os.chmod(target, 0o640)
             written.append(source)
+    conn.commit()
     return written
 
 

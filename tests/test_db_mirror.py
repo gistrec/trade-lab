@@ -58,6 +58,8 @@ class FakeCursor:
             self._rows = sorted(self.store["state"].items())
         elif s.startswith("INSERT INTO state_files"):
             self.store["state"][params[0]] = params[1]
+        elif s.startswith("DELETE FROM journal_lines"):
+            self.store["journal"].pop(params[0], None)
         elif s.startswith("SELECT content_hash FROM vintages"):
             self._rows = [(k,) for k in sorted(self.store["vintages"])]
         elif s.startswith("SELECT content_hash, payload, bytes_raw"):
@@ -309,6 +311,51 @@ def test_restore_accepts_benign_nested_sources(tmp_path):
     assert (data / "journal" / "cycles.jsonl").read_text() == (
         json.dumps({"a": 1}) + "\n"
     )
+
+
+# ── restore renumbers the mirror to the compact file ─────────────────
+
+def test_restore_renumbers_mirror_to_the_compact_file(tmp_path):
+    # Torn line reserved line 3 in the mirror; the restored file is
+    # compact, so without renumbering the next appended cycle would sit
+    # at/below the stale high-water mark and never reach the mirror.
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    conn.store["journal"][src] = {
+        1: json.dumps({"cycle_id": "a"}),
+        2: json.dumps({"cycle_id": "b"}),
+        4: json.dumps({"cycle_id": "d"}),
+    }
+    data = tmp_path / "data"
+    assert restore(conn, data) == [src]
+
+    restored = data / "journal" / "cycles.jsonl"
+    assert [n for n, _ in collect_journal_lines(restored)] == [1, 2, 3]
+    assert conn.store["journal"][src] == {
+        1: json.dumps({"cycle_id": "a"}),
+        2: json.dumps({"cycle_id": "b"}),
+        3: json.dumps({"cycle_id": "d"}),
+    }
+
+    # The regression this guards: the next appended cycle must land.
+    with open(restored, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cycle_id": "e"}) + "\n")
+    report = reconcile(conn, data, tmp_path / "vintages")
+    assert report.journal_lines_inserted == 1
+    assert not report.drift
+    assert conn.store["journal"][src][4] == json.dumps({"cycle_id": "e"})
+
+
+def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    mirrored = {1: json.dumps({"a": 1}), 4: json.dumps({"d": 4})}
+    conn.store["journal"][src] = dict(mirrored)
+    data = tmp_path / "data"
+    _write_journal(data / "journal" / "cycles.jsonl", [{"a": 1}, {"b": 2}])
+
+    assert restore(conn, data) == []  # refused, no force
+    assert conn.store["journal"][src] == mirrored
 
 
 # ── the post-cycle hook must never raise ─────────────────────────────
