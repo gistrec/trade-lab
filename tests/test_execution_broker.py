@@ -647,6 +647,30 @@ def test_create_order_refused_on_mainnet_without_live_orders_flag():
     assert calls["c"] == 0, "exchange.create_order must never be reached"
 
 
+def test_create_order_refused_on_mainnet_without_allow_mainnet_flag():
+    # A hand-built config (bypassing load_paper_config and connect(), the
+    # two places that check ALLOW_MAINNET) must still hit the full
+    # three-flag gate at the last write point.
+    exch = _MockExchange()
+    calls = {"c": 0}
+
+    def co(*a, **k):
+        calls["c"] += 1
+        return {}
+
+    exch.create_order = co
+    cfg = PaperConfig(
+        exchange_id="binance", sandbox=False, api_key="k", api_secret="s",
+        allow_mainnet=False, mainnet_live_orders=True,
+        quote_currency="USDT", basket=("BTC", "ETH"),
+        request_timeout_ms=5000,
+    )
+    broker = Broker(cfg, exch)
+    with pytest.raises(ConnectionRefused, match="MAINNET"):
+        broker.create_order_safe("BTC/USDT", "buy", 0.001, "cid-1")
+    assert calls["c"] == 0, "exchange.create_order must never be reached"
+
+
 def test_create_order_allowed_with_all_three_mainnet_flags():
     exch = _MockExchange()
     exch.create_order = lambda *a, **k: {"id": "1", "status": "open"}

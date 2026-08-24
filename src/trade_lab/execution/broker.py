@@ -628,7 +628,11 @@ class Broker:
         means mapping its param here AND in :meth:`fetch_order_by_coid`,
         then extending that list.
         """
-        if not self.config.sandbox and not self.config.mainnet_live_orders:
+        # Full three-flag gate: a hand-built config skips both
+        # load_paper_config and connect(), the two ALLOW_MAINNET checks.
+        if not self.config.sandbox and not (
+            self.config.allow_mainnet and self.config.mainnet_live_orders
+        ):
             raise ConnectionRefused(
                 "Refusing create_order on MAINNET: placing real orders "
                 "requires TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true. "
