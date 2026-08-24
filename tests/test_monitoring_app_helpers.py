@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from trade_lab.monitoring.app import (
     _collapse_signal_rows, _humanize_iso, _humanize_relative,
+    _sim_equity_metric,
 )
 
 
@@ -1325,3 +1326,25 @@ def test_gap_age_is_measured_from_resumption_not_onset():
         ended=now - timedelta(minutes=10),
     )
     assert _gap_is_recent(gap, now=now) is True
+
+
+# ---------------------------------------------------------------------------
+# Sim-equity metric (Validation tab): the $ figure is a virtual portfolio,
+# the delta pins it to the frozen config's initial capital.
+# ---------------------------------------------------------------------------
+
+def test_sim_equity_metric_gain():
+    value, delta = _sim_equity_metric(10919.42, 10_000.0)
+    assert value == "$10919.42"
+    assert delta == "+9.19% since start"
+
+
+def test_sim_equity_metric_loss_reads_negative():
+    """Leading '-' is what makes st.metric render the delta red."""
+    _, delta = _sim_equity_metric(9500.0, 10_000.0)
+    assert delta == "-5.00% since start"
+
+
+def test_sim_equity_metric_flat():
+    _, delta = _sim_equity_metric(10_000.0, 10_000.0)
+    assert delta == "+0.00% since start"

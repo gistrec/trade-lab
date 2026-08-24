@@ -1582,6 +1582,14 @@ def _cached_lookahead(_log_path: Path, _vintage_root: Path, sig):
     )
 
 
+def _sim_equity_metric(equity: float, initial_capital: float) -> tuple[str, str]:
+    # The harness portfolio is virtual — it compounds from the frozen
+    # config's initial_capital, not the exchange balance. The % since
+    # start keeps the $ figure from reading as real money.
+    pct = (equity / initial_capital - 1.0) * 100.0
+    return f"${equity:.2f}", f"{pct:+.2f}% since start"
+
+
 def _render_validation() -> None:
     """Read-only view of the validation forward-test infrastructure.
 
@@ -1597,7 +1605,7 @@ def _render_validation() -> None:
     TypeError from a schema-drifted journal row) is contained to this
     tab by ``_render_tab_safely`` in :func:`main`.
     """
-    from trade_lab.config import CANONICAL_HASH
+    from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG
 
     st.markdown("### Frozen-config gate")
     runtime_hash = _cached_config_hash()
@@ -1640,7 +1648,17 @@ def _render_validation() -> None:
             f"{latest.sma_value:.2f}" if latest.sma_value is not None else "—",
         )
         cols[2].metric("Gate", "OPEN" if latest.sma_gate_open else "CLOSED")
-        cols[3].metric("Equity", f"${latest.portfolio_equity:.2f}")
+        equity_value, equity_delta = _sim_equity_metric(
+            latest.portfolio_equity, PRODUCTION_CONFIG.initial_capital,
+        )
+        cols[3].metric(
+            "Equity", equity_value, delta=equity_delta,
+            help=(
+                "Simulated portfolio — compounds from the frozen config's "
+                f"${PRODUCTION_CONFIG.initial_capital:,.0f} virtual start, "
+                "not the exchange balance."
+            ),
+        )
         with st.expander("Per-lookback signals + intended trades"):
             st.write("**Per-lookback states / returns**")
             st.json({
