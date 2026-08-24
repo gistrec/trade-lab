@@ -9,6 +9,7 @@ from .metrics import (
     benchmark_verdict,
     compute_metrics,
     max_drawdown,
+    verdict_from_scalars,
 )
 from .plotting import plot_equity_curve
 from .reports import (
@@ -165,6 +166,7 @@ __all__ = [
     "benchmark_verdict",
     "compute_metrics",
     "max_drawdown",
+    "verdict_from_scalars",
     "debug_trades_dataframe",
     "deflated_sharpe_from_trial_sharpes",
     "deflated_sharpe_ratio",

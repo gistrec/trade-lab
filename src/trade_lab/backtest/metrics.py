@@ -19,8 +19,10 @@ VERDICT_UNDERPERFORMS_BH = "UNDERPERFORMS_BH"
 _MEANINGFUL_DD_DIFFERENCE = 0.02
 
 
-def benchmark_verdict(metrics: "Metrics") -> str:
-    """Classify the strategy against buy & hold.
+def verdict_from_scalars(
+    strat_return: float, strat_dd: float, bh_return: float, bh_dd: float
+) -> str:
+    """Classify a strategy against buy & hold.
 
     Returns one of:
 
@@ -32,18 +34,21 @@ def benchmark_verdict(metrics: "Metrics") -> str:
       ("higher return but worse drawdown") because trading more risk for
       more return without a clear edge isn't an unambiguous win.
     """
-    if (
-        metrics.total_return > metrics.buy_and_hold_return
-        and metrics.max_drawdown <= metrics.buy_and_hold_max_drawdown
-    ):
+    if strat_return > bh_return and strat_dd <= bh_dd:
         return VERDICT_OUTPERFORMS_BH
-    if (
-        metrics.total_return < metrics.buy_and_hold_return
-        and metrics.max_drawdown
-        < metrics.buy_and_hold_max_drawdown - _MEANINGFUL_DD_DIFFERENCE
-    ):
+    if strat_return < bh_return and strat_dd < bh_dd - _MEANINGFUL_DD_DIFFERENCE:
         return VERDICT_LOWER_RETURN_LOWER_DD
     return VERDICT_UNDERPERFORMS_BH
+
+
+def benchmark_verdict(metrics: "Metrics") -> str:
+    """:func:`verdict_from_scalars` over a full-window :class:`Metrics`."""
+    return verdict_from_scalars(
+        metrics.total_return,
+        metrics.max_drawdown,
+        metrics.buy_and_hold_return,
+        metrics.buy_and_hold_max_drawdown,
+    )
 
 
 @dataclass

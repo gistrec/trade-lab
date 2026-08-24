@@ -17,17 +17,10 @@ from ..strategies.regime_only import RegimeOnlyStrategy
 from ..strategies.regime_sma_cross import RegimeSMACrossStrategy
 from ..strategies.sma_cross import SMACrossStrategy
 from .engine import run_backtest
-from .metrics import (
-    VERDICT_LOWER_RETURN_LOWER_DD,
-    VERDICT_OUTPERFORMS_BH,
-    VERDICT_UNDERPERFORMS_BH,
-    _max_drawdown,
-)
+from .metrics import _max_drawdown, verdict_from_scalars
 
 
 VERDICT_BUY_AND_HOLD = "BUY_AND_HOLD"
-
-_MEANINGFUL_DD_DIFFERENCE = 0.02
 
 YEARLY_COLUMNS = [
     "year",
@@ -287,16 +280,5 @@ def _yearly_row_for_strategy(
     }
 
 
-def _verdict_for_year(
-    strat_return: float, strat_dd: float,
-    bh_return: float, bh_dd: float,
-) -> str:
-    """Same logic as :func:`benchmark_verdict` but inlined for per-year use."""
-    if strat_return > bh_return and strat_dd <= bh_dd:
-        return VERDICT_OUTPERFORMS_BH
-    if (
-        strat_return < bh_return
-        and strat_dd < bh_dd - _MEANINGFUL_DD_DIFFERENCE
-    ):
-        return VERDICT_LOWER_RETURN_LOWER_DD
-    return VERDICT_UNDERPERFORMS_BH
+# Per-year verdicts use the same scalar core as the full-window one.
+_verdict_for_year = verdict_from_scalars
