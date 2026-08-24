@@ -744,7 +744,9 @@ def _render_signal(reader: JournalReader) -> None:
         "Basket close",
         f"{basket_close:,.2f}" if basket_close is not None else "—",
     )
-    cols[2].markdown(f"{_return_chip(values, 7)} {_return_chip(values, 30)}")
+    # Hard markdown line break: one block, chips stacked without the
+    # inter-element gap two separate markdown calls would add.
+    cols[2].markdown(f"{_return_chip(values, 7)}  \n{_return_chip(values, 30)}")
     if basket_close is not None and sma_value:
         dist_pct = (basket_close / sma_value - 1.0) * 100
         cols[3].metric(

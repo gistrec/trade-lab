@@ -1439,7 +1439,7 @@ def test_signal_tab_renders_chips_not_second_metric_row(tmp_path, monkeypatch):
     chip_lines = [str(m.value) for m in app.markdown
                   if "-badge[" in str(m.value)]
     assert any(
-        ":green-badge[:material/arrow_upward: +10.00% vs 7d ago] "
+        ":green-badge[:material/arrow_upward: +10.00% vs 7d ago]  \n"
         ":green-badge[:material/arrow_upward: +25.00% vs 30d ago]" == line
         for line in chip_lines
     ), chip_lines
