@@ -244,6 +244,73 @@ def test_restore_refuses_existing_files_without_force(tmp_path):
     assert len(collect_journal_lines(data / "journal" / "cycles.jsonl")) == 1
 
 
+# ── restore path traversal ───────────────────────────────────────────
+
+HOSTILE_SOURCES = ["../../x", "/abs/path", "a/../../b", "C:/x"]
+
+
+@pytest.mark.parametrize("source", HOSTILE_SOURCES)
+def test_restore_rejects_hostile_journal_source(tmp_path, source):
+    conn = FakeConn()
+    conn.store["journal"][source] = {1: json.dumps({"a": 1})}
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore(conn, data)
+    assert source in str(excinfo.value)
+    # Nothing touched the filesystem — not even data_dir itself.
+    assert not data.exists()
+    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "outer" / "b").exists()
+    assert not Path("/abs/path").exists()
+
+
+@pytest.mark.parametrize("source", HOSTILE_SOURCES)
+def test_restore_rejects_hostile_state_source(tmp_path, source):
+    conn = FakeConn()
+    conn.store["state"][source] = '{"__meta__": {}}'
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore(conn, data)
+    assert source in str(excinfo.value)
+    assert not data.exists()
+    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "outer" / "b").exists()
+    assert not Path("/abs/path").exists()
+
+
+def test_restore_rejects_absolute_source_inside_a_real_dir(tmp_path):
+    # Absolute path that WOULD be writable — must still refuse.
+    escape = tmp_path / "escape.jsonl"
+    conn = FakeConn()
+    conn.store["journal"][str(escape)] = {1: json.dumps({"a": 1})}
+    with pytest.raises(MirrorIntegrityError):
+        restore(conn, tmp_path / "data")
+    assert not escape.exists()
+
+
+def test_restore_hostile_row_aborts_before_any_benign_write(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["../../evil.json"] = "{}"
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError):
+        restore(conn, data)
+    assert not data.exists()
+    assert not (tmp_path / "evil.json").exists()
+
+
+def test_restore_accepts_benign_nested_sources(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["state/orders.json"] = '{"__meta__": {}}'
+    data = tmp_path / "data"
+    written = restore(conn, data)
+    assert sorted(written) == ["journal/cycles.jsonl", "state/orders.json"]
+    assert (data / "journal" / "cycles.jsonl").read_text() == (
+        json.dumps({"a": 1}) + "\n"
+    )
+
+
 # ── the post-cycle hook must never raise ─────────────────────────────
 
 def test_mirror_after_cycle_swallows_connection_failure(monkeypatch, caplog):

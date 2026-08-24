@@ -60,7 +60,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 import pymysql
@@ -110,7 +110,7 @@ class MirrorConfigError(RuntimeError):
 
 
 class MirrorIntegrityError(RuntimeError):
-    """A mirrored payload does not match its content hash.
+    """Mirrored data cannot be trusted (bad content hash, hostile path).
 
     Distinct from MirrorConfigError so `except MirrorConfigError` cannot
     swallow data corruption along with a typo'd env var. Carries the
@@ -410,6 +410,35 @@ def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
     return written
 
 
+def _restore_target(data_dir: Path, source: str) -> Path:
+    """Validated write target for a mirrored ``source``.
+
+    ``source`` comes straight from the DB: a compromised mirror must not
+    turn restore into an arbitrary file write, so anything that could
+    land outside ``data_dir`` (absolute, drive/UNC-qualified, ``..``)
+    raises before any filesystem touch.
+    """
+    posix, windows = PurePosixPath(source), PureWindowsPath(source)
+    if (
+        posix.is_absolute()
+        or windows.drive
+        or ".." in posix.parts
+        or ".." in windows.parts
+    ):
+        raise MirrorIntegrityError(
+            f"refusing to restore {source!r}: escapes {data_dir}"
+        )
+    target = data_dir / source
+    root = data_dir.resolve()
+    resolved = target.resolve()
+    # Backstop (symlinks, oddball separators): strictly inside data_dir.
+    if resolved == root or not resolved.is_relative_to(root):
+        raise MirrorIntegrityError(
+            f"refusing to restore {source!r}: escapes {data_dir}"
+        )
+    return target
+
+
 def restore(
     conn, data_dir: Path = DEFAULT_DATA_DIR, force: bool = False
 ) -> list[str]:
@@ -423,8 +452,18 @@ def restore(
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT source FROM journal_lines")
         journal_sources = [row[0] for row in cur.fetchall()]
+        cur.execute("SELECT source, payload FROM state_files")
+        state_rows = list(cur.fetchall())
+        # Every source vetted before the first write: one hostile row
+        # must not leave a partial restore behind.
+        journal_targets = {
+            s: _restore_target(data_dir, s) for s in journal_sources
+        }
+        state_targets = {
+            s: _restore_target(data_dir, s) for s, _ in state_rows
+        }
         for source in journal_sources:
-            target = data_dir / source
+            target = journal_targets[source]
             if target.exists() and target.stat().st_size > 0 and not force:
                 logger.warning(
                     "db-restore: %s exists — refusing to overwrite "
@@ -442,9 +481,8 @@ def restore(
                     fh.write(payload + "\n")
             written.append(source)
 
-        cur.execute("SELECT source, payload FROM state_files")
-        for source, payload in cur.fetchall():
-            target = data_dir / source
+        for source, payload in state_rows:
+            target = state_targets[source]
             if target.exists() and target.stat().st_size > 0 and not force:
                 logger.warning(
                     "db-restore: %s exists — refusing to overwrite "
