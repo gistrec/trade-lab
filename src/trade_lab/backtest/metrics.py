@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from .engine import BacktestResult
@@ -92,7 +93,8 @@ class Metrics:
     round_trip_cost_pct: float
 
 
-def _max_drawdown(equity: pd.Series) -> float:
+def max_drawdown(equity: pd.Series) -> float:
+    """Worst peak-to-trough dip as a POSITIVE magnitude (0.35 = -35% dip)."""
     if equity.empty:
         return 0.0
     running_max = equity.cummax()
@@ -101,6 +103,21 @@ def _max_drawdown(equity: pd.Series) -> float:
         return 0.0
     worst = drawdown.min()
     return float(abs(worst)) if pd.notna(worst) else 0.0
+
+
+# Alias for callers that import the pre-promotion private name.
+_max_drawdown = max_drawdown
+
+
+def annualized_sharpe(returns: pd.Series, annualization_factor: int) -> float:
+    """mean/std (ddof=1) x sqrt(factor) on per-period returns; degenerate -> 0.0."""
+    cleaned = returns.dropna()
+    if cleaned.empty:
+        return 0.0
+    std = float(cleaned.std())
+    if std == 0.0 or np.isnan(std):
+        return 0.0
+    return float(cleaned.mean() / std * np.sqrt(annualization_factor))
 
 
 def compute_metrics(result: BacktestResult) -> Metrics:
@@ -120,7 +137,7 @@ def compute_metrics(result: BacktestResult) -> Metrics:
 
     bh_equity = result.buy_and_hold_equity
     bh_final = float(bh_equity.iloc[-1]) if not bh_equity.empty else 0.0
-    bh_dd = _max_drawdown(bh_equity)
+    bh_dd = max_drawdown(bh_equity)
 
     buy_cost = result.fee_rate + result.slippage_rate
     sell_cost = result.fee_rate + result.slippage_rate
@@ -173,7 +190,7 @@ def compute_metrics(result: BacktestResult) -> Metrics:
 
     final_equity = float(equity.iloc[-1])
     total_return = float(final_equity / result.initial_capital - 1)
-    max_dd = _max_drawdown(equity)
+    max_dd = max_drawdown(equity)
 
     gross_equity = result.gross_equity
     gross_return = (

@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Sequence
 
-import numpy as np
 import pandas as pd
 
 from ..data.storage import filter_candles_by_date
@@ -18,7 +17,7 @@ from ..strategies.pma_ratio import PriceMaRatioStrategy
 from ..strategies.sma_cross import SMACrossStrategy
 from ..strategies.tsmom import TimeSeriesMomentumStrategy
 from .engine import buy_and_hold_with_costs, run_backtest
-from .metrics import _max_drawdown, compute_metrics
+from .metrics import annualized_sharpe, compute_metrics, max_drawdown
 
 
 @dataclass(frozen=True)
@@ -262,7 +261,7 @@ def _buy_and_hold_metrics(
     return {
         "total_return_pct": total_return,
         "cagr_pct": cagr,
-        "max_drawdown_pct": _max_drawdown(equity),
+        "max_drawdown_pct": max_drawdown(equity),
         "sharpe": _sharpe(equity, annualization_factor),
         "exposure_pct": 1.0,
         "num_trades": 0,
@@ -286,12 +285,6 @@ def _cagr(equity: pd.Series, bars: int, annualization_factor: int) -> float:
 
 
 def _sharpe(equity: pd.Series, annualization_factor: int) -> float:
-    if equity.empty:
-        return 0.0
-    returns = equity.pct_change(fill_method=None).dropna()
-    if returns.empty:
-        return 0.0
-    std = float(returns.std())
-    if std == 0.0 or np.isnan(std):
-        return 0.0
-    return float(returns.mean() / std * np.sqrt(annualization_factor))
+    return annualized_sharpe(
+        equity.pct_change(fill_method=None), annualization_factor
+    )

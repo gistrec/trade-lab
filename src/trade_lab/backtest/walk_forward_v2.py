@@ -33,6 +33,7 @@ from pandas.tseries.offsets import DateOffset
 
 from ..strategies.base import Strategy
 from .engine import run_backtest
+from .metrics import annualized_sharpe, max_drawdown
 
 
 OBJECTIVE_SHARPE = "sharpe"
@@ -462,14 +463,9 @@ def aggregate_walk_forward(
     concatenated = pd.concat(valid_series).sort_index()
     concatenated = concatenated[~concatenated.index.duplicated(keep="first")]
 
-    std = float(concatenated.std())
-    if std > 0 and not np.isnan(std):
-        ann_sharpe = float(
-            concatenated.mean() / std * np.sqrt(annualization_factor)
-        )
-    else:
-        ann_sharpe = 0.0
-    summary["concatenated_oos_sharpe"] = ann_sharpe
+    summary["concatenated_oos_sharpe"] = annualized_sharpe(
+        concatenated, annualization_factor
+    )
 
     # ``sharpe_std_dev`` should be the standard deviation of *trial*
     # per-period Sharpes under the null of zero true skill. When we
@@ -544,16 +540,9 @@ def _evaluate_strategy_on_window(
 
     window_equity = (1.0 + window_returns).cumprod()
     total_return = float(window_equity.iloc[-1] - 1.0)
-    max_dd = float(abs(((window_equity / window_equity.cummax()) - 1.0).min()))
-    std = float(window_returns.std())
-    if std > 0 and not np.isnan(std):
-        sharpe = float(
-            window_returns.mean() / std * np.sqrt(annualization_factor)
-        )
-    else:
-        sharpe = 0.0
+    max_dd = max_drawdown(window_equity)
     return {
-        "sharpe": sharpe,
+        "sharpe": annualized_sharpe(window_returns, annualization_factor),
         "total_return": total_return,
         "max_drawdown": max_dd,
         "bars": int(len(window_returns)),
@@ -611,5 +600,5 @@ def _buy_and_hold_on_window(
         close, initial_capital=initial_capital,
         fee_rate=fee_rate, slippage_rate=slippage_rate,
     )
-    max_dd = float(abs(((equity / equity.cummax()) - 1.0).min()))
+    max_dd = max_drawdown(equity)
     return total_return, max_dd

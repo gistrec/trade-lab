@@ -49,7 +49,9 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
-from .cross_sectional import _align_closes, _max_drawdown, _sharpe
+from .cross_sectional import _align_closes
+from .metrics import annualized_sharpe as _sharpe
+from .metrics import max_drawdown as _max_drawdown
 
 
 logger = logging.getLogger(__name__)
