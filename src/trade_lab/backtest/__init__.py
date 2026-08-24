@@ -5,8 +5,11 @@ from .metrics import (
     VERDICT_OUTPERFORMS_BH,
     VERDICT_UNDERPERFORMS_BH,
     Metrics,
+    annualized_sharpe,
     benchmark_verdict,
     compute_metrics,
+    max_drawdown,
+    verdict_from_scalars,
 )
 from .plotting import plot_equity_curve
 from .reports import (
@@ -159,8 +162,11 @@ __all__ = [
     "YEARLY_COLUMNS",
     "aggregate_multi_asset",
     "aggregate_yearly_results",
+    "annualized_sharpe",
     "benchmark_verdict",
     "compute_metrics",
+    "max_drawdown",
+    "verdict_from_scalars",
     "debug_trades_dataframe",
     "deflated_sharpe_from_trial_sharpes",
     "deflated_sharpe_ratio",

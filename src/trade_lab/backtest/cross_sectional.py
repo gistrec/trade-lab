@@ -34,6 +34,8 @@ from typing import Mapping, Optional
 import numpy as np
 import pandas as pd
 
+from .metrics import annualized_sharpe, max_drawdown
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,8 +157,8 @@ def run_cross_sectional_momentum(
     total_slippage = float((turnover * slippage_rate * prior_equity).sum())
 
     total_return = float(equity.iloc[-1] / equity.iloc[0] - 1) if len(equity) >= 2 else 0.0
-    max_dd = _max_drawdown(equity)
-    sharpe = _sharpe(net_returns, annualization_factor)
+    max_dd = max_drawdown(equity)
+    sharpe = annualized_sharpe(net_returns, annualization_factor)
     basket_size = float((positions > 0).sum(axis=1).mean())
     cash_fraction = float((1.0 - positions.sum(axis=1)).clip(lower=0.0, upper=1.0).mean())
 
@@ -328,8 +330,8 @@ def run_cross_sectional_reversal(
     total_fees = float((turnover * fee_rate * prior_equity).sum())
     total_slippage = float((turnover * slippage_rate * prior_equity).sum())
     total_return = float(equity.iloc[-1] / equity.iloc[0] - 1) if len(equity) >= 2 else 0.0
-    max_dd = _max_drawdown(equity)
-    sharpe = _sharpe(net_returns, annualization_factor)
+    max_dd = max_drawdown(equity)
+    sharpe = annualized_sharpe(net_returns, annualization_factor)
     basket_size = float((positions > 0).sum(axis=1).mean())
     cash_fraction = float(
         (1.0 - positions.sum(axis=1)).clip(lower=0.0, upper=1.0).mean()
@@ -500,25 +502,6 @@ def _rebalance(
     return out
 
 
-def _max_drawdown(equity: pd.Series) -> float:
-    """Maximum drawdown as a POSITIVE magnitude (0.35 = -35% dip).
-
-    Sign convention matches ``metrics.py`` and ``ensemble.py``; this
-    helper used to return a negative number, which silently flipped
-    any cross-module comparison or Calmar-style ratio mixing the two.
-    """
-    if equity.empty:
-        return 0.0
-    running_max = equity.cummax()
-    drawdown = equity / running_max - 1.0
-    return float(abs(drawdown.min()))
-
-
-def _sharpe(returns: pd.Series, annualization_factor: int) -> float:
-    cleaned = returns.dropna()
-    if cleaned.empty:
-        return 0.0
-    std = float(cleaned.std())
-    if std == 0.0 or np.isnan(std):
-        return 0.0
-    return float(cleaned.mean() / std * np.sqrt(annualization_factor))
+# Aliases: external scripts and tests import the underscore names.
+_max_drawdown = max_drawdown
+_sharpe = annualized_sharpe

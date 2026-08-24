@@ -54,7 +54,8 @@ import pandas as pd
 from hmmlearn import _hmmc
 from hmmlearn.hmm import GaussianHMM
 
-from .cross_sectional import _max_drawdown, _sharpe
+from .metrics import annualized_sharpe as _sharpe
+from .metrics import max_drawdown as _max_drawdown
 
 
 DEFAULT_TRAIN_LOOKBACK_DAYS = 730   # 2 years

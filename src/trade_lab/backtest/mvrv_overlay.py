@@ -43,7 +43,8 @@ from typing import Optional
 
 import pandas as pd
 
-from .cross_sectional import _max_drawdown, _sharpe
+from .metrics import annualized_sharpe as _sharpe
+from .metrics import max_drawdown as _max_drawdown
 
 
 DEFAULT_LOW_THRESHOLD = 1.0      # ratio at/below → full long

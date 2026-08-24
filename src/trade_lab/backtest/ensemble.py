@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from ..strategies.base import Strategy
+from .metrics import annualized_sharpe, max_drawdown
 from .walk_forward_v2 import (
     ParamGridSpec,
     PROJECT_NUM_TRIALS,
@@ -291,15 +292,6 @@ def sortino_ratio(returns: pd.Series, *, annualization_factor: int = 365) -> flo
     return float(cleaned.mean() / downside * np.sqrt(annualization_factor))
 
 
-def _max_drawdown(equity: pd.Series) -> float:
-    cleaned = equity.dropna()
-    if cleaned.empty:
-        return 0.0
-    running_max = cleaned.cummax()
-    dd = cleaned / running_max - 1.0
-    return float(abs(dd.min()))
-
-
 def compute_portfolio_metrics(
     *,
     portfolio_returns_net: pd.Series,
@@ -324,11 +316,10 @@ def compute_portfolio_metrics(
     years = len(cleaned) / annualization_factor if annualization_factor > 0 else 0.0
     cagr = float((1.0 + total_return) ** (1.0 / years) - 1.0) if years > 0 else 0.0
 
-    std = float(cleaned.std())
-    sharpe = float(cleaned.mean() / std * np.sqrt(annualization_factor)) if std > 0 else 0.0
+    sharpe = annualized_sharpe(cleaned, annualization_factor)
     sortino_val = sortino_ratio(cleaned, annualization_factor=annualization_factor)
 
-    max_dd = _max_drawdown(portfolio_equity)
+    max_dd = max_drawdown(portfolio_equity)
     calmar = float(total_return / max_dd) if max_dd > 1e-9 else 0.0
 
     # Time in market: bar is "in market" when at least one sleeve is active.
