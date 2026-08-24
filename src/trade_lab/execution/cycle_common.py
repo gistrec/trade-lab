@@ -1,19 +1,33 @@
-"""Journal-cycle helpers shared by the two cycle orchestrators
-(:mod:`dry_run`, :mod:`live_cycle`).
+"""Read-phase and journal-cycle helpers shared by the two cycle
+orchestrators (:mod:`dry_run`, :mod:`live_cycle`).
 
-Pure serialization only: no journal writes, no exception handling —
-each orchestrator keeps its own control flow, failure posture, and
-journal-write error messages. Builders take ``ended_at`` so
-``datetime.now`` stays resolvable (and patchable) in the calling module.
+Broker reads and pure serialization only: no order placement, no journal
+writes, no exception handling — each orchestrator keeps its own control
+flow, failure posture, and journal-write error messages. Helpers that
+log take the caller's logger so records keep the orchestrator's logger
+name; builders take ``ended_at`` so ``datetime.now`` stays resolvable
+(and patchable) in the calling module.
 """
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
-from .broker import BalanceSnapshot, Broker
+from .allocator import TargetAllocation, compute_target_allocation
+from .broker import BalanceSnapshot, Broker, BrokerError, MarketConstraints
+from .delta import DeltaPlan, compute_delta_plan
 from .journal import Cycle, get_git_commit_short, get_python_version
 from .signal import SignalSnapshot
+
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Read phase
+# ---------------------------------------------------------------------------
 
 
 def build_context(broker: Broker, *, mode: str) -> dict:
@@ -28,6 +42,118 @@ def build_context(broker: Broker, *, mode: str) -> dict:
         "quote_currency": broker.config.quote_currency,
         "basket": list(broker.config.basket),
     }
+
+
+def gather_ticker_prices(
+    broker: Broker,
+    snap: SignalSnapshot,
+    *,
+    log: logging.Logger = logger,
+) -> dict[str, float]:
+    """Live ticker prices, falling back to candle close on per-pair failure."""
+    ticker_prices: dict[str, float] = {}
+    quote = broker.config.quote_currency
+    for sym in broker.config.basket:
+        try:
+            ticker_prices[sym] = broker.fetch_ticker_price(f"{sym}/{quote}")
+        except BrokerError as exc:
+            log.warning(
+                "Ticker for %s failed: %s — using candle close.", sym, exc,
+            )
+            # Direct indexing: a basket symbol missing from the signal's
+            # closes is an invariant violation that must raise HERE, not
+            # surface as a 0.0 price deep inside the allocator.
+            ticker_prices[sym] = snap.asset_closes[sym]
+    return ticker_prices
+
+
+def gather_constraints(
+    broker: Broker,
+    basket: Sequence[str],
+    quote: str,
+    *,
+    log: logging.Logger = logger,
+) -> dict[str, MarketConstraints]:
+    """Min-amount / min-cost constraints for every basket pair.
+
+    A pair that fails to load is excluded from the map so the delta
+    planner treats it as "trust the allocator" rather than blocking;
+    the warning tells the operator which pairs lacked metadata.
+    """
+    constraints: dict[str, MarketConstraints] = {}
+    for sym in basket:
+        pair = f"{sym}/{quote}"
+        try:
+            constraints[pair] = broker.fetch_market_constraints(pair)
+        except BrokerError as exc:
+            log.warning(
+                "Constraints for %s unavailable: %s — sub-min filter "
+                "disabled for this pair.", pair, exc,
+            )
+    return constraints
+
+
+@dataclass(frozen=True)
+class ReadPhase:
+    """Everything the read phase produces; inputs to planning/journal."""
+
+    balance: BalanceSnapshot
+    equity: float
+    ticker_prices: dict[str, float]
+    allocation: TargetAllocation
+    constraints: dict[str, MarketConstraints]
+    plan: DeltaPlan
+    current_holdings_quote: dict[str, float]
+
+
+def run_read_phase(
+    broker: Broker,
+    snap: SignalSnapshot,
+    *,
+    log: logging.Logger = logger,
+) -> ReadPhase:
+    """Balance → equity → tickers → allocation → constraints → delta plan
+    → holdings-in-quote. Read-only; any step may raise (fail loud)."""
+    balance = broker.fetch_balance_snapshot()
+    equity = broker.estimate_total_equity_usd(snapshot=balance)
+
+    # The broker's ticker prices, not the candle closes from the signal
+    # step — they are the freshest and reflect what the order will
+    # actually fill against.
+    ticker_prices = gather_ticker_prices(broker, snap, log=log)
+
+    allocation = compute_target_allocation(
+        signal=snap.signal,
+        total_equity=equity,
+        prices=ticker_prices,
+        basket=broker.config.basket,
+        weights=snap.basket_weights,
+    )
+
+    quote = broker.config.quote_currency
+    constraints = gather_constraints(broker, broker.config.basket, quote, log=log)
+
+    plan = compute_delta_plan(
+        allocation=allocation,
+        current_holdings=balance.asset_totals,
+        constraints=constraints,
+        quote_currency=quote,
+    )
+
+    current_holdings_quote = {
+        sym: float(balance.asset_totals.get(sym, 0.0)) * ticker_prices[sym]
+        for sym in broker.config.basket
+    }
+
+    return ReadPhase(
+        balance=balance,
+        equity=equity,
+        ticker_prices=ticker_prices,
+        allocation=allocation,
+        constraints=constraints,
+        plan=plan,
+        current_holdings_quote=current_holdings_quote,
+    )
 
 
 # ---------------------------------------------------------------------------

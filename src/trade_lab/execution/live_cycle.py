@@ -49,8 +49,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Optional, Sequence
 
-from .allocator import compute_target_allocation
-from .broker import Broker, BrokerError, MarketConstraints
+from .broker import Broker
 from .clientorder import make_client_order_id
 from .cycle_common import (
     balance_dict,
@@ -58,11 +57,15 @@ from .cycle_common import (
     build_context,
     failed_cycle,
     intent_dict,
+    run_read_phase,
     signal_dict,
     skipped_dict,
     skipped_warmup_cycle,
 )
-from .delta import SkippedDelta, compute_delta_plan, total_skipped_quote_drift
+from .cycle_common import (  # noqa: F401  (re-export: tests hit the ticker fallback through this name)
+    gather_ticker_prices as _gather_ticker_prices,
+)
+from .delta import SkippedDelta, total_skipped_quote_drift
 from .journal import (
     Cycle,
     JournalWriter,
@@ -210,29 +213,13 @@ def run_live_cycle(
                 f"cron schedule / host UTC clock; for a deliberate late "
                 f"manual entry raise --max-signal-age-h."
             )
-        balance = broker.fetch_balance_snapshot()
-        equity = broker.estimate_total_equity_usd(snapshot=balance)
-        ticker_prices = _gather_ticker_prices(broker, snap)
-        allocation = compute_target_allocation(
-            signal=snap.signal,
-            total_equity=equity,
-            prices=ticker_prices,
-            basket=broker.config.basket,
-            weights=snap.basket_weights,
-        )
+        read = run_read_phase(broker, snap, log=logger)
+        balance = read.balance
+        equity = read.equity
+        allocation = read.allocation
+        plan = read.plan
+        current_holdings_quote = read.current_holdings_quote
         quote = broker.config.quote_currency
-        constraints = _gather_constraints(broker, broker.config.basket, quote)
-        plan = compute_delta_plan(
-            allocation=allocation,
-            current_holdings=balance.asset_totals,
-            constraints=constraints,
-            quote_currency=quote,
-        )
-        current_holdings_quote = {
-            sym: float(balance.asset_totals.get(sym, 0.0))
-                 * ticker_prices[sym]
-            for sym in broker.config.basket
-        }
 
         # A pair with a live foreign-coid order sits this cycle out: the
         # pending fill is not in the balance, so today's delta for it is
@@ -603,8 +590,7 @@ def _determine_outcome(order_results: list[OrderResult]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Lifted helpers (duplicated from dry_run.py — refactor if a third
-# cycle implementation appears)
+# Reconstruction helpers
 # ---------------------------------------------------------------------------
 
 
@@ -623,40 +609,6 @@ def _placed_at_ms(placed_at: str) -> Optional[int]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
-
-
-def _gather_ticker_prices(broker: Broker, snap: SignalSnapshot) -> dict[str, float]:
-    """Live ticker prices, falling back to candle close on per-pair failure."""
-    ticker_prices: dict[str, float] = {}
-    quote = broker.config.quote_currency
-    for sym in broker.config.basket:
-        try:
-            ticker_prices[sym] = broker.fetch_ticker_price(f"{sym}/{quote}")
-        except BrokerError as exc:
-            logger.warning(
-                "Ticker for %s failed: %s — using candle close.", sym, exc,
-            )
-            # Direct indexing: a basket symbol missing from the signal's
-            # closes is an invariant violation that must raise HERE, not
-            # surface as a 0.0 price deep inside the allocator.
-            ticker_prices[sym] = snap.asset_closes[sym]
-    return ticker_prices
-
-
-def _gather_constraints(
-    broker: Broker, basket: Sequence[str], quote: str,
-) -> dict[str, MarketConstraints]:
-    constraints: dict[str, MarketConstraints] = {}
-    for sym in basket:
-        pair = f"{sym}/{quote}"
-        try:
-            constraints[pair] = broker.fetch_market_constraints(pair)
-        except BrokerError as exc:
-            logger.warning(
-                "Constraints for %s unavailable: %s — sub-min filter "
-                "disabled for this pair.", pair, exc,
-            )
-    return constraints
 
 
 # ---------------------------------------------------------------------------

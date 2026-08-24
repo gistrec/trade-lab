@@ -22,19 +22,19 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from .allocator import compute_target_allocation
-from .broker import BalanceSnapshot, Broker, BrokerError, MarketConstraints
+from .broker import BalanceSnapshot, Broker
 from .cycle_common import (
     balance_dict,
     basket_close_series_dict,
     build_context,
     failed_cycle,
     intent_dict,
+    run_read_phase,
     signal_dict,
     skipped_dict,
     skipped_warmup_cycle,
 )
-from .delta import compute_delta_plan, total_skipped_quote_drift
+from .delta import total_skipped_quote_drift
 from .journal import (
     Cycle, JournalWriter, get_git_commit_short, get_python_version,
     new_cycle_id,
@@ -118,55 +118,20 @@ def run_dry_cycle(
             extra={"decision_age_s": round(decision_age_s, 1)},
         )
 
-        balance = broker.fetch_balance_snapshot()
-        equity = broker.estimate_total_equity_usd(snapshot=balance)
-
-        # Use the broker's ticker prices, not the candle closes from the
-        # signal step — the broker's prices are the freshest and reflect
-        # what the order will actually fill against.
-        ticker_prices: dict[str, float] = {}
-        quote = broker.config.quote_currency
-        for sym in broker.config.basket:
-            try:
-                ticker_prices[sym] = broker.fetch_ticker_price(f"{sym}/{quote}")
-            except BrokerError as exc:
-                logger.warning("Ticker for %s failed: %s — using candle close.", sym, exc)
-                # Direct indexing: a missing basket symbol must raise
-                # here, not become a 0.0 price inside the allocator.
-                ticker_prices[sym] = snap.asset_closes[sym]
-
-        allocation = compute_target_allocation(
-            signal=snap.signal,
-            total_equity=equity,
-            prices=ticker_prices,
-            basket=broker.config.basket,
-            weights=snap.basket_weights,
-        )
-
-        constraints = _gather_constraints(broker, broker.config.basket, quote)
-
-        plan = compute_delta_plan(
-            allocation=allocation,
-            current_holdings=balance.asset_totals,
-            constraints=constraints,
-            quote_currency=quote,
-        )
-
-        current_holdings_quote = {
-            sym: float(balance.asset_totals.get(sym, 0.0)) * ticker_prices[sym]
-            for sym in broker.config.basket
-        }
+        read = run_read_phase(broker, snap, log=logger)
+        balance = read.balance
+        equity = read.equity
 
         result = DryRunResult(
             asof=snap.asof,
             signal=snap.signal,
             sma_gate_open=snap.sma_gate_open,
             total_equity=equity,
-            target_allocation=allocation.target_quote_per_asset,
-            current_holdings_quote=current_holdings_quote,
-            orders_planned=[intent_dict(o) for o in plan.orders],
-            orders_skipped=[skipped_dict(s) for s in plan.skipped],
-            total_skipped_quote_drift=total_skipped_quote_drift(plan),
+            target_allocation=read.allocation.target_quote_per_asset,
+            current_holdings_quote=read.current_holdings_quote,
+            orders_planned=[intent_dict(o) for o in read.plan.orders],
+            orders_skipped=[skipped_dict(s) for s in read.plan.skipped],
+            total_skipped_quote_drift=total_skipped_quote_drift(read.plan),
         )
     except InsufficientWarmupError as exc:
         # Environment branch lives HERE (the orchestrator), never inside
@@ -264,29 +229,6 @@ def _success_cycle(
         orders_skipped=list(result.orders_skipped),
         total_skipped_quote_drift=result.total_skipped_quote_drift,
     )
-
-
-def _gather_constraints(
-    broker: Broker, basket: Sequence[str], quote: str,
-) -> dict[str, MarketConstraints]:
-    """Pull min-amount / min-cost constraints for every basket pair.
-
-    A pair that fails to load constraints is **excluded from the
-    constraint map** so the delta planner treats it as "trust the
-    allocator" rather than blocking. Logged as a warning so the
-    operator sees which pairs lacked exchange-side metadata.
-    """
-    constraints: dict[str, MarketConstraints] = {}
-    for sym in basket:
-        pair = f"{sym}/{quote}"
-        try:
-            constraints[pair] = broker.fetch_market_constraints(pair)
-        except BrokerError as exc:
-            logger.warning(
-                "Constraints for %s unavailable: %s — sub-min filter "
-                "disabled for this pair.", pair, exc,
-            )
-    return constraints
 
 
 def print_dry_run(result: DryRunResult, *, quote: str) -> None:
