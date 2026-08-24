@@ -217,6 +217,32 @@ def test_bad_outcome_exits_nonzero(monkeypatch, tmp_path, outcome):
     assert exc_info.value.code not in (0, None)
 
 
+def test_journal_write_failure_exits_nonzero_with_explanation(
+    monkeypatch, tmp_path, capsys,
+):
+    """A cycle that placed real orders but could not journal them must
+    exit 2 with a loud explanation — exit 0 would let cron mark a hole
+    in the audit trail (dashboard, health verdict, MySQL mirror all read
+    the journal) as healthy (issue #45)."""
+    _patch_pipeline(
+        monkeypatch, outcome="success", journal_write_failed=True,
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_paper_place_orders(_args(tmp_path))
+    assert exc_info.value.code == 2
+    assert "JOURNAL WRITE FAILED" in capsys.readouterr().out
+
+
+def test_journal_write_ok_keeps_exit_zero(monkeypatch, tmp_path, capsys):
+    """journal_write_failed=False on a healthy cycle: no warning line,
+    exit 0 preserved — the escalation must not misfire."""
+    _patch_pipeline(
+        monkeypatch, outcome="success", journal_write_failed=False,
+    )
+    assert cmd_paper_place_orders(_args(tmp_path)) is None  # no SystemExit
+    assert "JOURNAL WRITE FAILED" not in capsys.readouterr().out
+
+
 def test_refuses_when_another_instance_holds_the_lock(
     monkeypatch, tmp_path, capsys,
 ):

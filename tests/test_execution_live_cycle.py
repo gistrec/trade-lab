@@ -689,6 +689,114 @@ def test_keyboard_interrupt_mid_cycle_journals_failed_and_reraises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Journal append failure AFTER orders are placed: surface, never crash
+# ---------------------------------------------------------------------------
+
+
+class _AppendRaisesJournal(JournalWriter):
+    """Every append raises — the disk-full / permission-lost shape."""
+
+    def append(self, cycle):
+        raise OSError("No space left on device")
+
+
+class _FirstAppendRaisesJournal(JournalWriter):
+    """Only the first append raises; later entries land normally."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self._raised = False
+
+    def append(self, cycle):
+        if not self._raised:
+            self._raised = True
+            raise OSError("No space left on device")
+        super().append(cycle)
+
+
+def test_journal_append_failure_sets_flag_not_crash(tmp_path):
+    """Real orders are already on the exchange when the main-cycle append
+    fails — raising then is worse than the missing entry. The cycle must
+    return normally with outcome unchanged and journal_write_failed=True
+    so the CLI can escalate the exit code (issue #45)."""
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_AppendRaisesJournal(tmp_path / "cycles.jsonl"),
+        state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert len(stub.create_order_calls) == 2   # placement unaffected
+    assert result.outcome == "success"          # outcome unchanged
+    assert result.journal_write_failed is True
+    assert _read_cycles(tmp_path) == []         # the entry really is missing
+
+
+def test_journal_write_failed_false_on_healthy_cycle(tmp_path):
+    """A cycle whose journal write succeeds must not raise a false alarm."""
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    assert result.journal_write_failed is False
+
+
+def test_reconstruction_append_failure_propagates_flag(tmp_path):
+    """A lost reconstruction entry is the same audit hole: the flag must
+    survive into the final result even though the MAIN entry landed."""
+    state = _state(tmp_path)
+    pending_coid = "tsmom_20260528_BTCUSDT_buy"
+    state.put(OrderStateEntry(
+        client_order_id=pending_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.001, status="open",
+        exchange_order_id="exch-prior",
+        placed_at="2026-05-28T00:05:00+00:00",
+        last_seen_at="2026-05-28T00:05:00+00:00",
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    stub.fetch_order_responses[pending_coid] = [
+        _closed_order(pending_coid, "BTC/USDT"),
+    ]
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        _broker(stub),
+        journal=_FirstAppendRaisesJournal(tmp_path / "cycles.jsonl"),
+        state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.reconstructed_count == 1
+    assert result.journal_write_failed is True
+    # Main entry landed; the reconstruction entry is the missing one.
+    assert [c["outcome"] for c in _read_cycles(tmp_path)] == ["success"]
+
+
+def test_skipped_warmup_append_failure_sets_flag(tmp_path):
+    """The skipped_warmup writer is a swallow site too: a lost entry
+    breaks the daily-run heartbeat, so the flag must escalate."""
+    stub = _short_history_stub()
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        _broker(stub), journal=_AppendRaisesJournal(tmp_path / "cycles.jsonl"),
+        state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "skipped_warmup"
+    assert result.journal_write_failed is True
+
+
+# ---------------------------------------------------------------------------
 # Reconstruction
 # ---------------------------------------------------------------------------
 

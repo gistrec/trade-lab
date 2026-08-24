@@ -121,6 +121,10 @@ class LiveCycleResult:
     # Set only for outcome='skipped_warmup' (testnet-only structural
     # SMA warm-up skip): the same reason dict that went into the
     # journal, so the CLI can print bars_available/bars_required.
+    journal_write_failed: bool = False
+    # A journal.append in this run failed AFTER orders were placed —
+    # raising then would be worse than the missing entry, so the CLI
+    # escalates the exit code instead.
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +162,9 @@ def run_live_cycle(
     # Phase 1: Reconstruction. Always first — main phase's
     # fetch_balance depends on reconciled state.
     reconstructed = _reconstruct_open_orders(broker, state)
+    journal_write_failed = False
     if reconstructed:
-        _write_reconstruction_cycle(
+        journal_write_failed |= _write_reconstruction_cycle(
             journal=journal,
             cycle_id=new_cycle_id(),
             started_at=started_at,
@@ -311,7 +316,7 @@ def run_live_cycle(
         # (read-only telemetry; the /metrics exporter surfaces it). Metadata
         # only — no effect on the orders just placed.
         context["exchange_latency"] = broker.exchange_call_stats()
-        _write_main_cycle(
+        journal_write_failed |= _write_main_cycle(
             journal=journal,
             cycle_id=main_cycle_id,
             started_at=started_at,
@@ -335,6 +340,7 @@ def run_live_cycle(
             reconstructed_count=len(reconstructed),
             error=None,
             lost_track_count=lost_track_count,
+            journal_write_failed=journal_write_failed,
         )
 
     except InsufficientWarmupError as exc:
@@ -358,7 +364,7 @@ def run_live_cycle(
             )
             raise
         skip_reason = exc.reason_dict()
-        _write_skipped_warmup_cycle(
+        journal_write_failed |= _write_skipped_warmup_cycle(
             journal=journal,
             cycle_id=main_cycle_id,
             started_at=started_at,
@@ -375,6 +381,7 @@ def run_live_cycle(
             # testnet must not mute an unresolved order incident.
             lost_track_count=lost_track_count,
             skip_reason=skip_reason,
+            journal_write_failed=journal_write_failed,
         )
 
     except BaseException as exc:
@@ -623,12 +630,15 @@ def _write_reconstruction_cycle(
     started_at: datetime,
     context: dict,
     reconstructed: list[dict],
-) -> None:
+) -> bool:
     """One Cycle entry per orchestrator run that had something to recover.
 
     Kept separate from the main cycle's entry: reconstructed orders are
     a *prior* cycle's work, not the current run's. Mixing them muddies
     the audit trail when reconciling backtest vs reality later.
+
+    Returns True when the append failed (logged, not raised — the run
+    must go on; the flag reaches the CLI via LiveCycleResult).
     """
     ended_at = datetime.now(timezone.utc)
     cycle = Cycle(
@@ -659,6 +669,8 @@ def _write_reconstruction_cycle(
             "Could not write reconstruction journal entry %s: %s",
             cycle_id, exc,
         )
+        return True
+    return False
 
 
 def _write_main_cycle(
@@ -678,7 +690,9 @@ def _write_main_cycle(
     pending_skips: list[SkippedDelta],
     order_results: list[OrderResult],
     decision_age_s: float,
-) -> None:
+) -> bool:
+    """Returns True when the append failed — orders are already placed,
+    so the failure is surfaced via LiveCycleResult, not raised."""
     ended_at = datetime.now(timezone.utc)
     cycle = Cycle(
         cycle_id=cycle_id,
@@ -713,6 +727,8 @@ def _write_main_cycle(
         logger.error(
             "Could not write main cycle journal entry %s: %s", cycle_id, exc,
         )
+        return True
+    return False
 
 
 def _write_failed_cycle(
@@ -733,6 +749,9 @@ def _write_failed_cycle(
     try:
         journal.append(cycle)
     except Exception as journal_exc:
+        # No journal_write_failed flag to set: the caller re-raises the
+        # original error, so no LiveCycleResult exists on this path and
+        # the CLI already exits non-zero.
         logger.error(
             "Could not write failed-cycle journal entry %s: %s",
             cycle_id, journal_exc,
@@ -746,7 +765,8 @@ def _write_skipped_warmup_cycle(
     started_at: datetime,
     context: dict,
     skip_reason: dict,
-) -> None:
+) -> bool:
+    """Returns True when the append failed (surfaced via LiveCycleResult)."""
     cycle = skipped_warmup_cycle(
         cycle_id, started_at, datetime.now(timezone.utc), context,
         skip_reason=skip_reason,
@@ -759,3 +779,5 @@ def _write_skipped_warmup_cycle(
             "Could not write skipped_warmup journal entry %s: %s",
             cycle_id, journal_exc,
         )
+        return True
+    return False

@@ -1279,14 +1279,25 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"placed. Journal outcome=skipped_warmup."
         )
 
+    if result.journal_write_failed:
+        # The journal feeds the dashboard, health verdict, and MySQL
+        # mirror — a missing entry hides real fills from all three.
+        print(
+            f"  JOURNAL WRITE FAILED: a journal entry for this run could "
+            f"not be written to {args.journal} — any orders placed above "
+            f"are live on the exchange but missing from the audit trail. "
+            f"Recover the entry from the log before the next cycle."
+        )
+
     healthy = result.outcome == "success" or skipped_warmup
-    if not healthy or result.lost_track_count > 0:
+    if not healthy or result.lost_track_count > 0 or result.journal_write_failed:
         # Non-zero exit so cron/alerting catches stuck (unknown_orders)
         # or partially-executed cycles; the journal entry has the detail.
         # A lost_track order (surfaced by reconstruction) is an unresolved
         # incident even when the main cycle outcome is healthy, so it
-        # escalates too. Exceptions inside run_live_cycle already
-        # propagate → exit 1.
+        # escalates too, as does a failed journal write (real fills
+        # absent from the audit trail). Exceptions inside run_live_cycle
+        # already propagate → exit 1.
         raise SystemExit(2)
 
 
