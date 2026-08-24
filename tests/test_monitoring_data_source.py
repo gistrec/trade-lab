@@ -705,6 +705,19 @@ def test_open_order_incidents_lists_non_resolved_orders():
     assert out[0]["side"] == "SELL"
 
 
+def test_open_order_incidents_not_created_is_resolved():
+    """'not_created' is a clean reconstruction verdict (a pending_create
+    intent whose request never reached the exchange) — it must not sit
+    in the incident list forever."""
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "not_created", "client_order_id": "a",
+             "symbol": "BTC/USDT", "side": "buy"},
+        ]),
+    ]
+    assert open_order_incidents(cycles) == []
+
+
 def test_open_order_incidents_skips_non_dict_order_entry():
     """A corrupt cycle whose orders_executed holds a non-dict entry must
     degrade that entry, not raise on o.get(...)."""

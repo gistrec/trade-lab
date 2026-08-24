@@ -153,8 +153,6 @@ class _LiveStub:
         intended = matching[0]["amount"] if matching else 0.001
         return _closed_order(coid, symbol, filled=intended)
 
-    def fetch_open_orders(self, symbol=None): return []
-
     def fetch_my_trades(self, symbol=None, since=None, limit=None):
         return list(self.my_trades)
 
@@ -655,8 +653,8 @@ def test_crash_between_create_and_persist_recovered_next_cycle(tmp_path):
     fails loud — but the order must land in state as 'open' so cycle 2's
     reconstruction finds the fill and journals it. Before the fix the
     order was invisible forever: no state entry, no journal record, the
-    fill silently dissolved into the balance, and fetch_open_orders
-    discovery does not exist."""
+    fill silently dissolved into the balance, and no startup open-order
+    discovery exists."""
     from trade_lab.execution.clientorder import make_client_order_id
 
     state = _state(tmp_path)
@@ -706,6 +704,96 @@ def test_crash_between_create_and_persist_recovered_next_cycle(tmp_path):
     assert recon["client_order_id"] == coid
     assert recon["terminal_status"] == "closed"
     assert recon["filled_amount"] == pytest.approx(entry.intended_amount)
+
+
+def test_timeout_on_create_itself_recovered_next_cycle(tmp_path):
+    """The other half of M3: the create *request* dies in flight after
+    reaching Binance. Cycle 1 fails loud leaving a 'pending_create'
+    intent; the next cycle's reconstruction finds the order by coid and
+    journals its fill. Before the fix there was no state entry at all —
+    the fill silently dissolved into the balance."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+
+    # --- Cycle 1: create raises after the request reached the exchange --
+    stub1 = _LiveStub(
+        basket=("BTC",), create_raises=ccxt.RequestTimeout("response lost"),
+    )
+    clock = _MockClock()
+    with pytest.raises(ccxt.RequestTimeout):
+        run_live_cycle(
+            broker=_broker(stub1, basket=("BTC",)),
+            journal=_journal(tmp_path), state=state,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert len(stub1.create_order_calls) == 1
+    entry = state.get(coid)
+    assert entry is not None, "lost create must be visible in state"
+    assert entry.status == "pending_create"
+
+    # --- Cycle 2: the order DID land on the exchange ---------------------
+    stub2 = _LiveStub(basket=("BTC",))
+    stub2.fetch_order_responses[coid] = [
+        _closed_order(coid, "BTC/USDT", filled=entry.intended_amount),
+    ]
+    result = run_live_cycle(
+        broker=_broker(stub2, basket=("BTC",)),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    assert stub2.create_order_calls == []          # recovered, not re-placed
+    assert state.get(coid).status == "closed"
+    recon = [c for c in _read_cycles(tmp_path) if c["outcome"] == "reconstructed"][-1]
+    assert recon["orders_executed"][0]["client_order_id"] == coid
+    assert recon["orders_executed"][0]["terminal_status"] == "closed"
+
+
+def test_never_created_pending_resolves_clean_and_same_day_retry_places(tmp_path):
+    """Create timed out and the request never reached the exchange.
+    Reconstruction must resolve the pending intent as 'not_created' —
+    a clean resolution, NOT a lost_track incident — and remove it from
+    state so a same-day retry's state fast-path cannot skip the real
+    placement."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+
+    stub1 = _LiveStub(
+        basket=("BTC",), create_raises=ccxt.RequestTimeout("never arrived"),
+    )
+    clock = _MockClock()
+    with pytest.raises(ccxt.RequestTimeout):
+        run_live_cycle(
+            broker=_broker(stub1, basket=("BTC",)),
+            journal=_journal(tmp_path), state=state,
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    assert state.get(coid).status == "pending_create"
+
+    # --- Same-day retry: exchange has no record of the coid --------------
+    stub2 = _LiveStub(basket=("BTC",))
+    result = run_live_cycle(
+        broker=_broker(stub2, basket=("BTC",)),
+        journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.reconstructed_count == 1
+    assert result.lost_track_count == 0, "not an incident: nothing was placed"
+    recon = [c for c in _read_cycles(tmp_path) if c["outcome"] == "reconstructed"][-1]
+    assert recon["orders_executed"][0]["terminal_status"] == "not_created"
+    assert recon["orders_executed"][0]["error"] is None
+    # The retry re-placed the order for real — the resolved intent must
+    # not satisfy the state fast-path.
+    assert len(stub2.create_order_calls) == 1
+    assert state.get(coid).status == "closed"
 
 
 def test_reconstruction_lost_track(tmp_path):

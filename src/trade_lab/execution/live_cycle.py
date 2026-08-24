@@ -320,6 +320,34 @@ def _reconstruct_open_orders(
         )
 
         if order is None:
+            if entry.status == "pending_create":
+                # The create request never reached the exchange: nothing
+                # was placed, nothing to track. NOT a lost_track incident.
+                # The entry is removed (not marked terminal) so a
+                # same-day retry's state fast-path cannot skip the real
+                # placement.
+                logger.info(
+                    "Order %s was never created on the exchange "
+                    "(pending_create intent, no record found); resolving "
+                    "as not_created.", coid,
+                )
+                state.remove(coid)
+                resolved.append({
+                    "client_order_id": coid,
+                    "exchange_order_id": None,
+                    "symbol": entry.symbol,
+                    "side": entry.side,
+                    "intended_amount": entry.intended_amount,
+                    "terminal_status": "not_created",
+                    "filled_amount": 0.0,
+                    "filled_notional_quote": 0.0,
+                    "average_price": None,
+                    "fees_paid_quote": None,
+                    "placed_at": entry.placed_at,
+                    "terminal_at": utcnow_iso(),
+                    "error": None,
+                })
+                continue
             if entry.status == "lost_track":
                 logger.info(
                     "Order %s still lost_track — exchange has no record; "
@@ -377,6 +405,18 @@ def _reconstruct_open_orders(
             terminal = "partial" if filled > 0 else status_str
         else:
             # Still non-terminal — leave entry for next cycle to retry.
+            if entry.status == "pending_create":
+                # Now confirmed on the exchange: upgrade the intent so
+                # state reflects what is known.
+                state.put(replace(
+                    entry,
+                    status="open",
+                    exchange_order_id=(
+                        str(exchange_id) if exchange_id is not None
+                        else entry.exchange_order_id
+                    ),
+                    last_seen_at=utcnow_iso(),
+                ))
             logger.info(
                 "Order %s still non-terminal at reconstruction (status=%s); "
                 "leaving in state.", coid, status_str,

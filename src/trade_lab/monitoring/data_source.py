@@ -128,8 +128,12 @@ INCIDENT_OUTCOMES = frozenset({"failed", "unknown_orders", "partial"})
 
 # Terminal order states that count as fully resolved. Anything else an
 # executed order lands in (partial, rejected, lost_track, timeout, ...) is an
-# open incident until a later cycle resolves it.
-RESOLVED_ORDER_STATUSES = frozenset({"closed", "canceled", "cancelled"})
+# open incident until a later cycle resolves it. 'not_created' is a clean
+# reconstruction verdict — a pending_create intent whose request never
+# reached the exchange — not an unresolved order.
+RESOLVED_ORDER_STATUSES = frozenset(
+    {"closed", "canceled", "cancelled", "not_created"}
+)
 
 
 def recent_incidents(cycles: list[dict]) -> list[dict]:

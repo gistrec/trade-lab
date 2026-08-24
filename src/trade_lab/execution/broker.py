@@ -108,7 +108,6 @@ class _CcxtExchange(Protocol):
         self, id: str, symbol: Optional[str] = ...,
         params: Optional[dict] = ...,
     ) -> dict: ...
-    def fetch_open_orders(self, symbol: Optional[str] = ...) -> list: ...
     def fetch_my_trades(
         self, symbol: Optional[str] = ...,
         since: Optional[int] = ..., limit: Optional[int] = ...,
@@ -632,8 +631,10 @@ class Broker:
         if amount <= 0:
             raise ValueError(f"amount must be positive, got {amount}")
         # NOTE: create_order is timed but deliberately NOT retried here — a
-        # transient failure is resolved by the reconstruction path (query by
-        # clientOrderId next cycle), which keeps placement idempotency-safe.
+        # blind retry could double-place. A create that dies in flight is
+        # covered by the pending_create intent orders.py persists before
+        # this call: a same-day re-run recovers via query-before-place,
+        # later cycles via reconstruction.
         return self._timed_call(
             "create_order", self.exchange.create_order,
             symbol, "market", side, amount, None,
@@ -661,17 +662,6 @@ class Broker:
             client_order_id, symbol,
             {"origClientOrderId": client_order_id},
         )
-
-    def fetch_open_orders(self, symbol: Optional[str] = None) -> list:
-        """Open orders, optionally filtered to one symbol.
-
-        Used at cycle startup to discover orders that exist on the
-        exchange but are not in our local state — for example because
-        the state file was wiped or a previous cycle crashed before
-        persisting.
-        """
-        return self._read_call(
-            "fetch_open_orders", self.exchange.fetch_open_orders, symbol)
 
     def fetch_my_trades_since(
         self,
