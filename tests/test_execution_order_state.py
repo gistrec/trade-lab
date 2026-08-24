@@ -77,34 +77,6 @@ def test_open_entries_excludes_terminal(tmp_path):
     }
 
 
-def test_mark_terminal_updates_status(tmp_path):
-    store = OrderStateStore(tmp_path / "orders.json")
-    store.put(_entry("c1", status="open"))
-    store.mark_terminal("c1", "closed")
-    assert store.get("c1").status == "closed"
-
-
-def test_mark_terminal_requires_terminal_status(tmp_path):
-    store = OrderStateStore(tmp_path / "orders.json")
-    store.put(_entry("c1"))
-    with pytest.raises(ValueError, match="terminal status"):
-        store.mark_terminal("c1", "open")
-
-
-def test_mark_terminal_unknown_id_raises(tmp_path):
-    store = OrderStateStore(tmp_path / "orders.json")
-    with pytest.raises(KeyError):
-        store.mark_terminal("ghost", "closed")
-
-
-def test_mark_terminal_updates_last_seen_at(tmp_path):
-    store = OrderStateStore(tmp_path / "orders.json")
-    store.put(_entry("c1", status="open"))
-    original_last_seen = store.get("c1").last_seen_at
-    store.mark_terminal("c1", "closed")
-    assert store.get("c1").last_seen_at != original_last_seen
-
-
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------

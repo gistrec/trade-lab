@@ -39,9 +39,11 @@ import subprocess
 import sys
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Re-export: the one utcnow_iso definition lives in order_state.
+from .order_state import utcnow_iso as utcnow_iso
 
 
 JOURNAL_SCHEMA_VERSION = 2
@@ -242,8 +244,3 @@ def get_python_version() -> str:
 def new_cycle_id() -> str:
     """Generate a new cycle UUID4 as a string."""
     return str(uuid.uuid4())
-
-
-def utcnow_iso() -> str:
-    """Return current UTC time as an ISO-8601 string with timezone."""
-    return datetime.now(timezone.utc).isoformat()

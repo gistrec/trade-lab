@@ -20,9 +20,9 @@ import pytest
 
 from trade_lab.monitoring.data_source import (
     JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, TradeEvent, as_float,
-    cycle_orders_executed, cycle_total_drift, drift_series, duration_series,
+    cycle_orders_executed, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
-    largest_inter_cycle_gap, max_inter_cycle_gap_seconds,
+    largest_inter_cycle_gap,
     unfillable_drift_series,
     open_order_incidents, parse_iso,
     recent_incidents, trade_events,
@@ -743,23 +743,6 @@ def test_open_order_incidents_empty_when_all_resolved():
     assert open_order_incidents(cycles) == []
 
 
-def test_max_inter_cycle_gap_detects_mid_window_pause():
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    cycles = [
-        _cycle_entry("c1", ended_at=base.isoformat()),
-        _cycle_entry("c2", ended_at=(base + timedelta(hours=1)).isoformat()),
-        # 3-day pause here
-        _cycle_entry("c3", ended_at=(base + timedelta(days=3)).isoformat()),
-    ]
-    gap = max_inter_cycle_gap_seconds(cycles)
-    assert gap == pytest.approx((timedelta(days=3) - timedelta(hours=1)).total_seconds())
-
-
-def test_max_inter_cycle_gap_none_with_under_two_timestamps():
-    assert max_inter_cycle_gap_seconds([]) is None
-    assert max_inter_cycle_gap_seconds([_cycle_entry("c1")]) is None
-
-
 def test_largest_gap_reports_its_boundaries():
     """The dashboard needs *when* the pause happened, not just how long:
     a gap the cron recovered from days ago is history, not an incident."""
@@ -867,39 +850,6 @@ def test_duration_series_and_stats():
 
 def test_duration_stats_none_when_empty():
     assert duration_stats([]) is None
-
-
-def test_cycle_total_drift_sums_abs_gaps():
-    cycle = {
-        "target_allocation": {"BTC": 6000.0, "ETH": 4000.0},
-        "current_holdings_quote": {"BTC": 6300.0, "ETH": 3800.0},
-    }
-    # |6000-6300| + |4000-3800| = 300 + 200 = 500
-    assert cycle_total_drift(cycle) == 500.0
-
-
-def test_cycle_total_drift_none_when_missing_dicts():
-    assert cycle_total_drift({"target_allocation": None,
-                              "current_holdings_quote": {}}) is None
-
-
-def test_cycle_total_drift_tolerates_null_values():
-    cycle = {
-        "target_allocation": {"BTC": None},
-        "current_holdings_quote": {"BTC": 100.0},
-    }
-    assert cycle_total_drift(cycle) == 100.0   # null coerced to 0.0, no raise
-
-
-def test_drift_series_only_successful():
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    ok = _cycle_entry("ok", ended_at=base.isoformat())
-    ok["target_allocation"] = {"BTC": 100.0}
-    ok["current_holdings_quote"] = {"BTC": 90.0}
-    failed = _cycle_entry("f", ended_at=(base + timedelta(hours=1)).isoformat(),
-                          outcome="failed")
-    series = drift_series([ok, failed])
-    assert [round(v) for _, v in series] == [10]
 
 
 def test_signal_history_skips_null_asof(tmp_path):

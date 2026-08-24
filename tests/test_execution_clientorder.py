@@ -9,7 +9,6 @@ Coverage focus:
 * Length cap: all 7 basket pairs fit within Binance's 32-char limit.
 * Validation: naive datetime, malformed symbol, bad side, oversized
   output all raise ``ValueError`` with descriptive messages.
-* Parse: inverse of the format spec, tolerant of non-string input.
 """
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ from trade_lab.execution.clientorder import (
     MAX_ID_LEN,
     make_client_order_id,
     normalize_symbol,
-    parse_client_order_id,
 )
 
 
@@ -176,39 +174,3 @@ def test_normalize_symbol_rejects_missing_base():
 def test_normalize_symbol_rejects_non_string():
     with pytest.raises(ValueError):
         normalize_symbol(123)
-
-
-# ---------------------------------------------------------------------------
-# parse_client_order_id
-# ---------------------------------------------------------------------------
-
-
-def test_parse_client_order_id_roundtrip():
-    parsed = parse_client_order_id("tsmom_20260530_BTCUSDT_buy")
-    assert parsed == {
-        "prefix": "tsmom",
-        "rebal_date": date(2026, 5, 30),
-        "symbol_normalized": "BTCUSDT",
-        "side": "buy",
-    }
-
-
-def test_parse_unknown_prefix_returns_none():
-    assert parse_client_order_id("foo_20260530_BTCUSDT_buy") is None
-
-
-def test_parse_malformed_date_returns_none():
-    assert parse_client_order_id("tsmom_BADDATEX_BTCUSDT_buy") is None
-
-
-def test_parse_invalid_side_returns_none():
-    assert parse_client_order_id("tsmom_20260530_BTCUSDT_long") is None
-
-
-def test_parse_empty_string_returns_none():
-    assert parse_client_order_id("") is None
-
-
-def test_parse_non_string_returns_none():
-    assert parse_client_order_id(None) is None
-    assert parse_client_order_id(12345) is None

@@ -37,7 +37,7 @@ def test_all_docs_exist_and_are_nonempty():
 
 
 def test_read_markdown_returns_content_for_known_doc():
-    text = research.results_markdown()
+    text = research.read_markdown(research.RESULTS_INDEX)
     assert "master index" in text.lower()
 
 
