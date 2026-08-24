@@ -110,11 +110,6 @@ def doc_title(relpath: str) -> str:
     return Path(relpath).stem.replace("_", " ")
 
 
-def results_markdown() -> str:
-    """The RESULTS.md master-index markdown."""
-    return read_markdown(RESULTS_INDEX)
-
-
 # Backtick-wrapped repo-relative doc paths, e.g. `findings/foo.md` or
 # `RESULTS.md`. The char class excludes backticks/spaces so a match can't span
 # code fences or run past the closing backtick.
