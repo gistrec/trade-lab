@@ -38,6 +38,12 @@ from typing import Iterable, Optional
 import numpy as np
 import pandas as pd
 
+from ._trend_layers import (
+    apply_rebalance_band,
+    sma_filter,
+    validate_trend_params,
+    vol_weight,
+)
 from .base import Strategy
 
 
@@ -109,18 +115,13 @@ class DonchianTrendEnsembleStrategy(Strategy):
         self.sma_filter_periods = _coerce_int_sequence(
             sma_filter_periods, "sma_filter_periods"
         )
-        if vol_lookback < 2:
-            raise ValueError("vol_lookback must be >= 2")
-        if annual_vol_target <= 0:
-            raise ValueError("annual_vol_target must be positive")
-        if annualization_factor <= 0:
-            raise ValueError("annualization_factor must be positive")
-        if not 0 < max_position_size <= 1:
-            raise ValueError(
-                "max_position_size must be in (0, 1] for spot-only mode"
-            )
-        if rebalance_threshold < 0:
-            raise ValueError("rebalance_threshold must be >= 0")
+        validate_trend_params(
+            vol_lookback,
+            annual_vol_target,
+            annualization_factor,
+            max_position_size,
+            rebalance_threshold,
+        )
         if btc_gate_sma_period < 1:
             raise ValueError("btc_gate_sma_period must be positive")
 
@@ -136,19 +137,24 @@ class DonchianTrendEnsembleStrategy(Strategy):
         close = candles["close"].astype(float)
 
         donchian = self._donchian_ensemble(close)
-        sma_ok = self._sma_filter(close)
+        sma_ok = sma_filter(close, self.sma_filter_periods)
         raw_signal = donchian.where(sma_ok, 0.0)
 
         if self.btc_candles is not None:
             btc_gate = self._btc_gate(close.index)
             raw_signal = raw_signal.where(btc_gate, 0.0)
 
-        vol_weight = self._vol_weight(close)
-        target_position = (raw_signal * vol_weight).clip(
+        weight = vol_weight(
+            close,
+            self.vol_lookback,
+            self.annual_vol_target,
+            self.annualization_factor,
+        )
+        target_position = (raw_signal * weight).clip(
             lower=0.0, upper=self.max_position_size
         ).fillna(0.0)
 
-        return self._apply_rebalance_band(target_position)
+        return apply_rebalance_band(target_position, self.rebalance_threshold)
 
     # ------------------------------------------------------------------
     # Components
@@ -174,18 +180,6 @@ class DonchianTrendEnsembleStrategy(Strategy):
         stacked = pd.concat(components, axis=1)
         return stacked.mean(axis=1)
 
-    def _sma_filter(self, close: pd.Series) -> pd.Series:
-        """Return True only where close exceeds every SMA filter lookback."""
-        ok = pd.Series(True, index=close.index)
-        for period in self.sma_filter_periods:
-            sma = close.rolling(period).mean()
-            cond = close > sma
-            # Treat warm-up bars (SMA still NaN) as filter-fails-shut so the
-            # strategy stays flat instead of relying on undefined data.
-            cond[sma.isna()] = False
-            ok = ok & cond
-        return ok
-
     def _btc_gate(self, target_index: pd.Index) -> pd.Series:
         """Boolean series aligned to ``target_index``: True iff BTC > SMA(N)."""
         btc_close = self.btc_candles["close"].astype(float)
@@ -193,48 +187,3 @@ class DonchianTrendEnsembleStrategy(Strategy):
         gate = (btc_close > btc_sma) & btc_sma.notna()
         # Align to the target asset's index; pad-forward for any gaps.
         return gate.reindex(target_index, method="ffill").fillna(False)
-
-    def _apply_rebalance_band(self, target_position: pd.Series) -> pd.Series:
-        """Suppress small adjustments but always honor entries and exits.
-
-        The Donchian + SMA + vol stack changes the target position every
-        bar — usually only by a small amount because realized vol drifts.
-        Charging fees on each of those is what produced the ~16% lifetime
-        fee drag in the first BTC backtest. The band keeps the position
-        stable until a meaningful move is needed:
-
-        - If the new target is 0 while we're long, exit immediately.
-        - If the new target is > 0 while we're flat, enter immediately.
-        - Otherwise (both currently and newly long), only update if
-          ``abs(target - current) >= rebalance_threshold``.
-
-        ``rebalance_threshold == 0`` short-circuits — the unfiltered
-        target is returned, recovering the pre-feature behaviour exactly.
-        Entries and exits are *never* suppressed (the threshold only
-        affects size adjustments).
-        """
-        if self.rebalance_threshold == 0.0:
-            return target_position
-
-        held = pd.Series(0.0, index=target_position.index, dtype=float)
-        current = 0.0
-        for i, target in enumerate(target_position.to_numpy()):
-            target = float(target)
-            if target == 0.0 or current == 0.0:
-                # Entry / exit boundary — always honor.
-                current = target
-            elif abs(target - current) >= self.rebalance_threshold:
-                current = target
-            held.iloc[i] = current
-        return held
-
-    def _vol_weight(self, close: pd.Series) -> pd.Series:
-        """``target_vol / realized_vol``, with safe handling of NaN / zero vol."""
-        daily_returns = close.pct_change(fill_method=None)
-        realized_vol_daily = daily_returns.rolling(self.vol_lookback).std()
-        realized_vol_annual = realized_vol_daily * np.sqrt(self.annualization_factor)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            weight = self.annual_vol_target / realized_vol_annual
-        # inf (zero realized vol) and NaN (insufficient history) both map
-        # to zero exposure — never silently lever up.
-        return weight.replace([np.inf, -np.inf], np.nan).fillna(0.0)
