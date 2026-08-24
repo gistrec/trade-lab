@@ -135,10 +135,17 @@ def place_order(
     2. **Query-before-place**: ``fetch_order_by_coid``. If the exchange
        knows the ID, wait for it to terminalize; never call
        ``create_order``.
-    3. **Create**: ``create_order_safe`` with the deterministic ID.
-       Business rejections (``InvalidOrder`` / ``InsufficientFunds`` /
-       ``BadRequest``) come back as ``terminal_status='rejected'``.
-       Network and unexpected exchange errors propagate.
+    3. **Persist the intent, then create**: a ``pending_create`` entry
+       is written BEFORE ``create_order_safe``. A create request that
+       dies in flight (RequestTimeout) may still have reached the
+       exchange — with no entry, the order lives under a dated coid
+       that no later cycle ever queries, and its fill silently
+       dissolves into the balance. Reconstruction resolves the pending
+       entry either way: order found → normal terminal path; no record
+       → clean ``not_created`` resolution. Business rejections
+       (``InvalidOrder`` / ``InsufficientFunds`` / ``BadRequest``)
+       overwrite it with ``terminal_status='rejected'``. Network and
+       unexpected exchange errors propagate.
     4. **Persist 'open' immediately**: the instant the exchange is
        known to have the order (create acked, or found by the query in
        step 2), it is written to state as ``status='open'`` — BEFORE
@@ -188,6 +195,7 @@ def place_order(
         return result
 
     placed_at = utcnow_iso()
+    _persist_pending(state, intent, client_order_id, placed_at)
     try:
         new_order = broker.create_order_safe(
             intent.symbol, intent.side, intent.base_amount, client_order_id,
@@ -515,6 +523,32 @@ def _placed_at_from_order(order: dict) -> str:
     if ts:
         return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).isoformat()
     return utcnow_iso()
+
+
+def _persist_pending(
+    state: OrderStateStore,
+    intent: OrderIntent,
+    client_order_id: str,
+    placed_at: str,
+) -> None:
+    """Record the intent as ``pending_create`` BEFORE calling create.
+
+    Closes the last M3 gap: an exception raised by ``create_order``
+    itself (RequestTimeout with the request already at Binance) used to
+    leave no state entry at all — invisible to reconstruction forever,
+    since tomorrow's coid is a different date. A write failure here
+    propagates BEFORE anything is placed, which is the safe direction.
+    """
+    state.put(OrderStateEntry(
+        client_order_id=client_order_id,
+        symbol=intent.symbol,
+        side=intent.side,
+        intended_amount=intent.base_amount,
+        status="pending_create",
+        exchange_order_id=None,
+        placed_at=placed_at,
+        last_seen_at=utcnow_iso(),
+    ))
 
 
 def _persist_open(

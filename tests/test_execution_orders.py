@@ -116,9 +116,6 @@ class _MockExchange:
             raise item
         return dict(item)
 
-    def fetch_open_orders(self, symbol=None):
-        return []
-
     def fetch_my_trades(self, symbol=None, since=None, limit=None):
         self.fetch_my_trades_calls.append({
             "symbol": symbol, "since": since, "limit": limit,
@@ -348,6 +345,47 @@ def test_network_error_propagates(tmp_path):
             broker, _intent(),
             client_order_id="tsmom_20260530_BTCUSDT_buy", state=store,
         )
+
+
+def test_create_timeout_leaves_pending_intent_in_state(tmp_path):
+    """A create request that dies in flight may still have reached the
+    exchange. The intent must already be in state as 'pending_create'
+    when the exception propagates — with no entry, the order (and its
+    fill) is invisible to reconstruction forever: tomorrow's coid is a
+    different date."""
+    exch = _MockExchange(
+        create_order_raises=ccxt.RequestTimeout("response lost"),
+        fetch_order_sequence=[ccxt.OrderNotFound("not placed yet")],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    coid = "tsmom_20260824_BTCUSDT_buy"
+
+    with pytest.raises(ccxt.RequestTimeout):
+        place_order(broker, _intent(), client_order_id=coid, state=store)
+
+    entry = store.get(coid)
+    assert entry is not None, "lost create must be visible in state"
+    assert entry.status == "pending_create"
+    assert entry.exchange_order_id is None
+    assert entry.symbol == "BTC/USDT"
+
+
+def test_rejected_create_overwrites_pending_intent(tmp_path):
+    """The pending intent is a pre-create record only: a business
+    rejection must leave the final 'rejected' status, not a dangling
+    pending_create for reconstruction to chase."""
+    exch = _MockExchange(
+        create_order_raises=ccxt.InvalidOrder("min notional not met"),
+        fetch_order_sequence=[ccxt.OrderNotFound("not placed yet")],
+    )
+    broker = _broker(exch)
+    store = _store(tmp_path)
+    coid = "tsmom_20260824_BTCUSDT_buy"
+
+    result = place_order(broker, _intent(), client_order_id=coid, state=store)
+    assert result.terminal_status == "rejected"
+    assert store.get(coid).status == "rejected"
 
 
 # ---------------------------------------------------------------------------

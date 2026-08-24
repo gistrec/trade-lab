@@ -110,7 +110,6 @@ class _FakeExchange:
             raise ccxt.OrderNotFound("not yet")
         return dict(self.fetch_terminal)
 
-    def fetch_open_orders(self, symbol=None): return []
     def fetch_my_trades(self, symbol=None, since=None, limit=None): return []
 
 
