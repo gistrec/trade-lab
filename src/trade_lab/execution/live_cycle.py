@@ -52,7 +52,7 @@ from typing import Callable, Optional, Sequence
 from .allocator import compute_target_allocation
 from .broker import Broker, BrokerError, MarketConstraints
 from .clientorder import make_client_order_id
-from .delta import compute_delta_plan, total_skipped_quote_drift
+from .delta import SkippedDelta, compute_delta_plan, total_skipped_quote_drift
 from .journal import (
     Cycle,
     JournalWriter,
@@ -143,9 +143,20 @@ def run_live_cycle(
     # deliberately NOT re-journaled (see _reconstruct_open_orders); this
     # counter only feeds the exit code, keeping alerting red until an
     # operator resolves the order.
+    open_after_recon = state.open_entries()
     lost_track_count = sum(
-        1 for e in state.open_entries().values() if e.status == "lost_track"
+        1 for e in open_after_recon.values() if e.status == "lost_track"
     )
+    # Entries still live ON THE EXCHANGE after reconstruction (open /
+    # partial / timeout): their expected fill is not in the balance yet,
+    # so a fresh delta for the same pair doubles the position once both
+    # fill. lost_track is deliberately NOT here — the exchange has no
+    # record, the balance is truthful, and the incident already
+    # escalates via lost_track_count.
+    pending_by_pair: dict[str, list] = {}
+    for e in open_after_recon.values():
+        if e.status != "lost_track":
+            pending_by_pair.setdefault(e.symbol, []).append(e)
 
     # Phase 2-5: Main cycle. Wrapped so any exception still gets
     # journaled, then re-raised so the cron stderr sees the traceback.
@@ -184,7 +195,41 @@ def run_live_cycle(
             for sym in broker.config.basket
         }
 
-        sorted_intents = sort_orders_for_placement(plan.orders)
+        # A pair with a live foreign-coid order sits this cycle out: the
+        # pending fill is not in the balance, so today's delta for it is
+        # computed against a stale position. Same-coid entries pass
+        # through — place_order's query-before-place finds that exact
+        # order and waits on it, which cannot duplicate.
+        pending_skips: list[SkippedDelta] = []
+        sendable: list = []
+        for intent in plan.orders:
+            coid = make_client_order_id(rebal_date, intent.symbol, intent.side)
+            blockers = [
+                e for e in pending_by_pair.get(intent.symbol, [])
+                if e.client_order_id != coid
+            ]
+            if not blockers:
+                sendable.append(intent)
+                continue
+            logger.warning(
+                "SKIP %s %s (%.2f %s): order %s from a prior cycle is "
+                "still non-terminal on the exchange — planning against "
+                "the current balance would double the position once "
+                "both fill. Will retry next cycle.",
+                intent.side, intent.symbol, intent.notional_quote, quote,
+                blockers[0].client_order_id,
+            )
+            pending_skips.append(SkippedDelta(
+                symbol=intent.symbol,
+                desired_side=intent.side,
+                desired_amount=intent.base_amount,
+                desired_notional=intent.notional_quote,
+                constraint_min_amount=None,
+                constraint_min_cost=None,
+                reason="pending_order",
+            ))
+
+        sorted_intents = sort_orders_for_placement(sendable)
         for i, intent in enumerate(sorted_intents):
             if i > 0:
                 sleep_fn(inter_order_sleep_s)
@@ -215,6 +260,7 @@ def run_live_cycle(
             allocation=allocation,
             current_holdings_quote=current_holdings_quote,
             plan=plan,
+            pending_skips=pending_skips,
             order_results=order_results,
         )
         return LiveCycleResult(
@@ -587,6 +633,7 @@ def _write_main_cycle(
     allocation,
     current_holdings_quote: dict,
     plan,
+    pending_skips: list[SkippedDelta],
     order_results: list[OrderResult],
 ) -> None:
     ended_at = datetime.now(timezone.utc)
@@ -627,7 +674,11 @@ def _write_main_cycle(
         target_allocation=dict(allocation.target_quote_per_asset),
         current_holdings_quote=current_holdings_quote,
         orders_planned=[_intent_dict(o) for o in plan.orders],
-        orders_skipped=[_skipped_dict(s) for s in plan.skipped],
+        orders_skipped=[
+            _skipped_dict(s) for s in list(plan.skipped) + pending_skips
+        ],
+        # plan.skipped only: a pending_order skip is transient (retried
+        # next cycle), while this metric tracks unfillable sub-min drift.
         total_skipped_quote_drift=total_skipped_quote_drift(plan),
         orders_executed=[r.to_dict() for r in order_results],
     )
