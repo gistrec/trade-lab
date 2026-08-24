@@ -1140,6 +1140,8 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     Journal and state files are environment-checked so testnet and
     mainnet runs can never interleave in the same files.
     """
+    import math
+
     from .execution import (
         Broker, BrokerError, InstanceLockHeld, JournalEnvMismatch,
         JournalWriter, OrderStateEnvMismatch, OrderStateStore,
@@ -1154,6 +1156,16 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         raise SystemExit(f"Config error: {exc}")
 
     _validate_candles_window(int(args.candles), required_basket_bars())
+
+    # argparse's type=float happily accepts 'nan' and 'inf'; NaN slides
+    # through the `>` age comparison and silently disables the gate whose
+    # only documented disable is 0.
+    max_age_h = float(args.max_signal_age_h)
+    if not math.isfinite(max_age_h):
+        raise SystemExit(
+            f"REFUSED: --max-signal-age-h must be a finite number "
+            f"(0 disables), got {args.max_signal_age_h!r}."
+        )
 
     if not config.sandbox and not config.mainnet_live_orders:
         raise SystemExit(
@@ -1217,8 +1229,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             state=state,
             total_timeout_s=float(args.timeout_s),
             max_decision_age_s=(
-                None if float(args.max_signal_age_h) <= 0
-                else float(args.max_signal_age_h) * 3600.0
+                None if max_age_h <= 0 else max_age_h * 3600.0
             ),
         )
     except SignalComputationError as exc:

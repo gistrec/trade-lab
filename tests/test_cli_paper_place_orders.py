@@ -61,6 +61,29 @@ def test_refuses_mainnet_without_live_orders_flag(monkeypatch, tmp_path):
     )
 
 
+@pytest.mark.parametrize("bad_age", [float("nan"), float("inf")])
+def test_refuses_non_finite_signal_age(monkeypatch, tmp_path, bad_age):
+    """argparse's type=float accepts 'nan'/'inf'; NaN slides through the
+    `>` age comparison and silently disables the gate whose only
+    documented disable is 0. Refuse before the broker is constructed."""
+    connect_calls: list = []
+    monkeypatch.setattr(
+        "trade_lab.execution.load_paper_config",
+        lambda: _mainnet_config(mainnet_live_orders=True),
+    )
+    monkeypatch.setattr(
+        Broker, "connect",
+        classmethod(lambda cls, config: connect_calls.append(config)),
+    )
+
+    args = _args(tmp_path)
+    args.max_signal_age_h = bad_age
+    with pytest.raises(SystemExit, match="REFUSED.*max-signal-age-h"):
+        cmd_paper_place_orders(args)
+
+    assert connect_calls == []
+
+
 def test_mainnet_runs_with_three_flags(monkeypatch, tmp_path):
     """The full three-flag config reaches the live cycle."""
     from trade_lab.execution.live_cycle import LiveCycleResult
