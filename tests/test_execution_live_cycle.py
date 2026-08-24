@@ -1327,9 +1327,10 @@ def test_no_reconstruction_when_state_empty(tmp_path):
 
 
 def test_cross_direction_sells_first(tmp_path):
-    """Hold BTC + ETH while signal=0 → sells for both. With single
-    direction the order is consistent. We verify the first orders
-    are sells, not buys."""
+    """Hold BTC + ETH while signal=0 → exactly one sell per held asset,
+    no buys, all fills journaled. Exact counts, not just all(...) over
+    the observed sides — that predicate is vacuously true on an empty
+    call list, so a regression placing zero orders would pass."""
     stub = _LiveStub(
         basket=("BTC", "ETH"),
         balance_usdt=0.0,
@@ -1338,12 +1339,58 @@ def test_cross_direction_sells_first(tmp_path):
     )
     broker = _broker(stub)
     clock = _MockClock()
-    run_live_cycle(
+    result = run_live_cycle(
         broker, journal=_journal(tmp_path), state=_state(tmp_path),
         sleep_fn=clock.sleep, time_fn=clock.time,
     )
-    sides_in_order = [c["side"] for c in stub.create_order_calls]
-    assert all(s == "sell" for s in sides_in_order), sides_in_order
+    assert result.outcome == "success"
+    assert len(stub.create_order_calls) == 2    # one per held asset
+    for call in stub.create_order_calls:
+        assert call["side"] == "sell"
+        assert call["amount"] > 0
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "success"
+    executed = cycle["orders_executed"]
+    assert len(executed) == 2
+    assert all(o["side"] == "sell" for o in executed)
+    assert all(o["terminal_status"] == "closed" for o in executed)
+
+
+def test_full_liquidation_sells_every_held_asset(tmp_path):
+    """Ladder→0 across a fully-held 4-asset basket → exactly one sell
+    per held asset with a positive amount, zero buys, and a journaled
+    closed fill for each. Pins the liquidation path end to end: an
+    empty plan or a silently dropped sell breaks the exact counts."""
+    holdings = {"BTC": 0.1, "ETH": 0.5, "ADA": 0.2, "SOL": 0.3}
+    basket = tuple(holdings)
+    stub = _LiveStub(
+        basket=basket,
+        balance_usdt=0.0,
+        asset_holdings=holdings,
+        closes=np.linspace(200, 100, 500).tolist(),  # signal=0
+    )
+    broker = _broker(stub, basket=basket)
+    clock = _MockClock()
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+    assert result.outcome == "success"
+    assert len(result.order_results) == len(holdings)
+    assert len(stub.create_order_calls) == len(holdings)
+    assert {c["symbol"] for c in stub.create_order_calls} == {
+        f"{a}/USDT" for a in holdings
+    }
+    for call in stub.create_order_calls:
+        assert call["side"] == "sell"
+        assert call["amount"] > 0
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "success"
+    executed = cycle["orders_executed"]
+    assert len(executed) == len(holdings)
+    assert all(o["side"] == "sell" for o in executed)
+    assert all(o["terminal_status"] == "closed" for o in executed)
+    assert all(o["filled_amount"] > 0 for o in executed)
 
 
 # ---------------------------------------------------------------------------
