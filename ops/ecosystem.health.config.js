@@ -36,10 +36,9 @@ module.exports = {
     },
     {
       // Second instance watching the MAINNET journal. Same read-only
-      // server, its own port. The daily check is disabled while the
-      // mainnet rollout is in the dry-run observation phase (no live
-      // order cron yet) — flip TRADE_LAB_HEALTH_DAILY_DISABLED to
-      // "false" in the same commit that enables the mainnet live cron.
+      // server, its own port. The daily check is live as of the
+      // 2026-08-24 mainnet live cron — a silently dead order cron on
+      // real money must page.
       name: "trade-lab-health-mainnet",
       cwd: path.resolve(__dirname, ".."),
       script: "ops/health_server.py",
@@ -50,7 +49,7 @@ module.exports = {
         TRADE_LAB_HEALTH_PORT: "7002",
         TRADE_LAB_HEALTH_HEARTBEAT_MAX_AGE_S: "43200",
         TRADE_LAB_HEALTH_DAILY_MAX_AGE_S: "93600",
-        TRADE_LAB_HEALTH_DAILY_DISABLED: "true",
+        TRADE_LAB_HEALTH_DAILY_DISABLED: "false",
       },
       autorestart: true,
       watch: false,

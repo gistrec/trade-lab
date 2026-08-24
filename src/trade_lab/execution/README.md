@@ -304,6 +304,11 @@ fast-path.
    simultaneously. Flip `TRADE_LAB_HEALTH_DAILY_DISABLED` to `false`
    for `trade-lab-health-mainnet` in the same commit.
 
+   Done 2026-08-24: cron at 00:45 UTC (declared in the infra repo,
+   `ansible/apps.yml`), daily health check re-enabled. Orders still
+   require `TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true` in
+   `.env.mainnet` — the cron does not open the gate by itself.
+
 ### Why testnet cannot validate order placement
 
 Binance Spot Testnet wipes kline history on a ~monthly reset, so the
