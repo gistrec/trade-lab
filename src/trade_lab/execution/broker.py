@@ -99,6 +99,9 @@ class _CcxtExchange(Protocol):
     def fetch_ticker(self, symbol: str) -> dict: ...
     def fetch_status(self) -> dict: ...
     def fetch_time(self) -> int: ...
+    def fetch_ohlcv(
+        self, symbol: str, timeframe: str = ..., limit: Optional[int] = ...,
+    ) -> list: ...
     def load_markets(self, reload: bool = ...) -> dict: ...
     # Phase #2b — order placement and reconstruction:
     def create_order(
@@ -561,6 +564,20 @@ class Broker:
                 f"Ticker for {symbol} has no last/close field; cannot mark."
             )
         return float(last)
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list:
+        """Latest ``limit`` OHLCV rows ``[ts_ms, o, h, l, c, v]`` for ``symbol``.
+
+        Read-retry path like every other read — a transient NetworkError
+        on one kline fetch must not abort the whole cycle.
+        """
+        rows = self._read_call(
+            "fetch_ohlcv", self.exchange.fetch_ohlcv,
+            symbol, timeframe=timeframe, limit=limit,
+        )
+        if not isinstance(rows, list):
+            raise BrokerError(f"fetch_ohlcv did not return a list for {symbol}.")
+        return rows
 
     def fetch_market_constraints(self, symbol: str) -> "MarketConstraints":
         """Pull minimum notional and amount-step for a symbol via CCXT.

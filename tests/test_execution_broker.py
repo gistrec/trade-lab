@@ -619,6 +619,72 @@ def test_read_call_does_not_retry_non_transient():
     assert n["c"] == 1  # non-transient: no retry
 
 
+_OHLCV_ROWS = [[1715558400000, 1.0, 2.0, 0.5, 1.5, 10.0]]
+
+
+def test_fetch_ohlcv_retries_transient_then_succeeds():
+    # Klines are a read like any other: one transient blip on a daily
+    # candle fetch must not abort the cycle (it would slip the rebalance
+    # by a day).
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def flaky(symbol, timeframe="1d", limit=None):
+        n["c"] += 1
+        if n["c"] < 3:
+            raise ccxt.RequestTimeout("blip")
+        assert (symbol, timeframe, limit) == ("BTC/USDT", "1d", 400)
+        return _OHLCV_ROWS
+
+    exch.fetch_ohlcv = flaky
+    broker = Broker(_config(), exch)
+    rows = broker.fetch_ohlcv("BTC/USDT", timeframe="1d", limit=400)
+    assert rows == _OHLCV_ROWS
+    assert n["c"] == 3  # 2 transient failures + 1 success
+    ep = broker.exchange_call_stats()["by_endpoint"]["fetch_ohlcv"]
+    assert ep["count"] == 3 and ep["errors"] == 2
+
+
+def test_fetch_ohlcv_gives_up_after_max_attempts():
+    # Retry must not mask a permanent failure: the NetworkError still
+    # propagates after retry_max_attempts.
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def always_fail(symbol, timeframe="1d", limit=None):
+        n["c"] += 1
+        raise ccxt.NetworkError("down")
+
+    exch.fetch_ohlcv = always_fail
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.NetworkError):
+        broker.fetch_ohlcv("BTC/USDT", timeframe="1d", limit=400)
+    assert n["c"] == 3  # default retry_max_attempts
+
+
+def test_fetch_ohlcv_does_not_retry_non_transient():
+    exch = _MockExchange()
+    n = {"c": 0}
+
+    def bad_symbol(symbol, timeframe="1d", limit=None):
+        n["c"] += 1
+        raise ccxt.BadSymbol("unknown symbol")
+
+    exch.fetch_ohlcv = bad_symbol
+    broker = Broker(_config(), exch)
+    with pytest.raises(ccxt.BadSymbol):
+        broker.fetch_ohlcv("NOPE/USDT", timeframe="1d", limit=400)
+    assert n["c"] == 1
+
+
+def test_fetch_ohlcv_raises_on_non_list_response():
+    exch = _MockExchange()
+    exch.fetch_ohlcv = lambda symbol, timeframe="1d", limit=None: {"oops": True}
+    broker = Broker(_config(), exch)
+    with pytest.raises(BrokerError, match="did not return a list"):
+        broker.fetch_ohlcv("BTC/USDT", timeframe="1d", limit=400)
+
+
 def test_create_order_refused_on_mainnet_without_live_orders_flag():
     """Defense in depth for the THIRD flag (CLAUDE.md hard rule): the CLI
     enforces MAINNET_LIVE_ORDERS, but a Broker built from a two-flag

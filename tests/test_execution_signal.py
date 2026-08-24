@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import ccxt
+
 from trade_lab.backtest.market_index import build_crypto_market_index_with_weights
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
@@ -243,6 +245,66 @@ def test_signal_empty_candles_raises():
     broker = Broker(_config(), _ExchangeStub())
     with pytest.raises(SignalComputationError, match="Empty candles"):
         compute_live_signal(broker, fetch_candles=empty_fetch)
+
+
+# ---------------------------------------------------------------------------
+# Default fetch path (_fetch_recent_candles → Broker.fetch_ohlcv): kline
+# fetches get the broker's read-retry; a permanent failure still raises.
+# _config() leaves retry_base_delay_s=0.0, so retries are instant.
+# ---------------------------------------------------------------------------
+
+
+class _OhlcvExchangeStub(_ExchangeStub):
+    """Exchange stub serving raw OHLCV rows, optionally flaky."""
+
+    def __init__(self, closes, fail_first=0, fail_exc=None):
+        self._closes = closes
+        self._fail_remaining = fail_first
+        self._fail_exc = fail_exc
+        self.calls = 0
+
+    def fetch_ohlcv(self, symbol, timeframe="1d", limit=400):
+        self.calls += 1
+        if self._fail_remaining:
+            self._fail_remaining -= 1
+            raise self._fail_exc
+        ts = pd.date_range(
+            end=_END, periods=len(self._closes), freq="1D", tz="UTC",
+        ).as_unit("ns").astype("int64") // 10**6
+        return [
+            [int(t), c, c, c, c, 1.0] for t, c in zip(ts, self._closes)
+        ][-limit:]
+
+
+def test_default_fetch_survives_one_transient_kline_error():
+    """One RequestTimeout on the first of the 7 kline fetches is retried
+    inside the broker; the cycle completes instead of aborting via
+    SignalComputationError (which would slip the rebalance by a day)."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    exch = _OhlcvExchangeStub(
+        closes, fail_first=1, fail_exc=ccxt.RequestTimeout("blip"),
+    )
+    broker = Broker(_config(), exch)
+    snap = compute_live_signal(broker, now=_NOW)
+    assert snap.signal == 1.0
+    assert exch.calls == len(_config().basket) + 1  # one extra for the retry
+
+
+def test_default_fetch_permanent_failure_still_raises_signal_error():
+    """Retry must not mask a dead endpoint: after retry_max_attempts the
+    NetworkError propagates and is wrapped as SignalComputationError,
+    exactly as before — no silent basket shrinkage."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    exch = _OhlcvExchangeStub(
+        closes, fail_first=10**6, fail_exc=ccxt.NetworkError("down"),
+    )
+    broker = Broker(_config(), exch)
+    with pytest.raises(
+        SignalComputationError, match=r"Could not fetch candles for BTC/USDT",
+    ) as exc_info:
+        compute_live_signal(broker, now=_NOW)
+    assert isinstance(exc_info.value.__cause__, ccxt.NetworkError)
+    assert exch.calls == 3  # retry_max_attempts on the first asset, then abort
 
 
 # ---------------------------------------------------------------------------
