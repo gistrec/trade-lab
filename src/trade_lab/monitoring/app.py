@@ -1337,7 +1337,17 @@ def _render_portfolio(reader: JournalReader) -> None:
 
     st.subheader("Unfillable rebalance drift")
     dr = unfillable_drift_series(window)
-    if dr:
+    if len(dr) == 1:
+        # A lone point plots as a dot with no line — state the reading in
+        # words instead. The series only starts at the first live cycle, so
+        # a fresh live deployment sits here for a day.
+        at, value = dr[0]
+        st.info(
+            f"1 live cycle so far ({_humanize_iso(at.isoformat())}): "
+            f"{value:,.2f} {quote} unfillable. The chart needs a second "
+            f"live cycle — one lands per day."
+        )
+    elif dr:
         st.plotly_chart(
             _timeseries_figure(
                 dr, y_title=f"skipped notional ({quote})",

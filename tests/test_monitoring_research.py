@@ -181,3 +181,72 @@ def test_env_switcher_switches_journals(tmp_path, monkeypatch):
     # flow — Streamlit's inter-element gap would push the mainnet
     # banner lower than the testnet one. Same element count both ways.
     assert len(app.markdown) == markdown_count_mainnet
+
+
+# --------------------------------------------------------------------------
+# Unfillable-drift panel — a lone live cycle must not plot as a bare dot
+# --------------------------------------------------------------------------
+
+def _live_cycle_line(ended_at: str, skipped_drift: float) -> str:
+    """A cycle that placed real orders (orders_executed is a list)."""
+    import json
+    return json.dumps({
+        "cycle_id": "live-" + ended_at[:10], "started_at": ended_at,
+        "ended_at": ended_at, "duration_ms": 5000, "outcome": "success",
+        "error": None, "git_commit": None, "python_version": "3.11.0",
+        "context": {"mode": "live", "exchange": "binance", "sandbox": True,
+                    "quote_currency": "USDT", "basket": ["BTC"]},
+        "signal": {"asof": ended_at, "ladder_value": 1.0,
+                   "sma_gate_open": True, "per_lookback_states": {"28": 1},
+                   "basket_close": 100.0, "asset_closes": {"BTC": 50000.0}},
+        "basket_close_series": None,
+        "balance": {"quote_currency": "USDT", "quote_total": 10.0,
+                    "quote_free": 10.0, "quote_used": 0.0,
+                    "asset_totals": {"BTC": 0.001}},
+        "equity_usd": 100.0, "target_allocation": {"BTC": 100.0},
+        "current_holdings_quote": {"BTC": 100.0},
+        "orders_planned": [], "orders_skipped": [],
+        "total_skipped_quote_drift": skipped_drift,
+        "orders_executed": [], "schema_version": 2,
+    }) + "\n"
+
+
+def _run_app_with(journal_text: str, tmp_path, monkeypatch):
+    at = pytest.importorskip("streamlit.testing.v1")
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text(journal_text)
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+    app = at.AppTest.from_file(
+        str(_REPO / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    return app
+
+
+def test_single_live_cycle_states_the_reading_instead_of_charting(
+        tmp_path, monkeypatch):
+    """One point plots as a dot with no line — say it in words instead."""
+    app = _run_app_with(
+        _live_cycle_line("2026-08-24T00:53:25+00:00", 0.0),
+        tmp_path, monkeypatch)
+    infos = [str(i.value) for i in app.info]
+    assert any("1 live cycle so far" in i for i in infos), infos
+
+
+def test_no_live_cycles_explains_the_empty_panel(tmp_path, monkeypatch):
+    app = _run_app_with(_cycle_line(sandbox=True), tmp_path, monkeypatch)
+    infos = [str(i.value) for i in app.info]
+    assert any("No live cycles yet" in i for i in infos), infos
+
+
+def test_two_live_cycles_render_the_chart(tmp_path, monkeypatch):
+    app = _run_app_with(
+        _live_cycle_line("2026-08-24T00:45:00+00:00", 0.0)
+        + _live_cycle_line("2026-08-25T00:45:00+00:00", 1.25),
+        tmp_path, monkeypatch)
+    infos = [str(i.value) for i in app.info]
+    assert not any("1 live cycle so far" in i for i in infos), infos
+    assert not any("No live cycles yet" in i for i in infos), infos
