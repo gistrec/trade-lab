@@ -164,5 +164,11 @@ def render_metrics(reader, now: datetime) -> str:
         fam("tradelab_sma_gate_open", "gauge",
             "1 if the SMA regime gate was open on the last cycle",
             [(None, 1 if sig.get("sma_gate_open") else 0)])
+        age = sig.get("decision_age_s")
+        if age is not None:
+            fam("tradelab_signal_decision_age_seconds", "gauge",
+                "age of the decision bar's close when the last cycle ran "
+                "(schedule-drift detector)",
+                [(None, age)])
 
     return "\n".join(out) + "\n"

@@ -37,9 +37,18 @@ class _ExchangeStub:
     def load_markets(self, reload=False): return {}
 
 
-def _ohlcv(closes, start="2023-01-01"):
-    """Build an OHLCV frame indexed by daily UTC timestamps."""
-    idx = pd.date_range(start, periods=len(closes), freq="1D", tz="UTC")
+# Fixed decision date for deterministic frames: every default frame ENDS at
+# _NOW's yesterday, so the asof-freshness guard sees exactly the most
+# recently closed bar regardless of when the suite runs. Mid-month on
+# purpose — a month-start asof would reset the drifted weights to flat 1/N
+# and blind the weight-drift assertions.
+_NOW = pd.Timestamp("2024-05-15 00:45:00", tz="UTC")
+_END = "2024-05-14"
+
+
+def _ohlcv(closes, end=_END):
+    """Build an OHLCV frame of daily UTC bars ending at ``end``."""
+    idx = pd.date_range(end=end, periods=len(closes), freq="1D", tz="UTC")
     idx.name = "timestamp"
     return pd.DataFrame(
         {"open": closes, "high": closes, "low": closes,
@@ -67,7 +76,7 @@ def test_signal_full_long_when_both_lookbacks_positive():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert isinstance(snap, SignalSnapshot)
     assert snap.signal == 1.0
     assert snap.sma_gate_open is True
@@ -81,7 +90,7 @@ def test_signal_zero_when_basket_below_sma200():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert snap.signal == 0.0
     assert snap.sma_gate_open is False
 
@@ -94,7 +103,7 @@ def test_signal_returns_ladder_only():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert snap.signal in (0.0, 0.5, 1.0)
 
 
@@ -103,7 +112,7 @@ def test_signal_records_diagnostics():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert snap.n_assets_in_basket == 7
     assert set(snap.asset_closes.keys()) == {
         "BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE",
@@ -119,7 +128,7 @@ def test_signal_records_sma_value_and_returns():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert snap.sma_value is not None
     assert snap.sma_value > 0
     assert set(snap.per_lookback_returns.keys()) == {28, 60}
@@ -136,7 +145,7 @@ def test_signal_returns_match_states():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     for L, ret in snap.per_lookback_returns.items():
         expected_state = 1 if ret > 0 else 0
         assert snap.per_lookback_states[L] == expected_state
@@ -150,7 +159,7 @@ def test_signal_records_basket_weights():
     fetch = _candles_factory({s: closes for s in
         ("BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE")})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert set(snap.basket_weights.keys()) == {
         "BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE",
     }
@@ -172,7 +181,7 @@ def test_basket_weights_reflect_divergent_performance():
         "ADA": weak, "XRP": weak, "DOGE": weak,
     })
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     # Strict, non-flat: an accidental revert to flat 1/N in signal.py would
     # make BTC == 1/7 and fail here. asof (~mid-May 2024 for this window) is
     # not a month-start bar, so the weight is genuinely drifted.
@@ -193,12 +202,12 @@ def test_basket_weights_are_the_asof_row_not_shifted():
                         "ADA": weak, "XRP": weak, "DOGE": weak}
     fetch = _candles_factory(symbol_to_closes)
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
 
     # Rebuild the index EXACTLY as compute_live_signal does: the last
     # candles_per_asset (400) bars, in-progress bar dropped (a no-op for
     # these historical dates).
-    cutoff = pd.Timestamp.now(tz="UTC").normalize()
+    cutoff = _NOW.normalize()
     candles = {}
     for s, c in symbol_to_closes.items():
         df = _ohlcv(c).iloc[-400:]
@@ -268,7 +277,7 @@ def test_signal_computes_at_exact_warmup_boundary():
     closes = (100 + np.linspace(0, 200, 200)).tolist()
     fetch = _candles_factory({s: closes for s in _BASKET_7})
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=fetch)
+    snap = compute_live_signal(broker, fetch_candles=fetch, now=_NOW)
     assert snap.sma_value is not None
     assert snap.sma_gate_open is True
     assert snap.signal == 1.0
@@ -479,7 +488,10 @@ def test_equal_full_histories_pass_the_uneven_history_guard():
     full = (100 + np.linspace(0, 200, 400)).tolist()
     frames = {s: _ohlcv_ending_at(full) for s in _BASKET_7}
     broker = Broker(_config(), _ExchangeStub())
-    snap = compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+    snap = compute_live_signal(
+        broker, fetch_candles=_frames_fetch(frames),
+        now=pd.Timestamp("2026-01-02 00:45:00", tz="UTC"),
+    )
     assert snap.signal == 1.0
     assert snap.n_assets_in_basket == 7
 
@@ -509,6 +521,46 @@ def test_all_nan_closes_for_one_asset_raises():
     broker = Broker(_config(), _ExchangeStub())
     with pytest.raises(SignalComputationError, match=r"No valid closes for XRP"):
         compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+
+
+def test_uniformly_stale_candles_raise():
+    """All 7 assets return deep, gap-free history that simply STOPS days
+    ago (frozen kline cache / degraded endpoint / stale clock). Depth,
+    interior-gap and uneven-start guards all pass — only an asof
+    freshness check can refuse to trade the stale signal."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    frames = {s: _ohlcv_ending_at(full, end="2024-05-11") for s in _BASKET_7}
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(SignalComputationError, match=r"[Ss]tale"):
+        compute_live_signal(broker, fetch_candles=_frames_fetch(frames))
+
+
+def test_fresh_asof_passes_with_injected_now():
+    """The freshness guard accepts exactly asof == cutoff - 1 day. The
+    injected ``now`` keeps the test deterministic against fixed
+    historical frames."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    frames = {s: _ohlcv_ending_at(full, end="2024-05-14") for s in _BASKET_7}
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(
+        broker, fetch_candles=_frames_fetch(frames),
+        now=pd.Timestamp("2024-05-15 00:45:00", tz="UTC"),
+    )
+    assert pd.Timestamp(snap.asof) == pd.Timestamp("2024-05-14", tz="UTC")
+    assert snap.signal == 1.0
+
+
+def test_one_day_stale_candles_raise_with_injected_now():
+    """Off-by-one pin: frames ending exactly one bar early (the most
+    recently closed bar is missing) must be refused."""
+    full = (100 + np.linspace(0, 200, 400)).tolist()
+    frames = {s: _ohlcv_ending_at(full, end="2024-05-13") for s in _BASKET_7}
+    broker = Broker(_config(), _ExchangeStub())
+    with pytest.raises(SignalComputationError, match=r"[Ss]tale"):
+        compute_live_signal(
+            broker, fetch_candles=_frames_fetch(frames),
+            now=pd.Timestamp("2024-05-15 00:45:00", tz="UTC"),
+        )
 
 
 def test_backtest_index_path_stays_lenient_for_late_listing():
