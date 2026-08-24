@@ -629,11 +629,6 @@ class Broker:
         then extending that list.
         """
         if not self.config.sandbox and not self.config.mainnet_live_orders:
-            # The CLI gate is supposed to catch this — defensive dupe of
-            # the THIRD mainnet flag, same pattern as the two-flag check
-            # in connect(). Without it any future entry point (script,
-            # REPL, new command) built on a two-flag mainnet config gets
-            # a working write method for real money.
             raise ConnectionRefused(
                 "Refusing create_order on MAINNET: placing real orders "
                 "requires TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true. "
