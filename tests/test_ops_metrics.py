@@ -170,6 +170,55 @@ def test_exchange_latency_absent_when_no_stats(tmp_path):
     assert "tradelab_exchange_requests" not in m
 
 
+def _order(coid, status, symbol="BTC/USDT", side="buy"):
+    return {"client_order_id": coid, "terminal_status": status,
+            "symbol": symbol, "side": side}
+
+
+def test_open_order_incidents_cleared_by_later_resolution(tmp_path):
+    """A later 'closed' row for the same FULL client_order_id clears the
+    gauge (non-sticky); an unresolved timeout keeps it raised."""
+    coid = "tl-20260701-BTCUSDT-buy-1234567890"  # > 24 chars: full-id match
+    timeout = _entry(ended_at=NOW - timedelta(hours=6), outcome="success",
+                     live=True, cycle_id="c1")
+    timeout["orders_executed"] = [_order(coid, "timeout")]
+    resolved = _entry(ended_at=NOW - timedelta(hours=1), outcome="success",
+                      live=True, cycle_id="c2")
+    resolved["orders_executed"] = [_order(coid, "closed")]
+
+    m = _parse(metrics.render_metrics(
+        _journal(tmp_path, [timeout, resolved]), NOW))
+    assert m["tradelab_open_order_incidents"] == 0
+
+    m2 = _parse(metrics.render_metrics(_journal(tmp_path, [timeout]), NOW))
+    assert m2["tradelab_open_order_incidents"] == 1
+
+
+def test_last_cycle_duration_gauge(tmp_path):
+    reader = _journal(tmp_path, [
+        _entry(ended_at=NOW - timedelta(hours=2), outcome="success",
+               live=True, cycle_id="c1", duration_ms=95000),
+        _entry(ended_at=NOW - timedelta(minutes=20), outcome="success",
+               live=False, cycle_id="c2", duration_ms=800),
+    ])
+    m = _parse(metrics.render_metrics(reader, NOW))
+    # newest cycle only — the older slow one stays in the sticky _max window
+    assert m["tradelab_last_cycle_duration_ms"] == 800
+    assert m["tradelab_cycle_duration_ms_max"] == 95000
+
+
+def test_last_cycle_duration_absent_when_unavailable(tmp_path):
+    empty = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(empty, NOW))
+    assert "tradelab_last_cycle_duration_ms" not in m
+
+    bad = _entry(ended_at=NOW - timedelta(minutes=5), outcome="success",
+                 live=False)
+    bad["duration_ms"] = "garbage"
+    m2 = _parse(metrics.render_metrics(_journal(tmp_path, [bad]), NOW))
+    assert "tradelab_last_cycle_duration_ms" not in m2
+
+
 def _status(*, success_at=None, error=None):
     return {
         "last_attempt_at": NOW.isoformat(),

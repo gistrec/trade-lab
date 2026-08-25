@@ -20,8 +20,8 @@ from typing import Optional
 from trade_lab.monitoring.data_source import (
     duration_stats,
     equity_series,
-    open_order_incidents,
     parse_iso,
+    unresolved_order_incidents,
 )
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -131,6 +131,17 @@ def render_metrics(
         fam("tradelab_cycle_duration_ms_max", "gauge",
             f"max cycle duration over the last {_RECENT} cycles",
             [(None, ds["max"])])
+    # Non-sticky counterpart of _max (which re-serves one slow cycle for the
+    # whole window): the netdata latency alarms bind here.
+    if last is not None:
+        try:
+            last_dur = float(last.get("duration_ms"))
+        except (TypeError, ValueError):
+            last_dur = None
+        if last_dur is not None:
+            fam("tradelab_last_cycle_duration_ms", "gauge",
+                "duration of the newest journal cycle",
+                [(None, last_dur)])
 
     # --- exchange round-trip latency (most recent cycle) -----------------
     exch = ((last or {}).get("context") or {}).get("exchange_latency")
@@ -151,9 +162,12 @@ def render_metrics(
                 [({"quantile": "0.95"}, exch["p95_ms"])])
 
     # --- open incidents / drift / business -------------------------------
+    # Name kept despite "unresolved" semantics: netdata alarms/charts bind
+    # to it, renaming would orphan them.
     fam("tradelab_open_order_incidents", "gauge",
-        "executed orders not in a resolved terminal state (recent window)",
-        [(None, len(open_order_incidents(reader.cycles(_RECENT))))])
+        "unresolved executed orders after cross-cycle resolution by "
+        "client_order_id (recent window)",
+        [(None, len(unresolved_order_incidents(reader.cycles(_RECENT))))])
     fam("tradelab_cumulative_skipped_drift_usd", "gauge",
         "cumulative quote drift skipped across all cycles",
         [(None, reader.cumulative_skipped_drift())])
