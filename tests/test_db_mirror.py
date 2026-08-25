@@ -18,6 +18,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,62 @@ def test_config_repr_masks_password(monkeypatch):
     monkeypatch.setenv("MYSQL_PASSWORD", "supersecret")
     monkeypatch.setenv("MYSQL_DB", "db")
     assert "supersecret" not in repr(mirror_config_from_env())
+
+
+def _ssl_env(monkeypatch):
+    monkeypatch.setenv("MYSQL_HOST", "db.host")
+    monkeypatch.setenv("MYSQL_USER", "u")
+    monkeypatch.setenv("MYSQL_DB", "db")
+    monkeypatch.delenv("MYSQL_SSL_CA", raising=False)
+    monkeypatch.delenv("MYSQL_SSL_DISABLED", raising=False)
+
+
+def test_config_unset_ssl_ca_keeps_system_bundle(monkeypatch):
+    _ssl_env(monkeypatch)
+    assert mirror_config_from_env().ssl_ca == (
+        "/etc/ssl/certs/ca-certificates.crt"
+    )
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_config_empty_ssl_ca_raises_not_cleartext(monkeypatch, value):
+    _ssl_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_CA", value)
+    with pytest.raises(MirrorConfigError, match="MYSQL_SSL_DISABLED"):
+        mirror_config_from_env()
+
+
+def test_config_ssl_disabled_is_cleartext_with_warning(monkeypatch, caplog):
+    _ssl_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "true")
+    with caplog.at_level(logging.WARNING, "trade_lab.execution.db_mirror"):
+        cfg = mirror_config_from_env()
+    assert cfg.ssl_ca is None
+    assert "CLEARTEXT" in caplog.text
+
+
+def test_config_ssl_disabled_false_requires_tls(monkeypatch):
+    _ssl_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "false")
+    monkeypatch.setenv("MYSQL_SSL_CA", "")
+    with pytest.raises(MirrorConfigError):
+        mirror_config_from_env()
+
+
+def test_config_ssl_disabled_with_ca_is_contradiction(monkeypatch):
+    _ssl_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "true")
+    monkeypatch.setenv("MYSQL_SSL_CA", "/etc/ssl/certs/ca.pem")
+    with pytest.raises(MirrorConfigError, match="contradicts"):
+        mirror_config_from_env()
+
+
+@pytest.mark.parametrize("value", ["1", "yes", "TRUE ok", "off"])
+def test_config_ssl_disabled_rejects_garbage(monkeypatch, value):
+    _ssl_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", value)
+    with pytest.raises(MirrorConfigError, match="MYSQL_SSL_DISABLED"):
+        mirror_config_from_env()
 
 
 # ── collection & planning (pure) ─────────────────────────────────────
