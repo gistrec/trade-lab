@@ -1739,3 +1739,54 @@ def test_live_cycle_all_tickers_ok_journals_no_price_fallbacks(tmp_path):
 
     assert result.outcome == "success"
     assert _read_cycles(tmp_path)[-1]["price_fallbacks"] is None
+
+
+def test_failed_cycle_after_read_phase_keeps_price_fallbacks(tmp_path):
+    """A cycle that dies AFTER the read phase (Ctrl-C between order
+    placements) must journal the fallback markers — the incident path
+    with partially-placed fallback-priced orders is exactly what the
+    field exists to audit."""
+    stub = _EthTickerDownStub(basket=("BTC", "ETH"))
+    broker = _broker(stub)
+
+    def _ctrl_c_sleep(_s: float) -> None:
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_live_cycle(
+            broker, journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=_ctrl_c_sleep, time_fn=lambda: 0.0,
+        )
+
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    fb = cycle["price_fallbacks"]
+    assert set(fb) == {"ETH"}
+    assert fb["ETH"]["source"] == "candle_close_fallback"
+    # The order placed before the interrupt stays recorded alongside.
+    executed = cycle["orders_executed"]
+    assert executed is not None and len(executed) == 1
+
+
+def test_failed_cycle_before_read_phase_price_fallbacks_none(tmp_path):
+    """A failure before the read phase produced any prices journals
+    price_fallbacks=None (and must not NameError on the pre-bound
+    read variable)."""
+    class _BalanceDownStub(_LiveStub):
+        def fetch_balance(self):
+            raise RuntimeError("balance down")
+
+    stub = _BalanceDownStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+
+    with pytest.raises(RuntimeError, match="balance down"):
+        run_live_cycle(
+            _broker(stub), journal=_journal(tmp_path), state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+
+    cycle = _read_cycles(tmp_path)[-1]
+    assert cycle["outcome"] == "failed"
+    assert cycle["price_fallbacks"] is None
+    # No orders were placed: None, never [] (failed-vs-empty invariant).
+    assert cycle["orders_executed"] is None

@@ -253,11 +253,13 @@ def failed_cycle(
     exc: BaseException,
     *,
     orders_executed: Optional[list] = None,
+    price_fallbacks: Optional[dict] = None,
 ) -> Cycle:
     """Failed cycle still gets a journal entry — silently dropping is
     the failure mode the journal exists to prevent. ``orders_executed``
     carries any partially-placed orders (live only) so they are not
-    lost to history.
+    lost to history; ``price_fallbacks`` keeps their stale-price
+    markers attributable on this incident path too.
     """
     return Cycle(
         cycle_id=cycle_id,
@@ -279,6 +281,7 @@ def failed_cycle(
         orders_skipped=None,
         total_skipped_quote_drift=None,
         orders_executed=orders_executed,
+        price_fallbacks=price_fallbacks,
     )
 
 

@@ -360,6 +360,62 @@ def test_dry_run_all_tickers_ok_journals_no_price_fallbacks(tmp_path):
     assert cycle["price_fallbacks"] is None
 
 
+def test_dry_run_failed_after_read_phase_keeps_price_fallbacks(
+        tmp_path, monkeypatch):
+    """A cycle that dies AFTER the read phase must journal the fallback
+    markers in the failed-cycle entry — same posture as the live cycle."""
+    import json
+
+    from trade_lab.execution import dry_run as dr
+    from trade_lab.execution.journal import JournalWriter
+
+    class _EthTickerDownStub(_StubExchange):
+        def fetch_ticker(self, symbol):
+            if symbol == "ETH/USDT":
+                return {}  # no last/close → BrokerError in fetch_ticker_price
+            return super().fetch_ticker(symbol)
+
+    def _boom(plan):
+        raise RuntimeError("post-read failure")
+
+    # First failure point after the read phase (DryRunResult assembly).
+    monkeypatch.setattr(dr, "total_skipped_quote_drift", _boom)
+    broker = Broker(_config(), _EthTickerDownStub())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(RuntimeError, match="post-read failure"):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "failed"
+    fb = cycle["price_fallbacks"]
+    assert set(fb) == {"ETH"}
+    assert fb["ETH"]["source"] == "candle_close_fallback"
+
+
+def test_dry_run_failed_before_read_phase_price_fallbacks_none(tmp_path):
+    """A failure before the read phase produced any prices journals
+    price_fallbacks=None (and must not NameError on the pre-bound
+    read variable)."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+
+    class _BalanceDownStub(_StubExchange):
+        def fetch_balance(self):
+            raise RuntimeError("balance down")
+
+    broker = Broker(_config(), _BalanceDownStub())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+
+    with pytest.raises(RuntimeError, match="balance down"):
+        run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["outcome"] == "failed"
+    assert cycle["price_fallbacks"] is None
+
+
 def test_dry_run_records_exchange_latency_in_journal(tmp_path):
     """A successful dry cycle stamps context.exchange_latency — read-only
     telemetry the /metrics exporter surfaces. Metadata only."""
