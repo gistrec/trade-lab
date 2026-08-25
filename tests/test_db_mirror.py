@@ -46,7 +46,10 @@ class FakeCursor:
         s = " ".join(sql.split())
         if s.startswith("CREATE TABLE"):
             pass
+        elif s.startswith("SELECT DATABASE()"):
+            self._rows = [("testdb",)]
         elif s.startswith("SELECT GET_LOCK"):
+            assert params[0] == "trade_lab_db_mirror:testdb"  # schema-scoped
             self._rows = [(0 if self.store.get("lock_busy") else 1,)]
         elif s.startswith("SELECT RELEASE_LOCK"):
             self.store.setdefault("lock_releases", 0)
@@ -454,6 +457,10 @@ def test_restore_success_leaves_no_staged_litter(tmp_path):
     assert (data / "journal" / "cycles.jsonl").exists()
     assert (data / "state" / "orders.json").exists()
     assert list(data.rglob("*.restoring")) == []
+    # os.replace publishes the staged inode's mode — both files pinned to
+    # owner rw / group r, never the umask default.
+    for rel in ("journal/cycles.jsonl", "state/orders.json"):
+        assert (data / rel).stat().st_mode & 0o777 == 0o640
 
 
 def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):

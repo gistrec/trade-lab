@@ -298,7 +298,12 @@ class MirrorReport:
         return out
 
 
-_MIRROR_LOCK = "trade_lab_db_mirror"
+def _mirror_lock_name(cur) -> str:
+    # Named locks are server-wide; scope to the schema so two databases
+    # on one shared MySQL never contend.
+    cur.execute("SELECT DATABASE()")
+    row = cur.fetchone()
+    return f"trade_lab_db_mirror:{row[0] if row else ''}"
 
 
 def _acquire_mirror_lock(conn) -> bool:
@@ -308,14 +313,14 @@ def _acquire_mirror_lock(conn) -> bool:
     # to detect after the fact — so they are prevented, not detected.
     # Limitation: a writer running a pre-lock binary bypasses this.
     with conn.cursor() as cur:
-        cur.execute("SELECT GET_LOCK(%s, 0)", (_MIRROR_LOCK,))
+        cur.execute("SELECT GET_LOCK(%s, 0)", (_mirror_lock_name(cur),))
         row = cur.fetchone()
     return bool(row and row[0] == 1)
 
 
 def _release_mirror_lock(conn) -> None:
     with conn.cursor() as cur:
-        cur.execute("SELECT RELEASE_LOCK(%s)", (_MIRROR_LOCK,))
+        cur.execute("SELECT RELEASE_LOCK(%s)", (_mirror_lock_name(cur),))
 
 
 def reconcile(
@@ -558,6 +563,9 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
                     # compact mirror against a hollow replacement.
                     fh.flush()
                     os.fsync(fh.fileno())
+                # os.replace carries the staged inode's mode: pin it, or a
+                # --force restore widens a 0640 journal to the umask default.
+                os.chmod(staged, 0o640)
                 cur.execute(
                     "DELETE FROM journal_lines WHERE source = %s", (source,)
                 )
