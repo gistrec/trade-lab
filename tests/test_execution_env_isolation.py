@@ -13,6 +13,7 @@ Three layers, each fail-loud:
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -284,6 +285,61 @@ def test_env_file_overrides_lingering_shell_vars(monkeypatch, tmp_path):
     assert cfg.sandbox is True, "testnet file must win over lingering env"
     assert cfg.mainnet_live_orders is False
     assert cfg.api_key == "TESTNET_KEY"
+
+
+def _pin_owned_env(monkeypatch):
+    # The code under test DELETES ambient owned-family keys; re-setting
+    # them via monkeypatch registers the restore for teardown.
+    for key in list(os.environ):
+        if key.startswith(("TRADE_LAB_PAPER_", "MYSQL_")):
+            monkeypatch.setenv(key, os.environ[key])
+
+
+def test_env_file_clears_omitted_owned_family_keys(monkeypatch, tmp_path):
+    """override=True only beats keys the file SETS. Ambient residue in
+    the owned families (TRADE_LAB_PAPER_*, MYSQL_*) for keys the file
+    OMITS must be cleared — a shell-exported MYSQL_SSL_DISABLED=true or
+    TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true is an opt-in/out the
+    selected file never made. Families owned by other processes
+    (monitoring, health) stay untouched."""
+    import trade_lab.cli as cli_mod
+
+    _pin_owned_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "true")
+    monkeypatch.setenv("TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS", "true")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_AUTHOR", "keep-me")
+    monkeypatch.delenv("TRADE_LAB_PAPER_EXCHANGE", raising=False)
+
+    env_file = tmp_path / "testnet.env"
+    env_file.write_text("TRADE_LAB_PAPER_SANDBOX=true\n")
+
+    # No exchange var anywhere -> deterministic stop at the config stage,
+    # after env loading.
+    with pytest.raises(SystemExit, match="Config error"):
+        cli_mod.main(["paper-status", "--env-file", str(env_file)])
+
+    assert "MYSQL_SSL_DISABLED" not in os.environ
+    assert "TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS" not in os.environ
+    assert os.environ["TRADE_LAB_PAPER_SANDBOX"] == "true"
+    assert os.environ["TRADE_LAB_MONITORING_AUTHOR"] == "keep-me"
+
+
+def test_env_file_set_keys_keep_the_file_value(monkeypatch, tmp_path):
+    """A key PRESENT in the file is never cleared — the file's value
+    wins over ambient, exactly as before."""
+    import trade_lab.cli as cli_mod
+
+    _pin_owned_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "true")
+    monkeypatch.delenv("TRADE_LAB_PAPER_EXCHANGE", raising=False)
+
+    env_file = tmp_path / "testnet.env"
+    env_file.write_text("MYSQL_SSL_DISABLED=false\n")
+
+    with pytest.raises(SystemExit, match="Config error"):
+        cli_mod.main(["paper-status", "--env-file", str(env_file)])
+
+    assert os.environ["MYSQL_SSL_DISABLED"] == "false"
 
 
 # ---------------------------------------------------------------------------

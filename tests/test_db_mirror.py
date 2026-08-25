@@ -28,10 +28,12 @@ from pathlib import Path
 import pytest
 
 from trade_lab.execution.db_mirror import (
+    MirrorConfig,
     MirrorConfigError,
     MirrorIntegrityError,
     MirrorReport,
     collect_journal_lines,
+    connect,
     mirror_after_cycle,
     mirror_config_from_env,
     plan_journal_inserts,
@@ -226,6 +228,45 @@ def test_config_ssl_disabled_rejects_garbage(monkeypatch, value):
     monkeypatch.setenv("MYSQL_SSL_DISABLED", value)
     with pytest.raises(MirrorConfigError, match="MYSQL_SSL_DISABLED"):
         mirror_config_from_env()
+
+
+def _connect_spy(monkeypatch):
+    from trade_lab.execution import db_mirror
+
+    seen: dict = {}
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return FakeConn()
+
+    monkeypatch.setattr(db_mirror.pymysql, "connect", spy)
+    return seen
+
+
+def _mirror_config(ssl_ca):
+    return MirrorConfig(
+        host="db.host", port=3306, user="u", password="p",
+        database="db", ssl_ca=ssl_ca,
+    )
+
+
+def test_connect_disabled_tls_passes_ssl_disabled(monkeypatch):
+    """ssl_ca=None (explicit MYSQL_SSL_DISABLED=true) must disable TLS
+    deterministically — ssl=None is pymysql's PREFERRED mode, which
+    would still negotiate TLS and make the CLEARTEXT warning a lie."""
+    seen = _connect_spy(monkeypatch)
+    connect(_mirror_config(ssl_ca=None))
+    assert seen["ssl_disabled"] is True
+    assert "ssl" not in seen
+
+
+def test_connect_with_ca_passes_ssl_and_not_disabled(monkeypatch, tmp_path):
+    ca = tmp_path / "ca.pem"
+    ca.write_text("cert")
+    seen = _connect_spy(monkeypatch)
+    connect(_mirror_config(ssl_ca=str(ca)))
+    assert seen["ssl"] == {"ca": str(ca)}
+    assert "ssl_disabled" not in seen
 
 
 # ── collection & planning (pure) ─────────────────────────────────────

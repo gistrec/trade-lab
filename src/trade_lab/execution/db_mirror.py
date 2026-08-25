@@ -174,9 +174,9 @@ def mirror_config_from_env() -> Optional[MirrorConfig]:
 
 
 def _ssl_ca_from_env() -> Optional[str]:
-    # None means cleartext downstream (connect passes ssl=None), so it is
-    # only ever produced by the explicit opt-out flag — never by an empty
-    # MYSQL_SSL_CA (a template artefact must not silently drop TLS).
+    # None means cleartext downstream (connect passes ssl_disabled=True),
+    # so it is only ever produced by the explicit opt-out flag — never by
+    # an empty MYSQL_SSL_CA (a template artefact must not silently drop TLS).
     disabled_raw = os.getenv("MYSQL_SSL_DISABLED")
     ca_raw = os.getenv("MYSQL_SSL_CA")
     if disabled_raw is None:
@@ -221,6 +221,13 @@ def connect(config: MirrorConfig) -> pymysql.connections.Connection:
             "MYSQL_SSL_CA to an existing CA file (the default is the "
             "Linux system bundle)"
         )
+    # ssl=None is pymysql's PREFERRED mode (TLS whenever the server
+    # offers it) — an explicit disable keeps the CLEARTEXT warning
+    # truthful and the behaviour deterministic.
+    ssl_kwargs = (
+        {"ssl": {"ca": config.ssl_ca}} if config.ssl_ca
+        else {"ssl_disabled": True}
+    )
     conn = pymysql.connect(
         host=config.host,
         port=config.port,
@@ -228,8 +235,8 @@ def connect(config: MirrorConfig) -> pymysql.connections.Connection:
         password=config.password,
         database=config.database,
         charset="utf8mb4",
-        ssl={"ca": config.ssl_ca} if config.ssl_ca else None,
         connect_timeout=15,
+        **ssl_kwargs,
     )
     with conn.cursor() as cur:
         for ddl in _SCHEMA:
