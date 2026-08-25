@@ -51,7 +51,7 @@ def _args(tmp_path: Path, candles: int = 400) -> argparse.Namespace:
 
 
 def test_refuses_candles_window_below_signal_warmup(monkeypatch, tmp_path):
-    """--candles 150 < 232 (SMA(200)/lookback warm-up + up to 31 bars to
+    """--candles 150 < 231 (SMA(200)/lookback warm-up + up to 30 bars to
     the first in-window monthly rebalance + the dropped in-progress
     candle) must exit before the broker is constructed."""
     connect_calls: list = []
@@ -72,9 +72,9 @@ def test_refuses_candles_window_below_signal_warmup(monkeypatch, tmp_path):
 def test_refuses_candles_just_below_exact_replication_floor(
     monkeypatch, tmp_path,
 ):
-    """--candles 231 warms the SMA but the SMA range still reaches into
+    """--candles 230 warms the SMA but the SMA range still reaches into
     the window's initial-allocation artifact — only approximate backtest
-    replication, so it is refused, naming the 232 floor."""
+    replication, so it is refused, naming the 231 floor."""
     connect_calls: list = []
     monkeypatch.setattr(
         "trade_lab.execution.load_paper_config", _sandbox_config,
@@ -86,16 +86,16 @@ def test_refuses_candles_just_below_exact_replication_floor(
 
     with pytest.raises(
         SystemExit,
-        match=r"--candles 231 is below the exact-backtest-replication "
-              r"minimum 232",
+        match=r"--candles 230 is below the exact-backtest-replication "
+              r"minimum 231",
     ):
-        cmd_paper_dry_run(_args(tmp_path, candles=231))
+        cmd_paper_dry_run(_args(tmp_path, candles=230))
 
     assert connect_calls == []
 
 
 def test_accepts_candles_at_exact_minimum(monkeypatch, tmp_path):
-    """--candles 232 passes the up-front window check (the runtime basket
+    """--candles 231 passes the up-front window check (the runtime basket
     depth guard inside compute_live_signal still applies)."""
     from trade_lab.execution.dry_run import DryRunResult
 
@@ -115,7 +115,7 @@ def test_accepts_candles_at_exact_minimum(monkeypatch, tmp_path):
         lambda broker, **kwargs: result,
     )
 
-    assert cmd_paper_dry_run(_args(tmp_path, candles=232)) is None
+    assert cmd_paper_dry_run(_args(tmp_path, candles=231)) is None
 
 
 def test_signal_computation_error_exits_structured_nonzero(
