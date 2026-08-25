@@ -14,12 +14,13 @@ The deployable configuration (per `findings/cluster_stability.md` +
 
 The signal value is a ladder ``{0, 0.5, 1.0}`` — *not* binary.
 Half-agreement (one of the two lookbacks positive, one negative)
-returns 0.5 as a real signal. The backtest validation (DSR 0.770
-under the 1/sqrt(T) convention; cluster-neighborhood median DSR
-0.736, 7/7 neighbors > 0.5 — see findings/dsr_convention_2026_08.md)
-was computed against this exact ladder, so the live executor must
-replicate it pro-rata; rounding to binary would deploy a different
-strategy that was never validated.
+returns 0.5 as a real signal. The backtest validation (raw
+concat-OOS Sharpe +1.48, neighbor band +1.37…+1.49; DSR 0.770 and
+cluster-median 0.736 both under the 1/sqrt(T) convention — see
+findings/dsr_convention_2026_08.md) was computed against this exact
+ladder, so the live executor must replicate it pro-rata; rounding
+to binary would deploy a different strategy that was never
+validated.
 
 This module is **pure computation**. It fetches candles via a broker
 function passed in (defaulting to CCXT through the broker), builds
