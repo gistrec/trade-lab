@@ -1279,14 +1279,39 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"placed. Journal outcome=skipped_warmup."
         )
 
+    if result.journal_write_failed:
+        # The journal feeds the dashboard, health verdict, and MySQL
+        # mirror — a missing entry hides real fills from all three.
+        # Phase-neutral: the failed append may be the main entry (the
+        # orders printed above) or the reconstruction entry (a prior
+        # cycle's recovered fills) — the log line says which.
+        print(
+            f"  JOURNAL WRITE FAILED: at least one journal entry for this "
+            f"run could not be written to {args.journal} — real fills may "
+            f"be missing from the audit trail. The entry is in the process "
+            f"log ('Unwritten journal entry payload …'); JSON logs wrap it "
+            f"in the record's msg field — extract with "
+            f"jq -r 'select(.msg|startswith(\"Unwritten journal\"))"
+            f"|.msg|sub(\"^[^{{]*\";\"\")'. Recovery: grep the journal for "
+            f"that cycle_id FIRST — an fsync failure can land the whole "
+            f"entry, a partial write can leave a truncated tail that "
+            f"still contains the id. Append only if no COMPLETE entry "
+            f"(valid JSON line) exists, removing a partial tail first. "
+            f"If the log shares the journal's filesystem and both are "
+            f"lost (disk full), the fills are still reconstructable from "
+            f"the exchange by clientOrderId (the exchange is the source "
+            f"of truth)."
+        )
+
     healthy = result.outcome == "success" or skipped_warmup
-    if not healthy or result.lost_track_count > 0:
+    if not healthy or result.lost_track_count > 0 or result.journal_write_failed:
         # Non-zero exit so cron/alerting catches stuck (unknown_orders)
         # or partially-executed cycles; the journal entry has the detail.
         # A lost_track order (surfaced by reconstruction) is an unresolved
         # incident even when the main cycle outcome is healthy, so it
-        # escalates too. Exceptions inside run_live_cycle already
-        # propagate → exit 1.
+        # escalates too, as does a failed journal write (real fills
+        # absent from the audit trail). Exceptions inside run_live_cycle
+        # already propagate → exit 1.
         raise SystemExit(2)
 
 
