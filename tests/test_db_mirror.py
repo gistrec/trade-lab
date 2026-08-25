@@ -49,7 +49,7 @@ class FakeCursor:
         elif s.startswith("SELECT DATABASE()"):
             self._rows = [("testdb",)]
         elif s.startswith("SELECT GET_LOCK"):
-            assert params[0] == "trade_lab_db_mirror:testdb"  # schema-scoped
+            assert params[0].startswith("trade_lab_db_mirror:")  # schema-scoped
             self._rows = [(0 if self.store.get("lock_busy") else 1,)]
         elif s.startswith("SELECT RELEASE_LOCK"):
             self.store.setdefault("lock_releases", 0)

@@ -300,10 +300,13 @@ class MirrorReport:
 
 def _mirror_lock_name(cur) -> str:
     # Named locks are server-wide; scope to the schema so two databases
-    # on one shared MySQL never contend.
+    # on one shared MySQL never contend. Hashed: GET_LOCK caps names at
+    # 64 chars and a schema name alone can exceed that.
     cur.execute("SELECT DATABASE()")
     row = cur.fetchone()
-    return f"trade_lab_db_mirror:{row[0] if row else ''}"
+    schema = str(row[0]) if row and row[0] else ""
+    digest = hashlib.sha256(schema.encode("utf-8")).hexdigest()[:16]
+    return f"trade_lab_db_mirror:{digest}"
 
 
 def _acquire_mirror_lock(conn) -> bool:
@@ -489,6 +492,15 @@ def _restore_target(data_dir: Path, source: str) -> Path:
     return target
 
 
+def _open_staged(path: Path):
+    # 0640 from the first byte (fchmod pins it against umask) — a chmod
+    # after writing leaves a window where a default-umask file is
+    # readable by any local user.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    os.fchmod(fd, 0o640)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
 def restore(
     conn, data_dir: Path = DEFAULT_DATA_DIR, force: bool = False
 ) -> list[str]:
@@ -555,7 +567,7 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
             target.parent.mkdir(parents=True, exist_ok=True)
             staged = target.with_name(target.name + ".restoring")
             try:
-                with open(staged, "w", encoding="utf-8") as fh:
+                with _open_staged(staged) as fh:
                     for payload in payloads:
                         fh.write(payload + "\n")
                     # Staged bytes must be durable BEFORE the renumber
@@ -563,9 +575,6 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
                     # compact mirror against a hollow replacement.
                     fh.flush()
                     os.fsync(fh.fileno())
-                # os.replace carries the staged inode's mode: pin it, or a
-                # --force restore widens a 0640 journal to the umask default.
-                os.chmod(staged, 0o640)
                 cur.execute(
                     "DELETE FROM journal_lines WHERE source = %s", (source,)
                 )
@@ -600,12 +609,10 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
             target.parent.mkdir(parents=True, exist_ok=True)
             staged = target.with_name(target.name + ".restoring")
             try:
-                with open(staged, "w", encoding="utf-8") as fh:
+                with _open_staged(staged) as fh:
                     fh.write(payload)
                     fh.flush()
                     os.fsync(fh.fileno())
-                # Same contract as OrderStateStore: owner rw, group r.
-                os.chmod(staged, 0o640)
                 os.replace(staged, target)
             finally:
                 staged.unlink(missing_ok=True)
