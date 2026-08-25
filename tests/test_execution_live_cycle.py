@@ -1089,7 +1089,7 @@ def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
     now_iso = datetime.now(timezone.utc).isoformat()
     state.put(OrderStateEntry(
         client_order_id=today_coid, symbol="BTC/USDT", side="buy",
-        intended_amount=0.1, status="timeout",
+        intended_amount=0.0999, status="timeout",
         exchange_order_id="exch-live-1",
         placed_at=now_iso, last_seen_at=now_iso,
     ))
@@ -1100,8 +1100,9 @@ def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
         _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
         # query-before-place inside place_order: found, then terminal
         _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
-        # $10k / 2 assets / $50k = the 0.1 BTC the plan will intend
-        _closed_order(today_coid, "BTC/USDT", filled=0.1),
+        # $10k / 2 assets / $50k, shaved 10 bp by the full-entry quote
+        # reserve (#28) = the 0.0999 BTC the plan will intend
+        _closed_order(today_coid, "BTC/USDT", filled=0.0999),
     ]
     clock = _MockClock()
     result = run_live_cycle(

@@ -25,6 +25,14 @@ from .broker import MarketConstraints
 
 logger = logging.getLogger(__name__)
 
+# Owner-sanctioned microstructure deviation from the backtest (#28): hold
+# back 10 bp of the quote available to buys. Sizes come from a ticker
+# snapshot but market BUYs fill at the ask, so a plan spending 100% of the
+# available quote loses its tail order to InsufficientFunds when prices
+# tick up between snapshot and send. The backtest models neither fees nor
+# lot steps; this buffer is the same class of gap.
+RESERVE_BPS = 10
+
 
 @dataclass(frozen=True)
 class OrderIntent:
@@ -65,6 +73,7 @@ def compute_delta_plan(
     current_holdings: Mapping[str, float],
     constraints: Mapping[str, MarketConstraints],
     quote_currency: str,
+    quote_free: Optional[float] = None,
 ) -> DeltaPlan:
     """Build the order plan from a target allocation and live holdings.
 
@@ -74,10 +83,50 @@ def compute_delta_plan(
     exchange's minimum-size rules; pass an empty dict to disable
     filtering (useful in tests).
 
+    ``quote_free`` (the broker's free quote balance) enables the
+    :data:`RESERVE_BPS` buy-spend cap; ``None`` disables it.
+
     Sub-minimum deltas are recorded in ``skipped``. The total
     fractional drift carried by ``skipped`` should be reported in a
     reconciliation log so the operator sees what we couldn't move.
     """
+    plan = _plan(
+        allocation=allocation, current_holdings=current_holdings,
+        constraints=constraints, quote_currency=quote_currency,
+    )
+    if quote_free is None:
+        return plan
+
+    buy_spend = sum(o.notional_quote for o in plan.orders if o.side == "buy")
+    if buy_spend <= 0.0:
+        return plan
+    # Sells place first (sort_orders_for_placement) and their proceeds fund
+    # the buys, so the quote available to buys is the free balance plus the
+    # sendable sell notional — capping at bare quote_free would zero out the
+    # month-start cross-rebalance. On the full-entry path (no sells) this
+    # reduces to exactly quote_free.
+    available = float(quote_free) + sum(
+        o.notional_quote for o in plan.orders if o.side == "sell"
+    )
+    cap = available * (1.0 - RESERVE_BPS / 10_000)
+    if buy_spend < cap:
+        return plan          # slack exists — plan identical to no-reserve
+    scale = max(cap, 0.0) / buy_spend
+    return _plan(
+        allocation=allocation, current_holdings=current_holdings,
+        constraints=constraints, quote_currency=quote_currency,
+        buy_scale=scale,
+    )
+
+
+def _plan(
+    *,
+    allocation: TargetAllocation,
+    current_holdings: Mapping[str, float],
+    constraints: Mapping[str, MarketConstraints],
+    quote_currency: str,
+    buy_scale: float = 1.0,
+) -> DeltaPlan:
     orders: list[OrderIntent] = []
     skipped: list[SkippedDelta] = []
 
@@ -92,6 +141,9 @@ def compute_delta_plan(
             continue
 
         side = "buy" if delta_qty > 0 else "sell"
+        if side == "buy":
+            # Proportional scale-down keeps the relative ladder weights.
+            delta_qty *= buy_scale
         desired_qty = abs(delta_qty)
         desired_notional = desired_qty * price
 
@@ -110,13 +162,14 @@ def compute_delta_plan(
             # skip treatment as the sub-minimum cases below. The desired_*
             # fields keep the raw (pre-truncation) values so the skipped
             # drift metric measures the true gap we could not move.
+            # (c can be None only via buy_scale=0.0 — zero free quote.)
             skipped.append(SkippedDelta(
                 symbol=pair,
                 desired_side=side,
                 desired_amount=desired_qty,
                 desired_notional=desired_notional,
-                constraint_min_amount=c.min_amount,
-                constraint_min_cost=c.min_cost,
+                constraint_min_amount=c.min_amount if c else None,
+                constraint_min_cost=c.min_cost if c else None,
                 reason=(
                     f"amount {desired_qty:.8f} truncates to 0 at the "
                     "exchange lot step"

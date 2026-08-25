@@ -7,7 +7,7 @@ import pytest
 from trade_lab.execution.allocator import compute_target_allocation
 from trade_lab.execution.broker import MarketConstraints
 from trade_lab.execution.delta import (
-    compute_delta_plan, total_skipped_quote_drift,
+    RESERVE_BPS, compute_delta_plan, total_skipped_quote_drift,
 )
 
 
@@ -237,6 +237,84 @@ def test_missing_constraints_does_no_filtering():
     )
     assert len(plan.orders) == 2
     assert plan.skipped == []
+
+
+# ---------------------------------------------------------------------------
+# RESERVE_BPS buy cap (#28, owner-sanctioned) — a full entry from cash
+# sized off ticker last fills at the ask, so planning buys that sum to
+# exactly quote_free loses the tail order to InsufficientFunds on any
+# uptick between snapshot and send.
+# ---------------------------------------------------------------------------
+
+
+def test_full_cash_entry_reserves_10bp_of_free_quote():
+    """Full-cash entry (no holdings, quote_free == equity): total planned
+    buy spend stays ≤ quote_free × (1 − 10 bp) and strictly < quote_free;
+    relative (drifted-weight) proportions are preserved."""
+    assert RESERVE_BPS == 10   # pinned — a silent change is a sizing change
+    quote_free = 70_000.0
+    alloc = _allocation(equity=quote_free, weights=_DRIFTED)   # 0.6 / 0.4
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings={},
+        constraints={}, quote_currency="USDT", quote_free=quote_free,
+    )
+    assert plan.skipped == []
+    total = sum(o.notional_quote for o in plan.orders)
+    assert total <= quote_free * (1 - RESERVE_BPS / 10_000) + 1e-6
+    assert total < quote_free
+    assert total == pytest.approx(quote_free * 0.999)
+    by_sym = {o.symbol: o.notional_quote for o in plan.orders}
+    assert by_sym["BTC/USDT"] / by_sym["ETH/USDT"] == pytest.approx(0.6 / 0.4)
+
+
+def test_partial_rebalance_below_cap_unchanged_by_reserve():
+    """Buy spend well under free quote → the reserve must not bind: the
+    plan is identical to the no-quote_free planner, with the pre-change
+    numbers pinned exactly (no proportional shave leaks in)."""
+    alloc = _allocation()                       # $35k target per asset
+    current = {"BTC": alloc.target_qty_per_asset["BTC"] * 0.5}
+    kwargs = dict(
+        allocation=alloc, current_holdings=current,
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+    )
+    with_reserve = compute_delta_plan(**kwargs, quote_free=60_000.0)
+    assert with_reserve == compute_delta_plan(**kwargs)
+    btc = next(o for o in with_reserve.orders if o.symbol == "BTC/USDT")
+    assert btc.base_amount == 0.35              # exact, not 0.35 × 0.999
+    assert btc.notional_quote == 17_500.0
+
+
+def test_cross_rebalance_cap_counts_sell_proceeds():
+    """Month-start weight reset at quote_free ≈ 0: sells place first and
+    fund the buys, so the cap must count sendable sell proceeds. Capping
+    at bare quote_free would scale the buys to dust and bleed the book
+    into cash every rebalance."""
+    alloc = _allocation()                       # $35k target per asset
+    current = {                                 # BTC $45k, ETH $25k held
+        "BTC": 45_000.0 / _PRICES["BTC"],
+        "ETH": 25_000.0 / _PRICES["ETH"],
+    }
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints={}, quote_currency="USDT", quote_free=0.0,
+    )
+    sides = {o.symbol: o.side for o in plan.orders}
+    assert sides == {"BTC/USDT": "sell", "ETH/USDT": "buy"}
+    btc = next(o for o in plan.orders if o.symbol == "BTC/USDT")
+    eth = next(o for o in plan.orders if o.symbol == "ETH/USDT")
+    assert btc.notional_quote == pytest.approx(10_000.0)   # sells unscaled
+    assert eth.notional_quote == pytest.approx(10_000.0 * 0.999)
+
+
+def test_pure_sell_plan_unaffected_by_reserve():
+    """No buys → nothing to cap, whatever quote_free says."""
+    alloc = _allocation(signal=0.0)
+    current = {"BTC": 0.5, "ETH": 5.0}
+    kwargs = dict(
+        allocation=alloc, current_holdings=current,
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+    )
+    assert compute_delta_plan(**kwargs, quote_free=3.0) == compute_delta_plan(**kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -152,6 +152,8 @@ def run_read_phase(
         current_holdings=balance.asset_totals,
         constraints=constraints,
         quote_currency=quote,
+        # Enables the RESERVE_BPS buy cap (#28, owner-sanctioned).
+        quote_free=balance.quote_free,
     )
 
     current_holdings_quote = {
