@@ -102,9 +102,11 @@ def required_basket_bars(
     return max(int(sma_filter_period), max(int(L) for L in lookbacks) + 1)
 
 
-# Max calendar gap from a window's first bar to the first in-window MS
-# rebalance (a month is at most 31 days).
-MS_REBALANCE_MAX_GAP_DAYS = 31
+# Max gap from a window's first bar to the first in-window MS rebalance:
+# worst case the window starts on day 2 of a 31-day month, 30 daily bars
+# before the next month start (31 would measure the month's length, not
+# this distance).
+MS_REBALANCE_MAX_GAP_DAYS = 30
 
 
 def min_live_candles(
@@ -146,12 +148,16 @@ def compute_live_signal(
     """Run the deployable strategy on freshly-fetched candles.
 
     ``candles_per_asset`` must be at least :func:`min_live_candles`
-    (232 for the deployable config) — the exact-backtest-replication
-    boundary, not just SMA warm-up; a 201–231 window would silently
+    (231 for the deployable config) — the exact-backtest-replication
+    boundary, not just SMA warm-up; a 201–230 window would silently
     approximate the signal instead. Both the requested window and the
-    *actual* basket depth are enforced — an unwarmed SMA(200) must raise
+    *actual* basket depth are enforced: an unwarmed SMA(200) must raise
     :class:`SignalComputationError`, never silently read as "gate
-    closed" (that would plan a full liquidation of the book).
+    closed" (that would plan a full liquidation of the book), and a
+    warmed-but-shallow basket (fewer than warm-up +
+    :data:`MS_REBALANCE_MAX_GAP_DAYS` completed bars) must raise too —
+    its SMA range overlaps the window-start allocation artifact and only
+    approximates the backtest signal.
 
     ``fetch_candles`` defaults to ``_fetch_recent_candles`` via the
     broker's underlying CCXT exchange. Tests pass a stub returning
@@ -242,6 +248,24 @@ def compute_live_signal(
             f"(signal=0) and plan a full liquidation — refusing.",
             bars_available=len(basket),
             bars_required=required,
+        )
+    replication_floor = required + MS_REBALANCE_MAX_GAP_DAYS
+    if len(basket) < replication_floor:
+        # Warm enough for the SMA, yet the SMA range still reaches into
+        # the window's pre-first-rebalance bars — the initial-allocation
+        # artifact (see min_live_candles) — so the signal would only
+        # approximate the backtest. Same severity as the up-front
+        # requested-window guard: a plain hard failure on EVERY venue,
+        # never the structured warm-up skip (that class stays strictly
+        # len < required, keeping bars_required=200 in the journal).
+        raise SignalComputationError(
+            f"Basket history too shallow for exact backtest replication: "
+            f"{len(basket)} completed bars, need >= {replication_floor} "
+            f"({required} for SMA({sma_filter_period})/lookback warm-up "
+            f"plus up to {MS_REBALANCE_MAX_GAP_DAYS} bars to the first "
+            f"in-window monthly rebalance). The SMA range would overlap "
+            f"the window-start allocation artifact and only approximate "
+            f"the backtest signal — refusing."
         )
 
     strategy = TimeSeriesMomentumStrategy(
@@ -424,8 +448,9 @@ class InsufficientWarmupError(SignalComputationError):
     (after the basket is built), carrying the structured depth facts so
     the orchestrator can journal them. Every other refusal in this
     module — empty candles, a fetch failure, uneven per-asset history,
-    a ``candles_per_asset`` window too small to ever warm — stays a
-    plain :class:`SignalComputationError` and fails loud EVERYWHERE.
+    a ``candles_per_asset`` window too small to ever warm, a warmed
+    basket still too shallow for exact replication — stays a plain
+    :class:`SignalComputationError` and fails loud EVERYWHERE.
 
     The split exists because this one condition is *structural* on
     Binance testnet (the exchange wipes candles ~monthly, capping the
