@@ -467,17 +467,16 @@ def aggregate_walk_forward(
         concatenated, annualization_factor
     )
 
-    # ``sharpe_std_dev`` should be the standard deviation of *trial*
-    # per-period Sharpes under the null of zero true skill. When we
-    # have no panel of trial-OOS-Sharpes to estimate it empirically,
-    # the textbook fallback is the null estimator: per-period Sharpe
-    # estimates have std ≈ 1/sqrt(T) under N(0, 1/T) sampling. That's
-    # also what López de Prado uses when the trial cross-section is
-    # unavailable.
-    #
-    # Earlier implementation accidentally used the std of *out-of-sample*
-    # fold Sharpes, which is sample-driven noise, not null-driven, and
-    # several times larger — making SR_0 huge and DSR collapse to 0.
+    # 1/sqrt(T) is the MINIMAL deflator: the null sampling std of a
+    # single per-period Sharpe estimate. It corrects for estimation
+    # noise only, not for the dispersion of the actual trial pool —
+    # the project's empirical trial sd ≈ 0.7 yields DSR ≈ 0 for the
+    # deployed config, and RESULTS.md cites that as the primary
+    # (conservative) layer with this figure as secondary (see
+    # findings/dsr_convention_2026_08.md). Keep the computation as-is
+    # so both numbers stay reproducible. Do not swap in the std of
+    # OOS fold Sharpes: sample-driven noise, several times larger,
+    # floors DSR to 0 for the wrong reason.
     T = len(concatenated)
     sharpe_std_dev = 1.0 / np.sqrt(T) if T > 0 else 0.0
 

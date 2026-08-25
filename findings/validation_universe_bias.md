@@ -185,3 +185,19 @@ script created — the check is short and is summarized above
 verbatim.
 
 Last reviewed: 2026-05-29.
+
+## Addendum 2026-08-25 — scope correction: composition axis still open
+
+The "PASS — both axes closed" phrasing above was too strong. This
+test closed the **listing axis** (no pre-listing data in the panel)
+and the **liquidity axis** (deployment notional moot) — i.e., both
+axes *the test asked about*. It did not, and could not, close the
+**composition axis**: the choice of *which* seven coins form the
+basket was made knowing ex post that these seven were the enduring
+majors of the sample. That selection channel remains untested
+pending the PIT-universe diagnostic run (deep review 2026-08-24).
+The size gauge for this class of bias in this project: the
+cross-sectional-momentum measurement dropped Sharpe 1.40 → 0.93
+when moved to a PIT universe. Read the verdict above as "both
+*tested* axes closed", not "universe bias closed". The original
+text stays as written per findings immutability.

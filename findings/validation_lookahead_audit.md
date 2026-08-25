@@ -148,3 +148,16 @@ Reads `data/binance_*_USDT_1d.parquet`, writes
 the script's exit code (0 = CLEAN, 1 = CONTAMINATED).
 
 Last reviewed: 2026-05-29.
+
+## Addendum 2026-08-25 — correction to the scope-boundary claim
+
+The scope-boundary bullet above says universe-selection bias "is
+closed by Test 1 Check A (parquet dates CLEAN) + Test 5 (PASS,
+liquidity moot)". That claim is false as stated: those tests close
+the listing and liquidity axes only. The **composition axis** — the
+ex-post choice of the seven majors — is NOT closed by any test run
+to date and remains open pending the PIT diagnostic run. See the
+2026-08-25 addendum in `validation_universe_bias.md`. The rest of
+this audit (temporal correctness GIVEN the chosen universe) is
+unaffected. Original text stays as written per findings
+immutability.

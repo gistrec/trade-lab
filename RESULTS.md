@@ -10,7 +10,7 @@ otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 
 A strategy that reaches PAPER status has cleared **one** gate, not all of them. Specifically:
 
-* **DSR > 0.5 at N=500, cluster-stable** means: after correcting for the project's effective multiple-testing budget (500 trials), the strategy's Sharpe is unlikely to be pure selection noise. **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact.**
+* **DSR > 0.5 at N=500, cluster-stable** means: after correcting for the project's effective multiple-testing budget (500 trials), the strategy's Sharpe is unlikely to be pure selection noise — under the minimal 1/sqrt(T) deflator convention; the conservative empirical-sd convention gives DSR ≈ 0 (see "Pinned constants" and `findings/dsr_convention_2026_08.md`). **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact.**
 * The **next honest gate is paper trading itself** — ≥ 4–8 clean weeks on the target venue with the actual order-placement pipeline. Sources of failure that DSR cannot rule out and that only paper trading can catch: signal stability under live data feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw.
 * Real-money deployment requires the paper-trading gate to be passed first, AND (per CLAUDE.md hard rule "Live orders only on testnet") a manual mainnet-migration code-path change. Neither has happened.
 
@@ -20,7 +20,7 @@ PAPER (testnet) status in the table below = "DSR-passed, currently running throu
 
 | # | Strategy / variant | Class | Status | Key metric | Finding |
 |---|---|---|---|---|---|
-| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | DSR 0.770 — first config in the project to clear DSR > 0.5 at N=500 with margin | `findings/han_28d_tsmom.md` |
+| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | Concat-OOS Sharpe +1.48 (verified window 0.72); conservative-deflator DSR ≈ 0 — deploy case = cluster stability (median DSR 0.736, 7/7) + forward test; DSR 0.770 under 1/sqrt(T) (secondary) | `findings/han_28d_tsmom.md` |
 | 2 | TSMOM short-ensemble (lookbacks 28/60/120, etc) | Strategy family | Cluster-stable | DSR median 0.736 (7/7 pass) | `findings/cluster_stability.md` |
 | 3 | TSMOM Han single lookbacks | Strategy family | Cluster-stable | DSR median 0.702 (6/6 pass) | `findings/cluster_stability.md` |
 | 4 | PMA ratio ladder | Strategy family | Cluster-stable | DSR median 0.716 (6/6 pass) | `findings/cluster_stability.md` |
@@ -49,10 +49,12 @@ Status legend:
 ### 1. TSMOM (28, 60) on market-basket index with SMA(200) gate
 * **Universe:** equal-weight market-basket of 7 majors (BTC, ETH, BNB, SOL, ADA, XRP, DOGE). Monthly rebalance + on-`N_active`-change rebalance.
 * **Signal:** TSMOM ladder `{0, 0.5, 1.0}` = mean of binary `sign(28d return), sign(60d return)`. SMA(200) gate zeroes the ladder when basket close < SMA.
-* **Concatenated OOS Sharpe = +1.81** on the market-basket; **DSR = 0.770** at N=500.
-* First config in the project to clearly survive DSR > 0.5 at N=500 with margin.
+* **Concatenated OOS Sharpe = +1.48** on the market-basket (venue-verified window: **+0.72**). Earlier revisions of this file quoted +1.81; the finding's own table says +1.48 — the finding is authoritative.
+* **DSR, two-layer convention (primary statement).** Under the project's own conservative deflator (empirical `sd_trial_sharpes ≈ 0.7`), DSR ≈ 0 (≈ 0.05 at Sharpe +1.48; ≈ 0.000 on the verified window). **The deploy case rests on cluster stability (neighborhood median DSR 0.736, 7/7 neighbors > 0.5) plus the forward test** — not on a DSR headline.
+* **Secondary figure:** DSR = 0.770 at N=500 under the minimal 1/sqrt(T) deflator (estimation noise only, no trial-pool dispersion). Both figures are reproducible from the same code; see `findings/dsr_convention_2026_08.md` for the convention decision.
+* **Survivorship caveat:** the basket is seven majors known ex post — the composition axis (which 7 coins) is untested pending the PIT diagnostic run, and the project's own cross-sectional-momentum measurement showed Sharpe 1.40 → 0.93 when moving to a PIT universe (deep review 2026-08-24).
 
-**What DSR 0.770 actually says.** After correcting for the 500-trial selection budget, the strategy's historical Sharpe is unlikely to be statistical noise. It does NOT say the strategy will be profitable going forward — only that the backtest's edge is unlikely to be a multiple-testing artifact. Backtest survival is the *previous* gate, not the *final* one.
+**What DSR under either convention actually says.** After correcting for the 500-trial selection budget, the minimal-deflator figure (0.770) says the historical Sharpe is unlikely to be pure estimation noise; the conservative-deflator figure (≈ 0) says it does not clear the expected-max bar of a dispersed 500-trial pool. Neither says the strategy will be profitable going forward. Backtest survival is the *previous* gate, not the *final* one.
 
 **Current state and what comes next.**
 * Now: running through `paper-place-orders` daily on Binance testnet (see `src/trade_lab/execution/README.md`).
@@ -145,4 +147,23 @@ Implemented in `backtest/cross_sectional.py` (`run_cross_sectional_momentum`). U
 * Conservative pooled `sd_trial_sharpes ≈ 0.7`; `E[max Sharpe over 500 trials] ≈ 2.14`
 * Single-config DSR threshold for deployment: 0.5 cluster-median.
 
-Last updated: 2026-05-29.
+## DSR reporting convention (owner decision 2026-08-25)
+
+Two deflator conventions coexist; the two-layer statement is primary
+everywhere alive, the 1/sqrt(T) figure is secondary and must be
+labeled as such:
+
+* **Primary (conservative):** empirical `sd_trial_sharpes ≈ 0.7` →
+  DSR ≈ 0 for the deployed config (≈ 0.05 at concat-OOS Sharpe
+  +1.48; ≈ 0.000 on the verified window at +0.72). The deploy case
+  rests on cluster stability (neighborhood median DSR 0.736, 7/7
+  neighbors > 0.5) plus the forward test.
+* **Secondary (minimal):** 1/sqrt(T) null sampling std → DSR 0.770
+  at the peak, 0.736 neighborhood median. Deflates estimation noise
+  only, not trial-pool dispersion.
+
+Both stay reproducible from `walk_forward_v2.py` (computation
+unchanged). Full rationale: `findings/dsr_convention_2026_08.md`.
+
+Last updated: 2026-08-25 (DSR two-layer convention + survivorship
+caveat; strategy table content otherwise as of 2026-05-29).
