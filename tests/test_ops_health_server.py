@@ -357,3 +357,35 @@ def test_daily_disabled_env_parsing(monkeypatch):
     assert hs.Config.from_env().daily_disabled is False
     monkeypatch.delenv("TRADE_LAB_HEALTH_DAILY_DISABLED")
     assert hs.Config.from_env().daily_disabled is False
+
+
+# --------------------------------------------------------------------------
+# db-mirror status reader (feeds /metrics)
+# --------------------------------------------------------------------------
+
+def test_mirror_status_path_per_environment():
+    assert hs.mirror_status_path("data/journal/cycles.jsonl") == Path(
+        "data/journal/mirror_status.json")
+    assert hs.mirror_status_path("data/journal/cycles_mainnet.jsonl") == Path(
+        "data/journal/mirror_status_mainnet.json")
+
+
+def test_read_mirror_status_ok(tmp_path):
+    journal = tmp_path / "cycles.jsonl"
+    (tmp_path / "mirror_status.json").write_text(json.dumps({
+        "last_attempt_at": "2026-08-24T06:00:00+00:00",
+        "last_success_at": "2026-08-24T06:00:00+00:00",
+        "last_error": None,
+    }))
+    status = hs.read_mirror_status(str(journal))
+    assert status["last_success_at"] == "2026-08-24T06:00:00+00:00"
+    assert status["last_error"] is None
+
+
+def test_read_mirror_status_missing_or_corrupt(tmp_path):
+    journal = tmp_path / "cycles.jsonl"
+    assert hs.read_mirror_status(str(journal)) is None  # missing file
+    (tmp_path / "mirror_status.json").write_text("{broken json")
+    assert hs.read_mirror_status(str(journal)) is None  # corrupt
+    (tmp_path / "mirror_status.json").write_text("[1, 2]")
+    assert hs.read_mirror_status(str(journal)) is None  # non-dict

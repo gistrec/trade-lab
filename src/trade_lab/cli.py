@@ -873,7 +873,7 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         # never touching the cycle's own exit code.
         if journal is not None:
             from .execution.db_mirror import mirror_after_cycle
-            mirror_after_cycle()
+            mirror_after_cycle(sandbox=config.sandbox)
     print_dry_run(result, quote=config.quote_currency)
 
 
@@ -1248,7 +1248,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # every path, including the journaled failure above — mirror it
         # off-host without touching the cycle's own exit code.
         from .execution.db_mirror import mirror_after_cycle
-        mirror_after_cycle()
+        mirror_after_cycle(sandbox=config.sandbox)
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")

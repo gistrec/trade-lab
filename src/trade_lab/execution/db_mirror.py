@@ -621,9 +621,49 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
     return written
 
 
+def mirror_status_path(data_dir: Path, sandbox: bool) -> Path:
+    # Same suffix rule as cycles.jsonl / cycles_mainnet.jsonl — testnet
+    # and mainnet never share this file.
+    suffix = "" if sandbox else "_mainnet"
+    return data_dir / "journal" / f"mirror_status{suffix}.json"
+
+
+def _write_mirror_status(
+    data_dir: Path, sandbox: bool, error: Optional[str]
+) -> None:
+    """Best-effort status drop for /metrics — never raises."""
+    try:
+        path = mirror_status_path(data_dir, sandbox)
+        prev: dict = {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prev = loaded
+        except (OSError, ValueError):
+            pass  # first run or corrupt file — start fresh
+        now_iso = datetime.now(timezone.utc).isoformat()
+        status = {
+            "last_attempt_at": now_iso,
+            # A failure must not reset the success clock: the age metric
+            # keeps growing until a mirror actually completes.
+            "last_success_at": (
+                now_iso if error is None else prev.get("last_success_at")
+            ),
+            "last_error": error,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(status) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        logger.warning("db mirror: status file write failed", exc_info=True)
+
+
 def mirror_after_cycle(
     data_dir: Path = DEFAULT_DATA_DIR,
     vintage_root: Path = DEFAULT_VINTAGE_ROOT,
+    *,
+    sandbox: bool,
 ) -> None:
     """Best-effort post-cycle mirror — never raises.
 
@@ -631,6 +671,10 @@ def mirror_after_cycle(
     mirror must not change the cycle's exit code. Every failure mode
     lands as a structured warning, and the next cycle's full-scan
     reconcile (or a manual ``trade-lab db-mirror``) self-heals.
+
+    Success and failure both drop a per-environment status file next to
+    the journal (``mirror_status[_mainnet].json``) so /metrics and the
+    netdata alarms can see mirror health; the drop itself is best-effort.
     """
     try:
         config = mirror_config_from_env()
@@ -643,8 +687,12 @@ def mirror_after_cycle(
         finally:
             conn.close()
         logger.info("db mirror: %s", report.summary())
-    except Exception:
+        _write_mirror_status(data_dir, sandbox, error=None)
+    except Exception as exc:
         logger.warning(
             "db mirror failed (trading unaffected; the next cycle or "
             "`trade-lab db-mirror` reconciles)", exc_info=True,
+        )
+        _write_mirror_status(
+            data_dir, sandbox, error=f"{type(exc).__name__}: {exc}"
         )
