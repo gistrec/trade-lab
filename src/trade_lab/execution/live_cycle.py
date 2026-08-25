@@ -69,6 +69,7 @@ from .delta import SkippedDelta, total_skipped_quote_drift
 from .journal import (
     Cycle,
     JournalWriter,
+    _encode_cycle,
     get_git_commit_short,
     get_python_version,
     new_cycle_id,
@@ -623,6 +624,22 @@ def _placed_at_ms(placed_at: str) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 
+def _log_unwritten(cycle: Cycle) -> None:
+    # A failed append discards the payload — the process log is the
+    # recovery path: the logged line is the exact journal line, append
+    # it verbatim.
+    try:
+        logger.error(
+            "Unwritten journal entry payload %s: %s",
+            cycle.cycle_id,
+            _encode_cycle(cycle).decode("utf-8").rstrip("\n"),
+        )
+    except Exception:
+        logger.error(
+            "Could not serialize unwritten journal entry %s", cycle.cycle_id,
+        )
+
+
 def _write_reconstruction_cycle(
     *,
     journal: JournalWriter,
@@ -669,6 +686,7 @@ def _write_reconstruction_cycle(
             "Could not write reconstruction journal entry %s: %s",
             cycle_id, exc,
         )
+        _log_unwritten(cycle)
         return True
     return False
 
@@ -727,6 +745,7 @@ def _write_main_cycle(
         logger.error(
             "Could not write main cycle journal entry %s: %s", cycle_id, exc,
         )
+        _log_unwritten(cycle)
         return True
     return False
 
@@ -756,6 +775,7 @@ def _write_failed_cycle(
             "Could not write failed-cycle journal entry %s: %s",
             cycle_id, journal_exc,
         )
+        _log_unwritten(cycle)
 
 
 def _write_skipped_warmup_cycle(
@@ -779,5 +799,6 @@ def _write_skipped_warmup_cycle(
             "Could not write skipped_warmup journal entry %s: %s",
             cycle_id, journal_exc,
         )
+        _log_unwritten(cycle)
         return True
     return False

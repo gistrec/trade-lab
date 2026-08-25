@@ -735,6 +735,32 @@ def test_journal_append_failure_sets_flag_not_crash(tmp_path):
     assert _read_cycles(tmp_path) == []         # the entry really is missing
 
 
+def test_journal_append_failure_logs_recoverable_payload(tmp_path, caplog):
+    """The discarded entry must be recoverable: the error log carries the
+    exact serialized journal line (appendable verbatim), not just the
+    cycle id and exception."""
+    import json as _json
+    import logging as _logging
+
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+    with caplog.at_level(_logging.ERROR, logger="trade_lab.execution.live_cycle"):
+        run_live_cycle(
+            _broker(stub), journal=_AppendRaisesJournal(tmp_path / "cycles.jsonl"),
+            state=_state(tmp_path),
+            sleep_fn=clock.sleep, time_fn=clock.time,
+        )
+    payload_lines = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("Unwritten journal entry payload")
+    ]
+    assert len(payload_lines) == 1, caplog.text
+    serialized = payload_lines[0].split(": ", 1)[1]
+    entry = _json.loads(serialized)
+    assert entry["outcome"] == "success"
+    assert len(entry["orders_executed"]) == 2
+
+
 def test_journal_write_failed_false_on_healthy_cycle(tmp_path):
     """A cycle whose journal write succeeds must not raise a false alarm."""
     stub = _LiveStub(basket=("BTC", "ETH"))

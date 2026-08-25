@@ -1282,11 +1282,15 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     if result.journal_write_failed:
         # The journal feeds the dashboard, health verdict, and MySQL
         # mirror — a missing entry hides real fills from all three.
+        # Phase-neutral: the failed append may be the main entry (the
+        # orders printed above) or the reconstruction entry (a prior
+        # cycle's recovered fills) — the log line says which.
         print(
-            f"  JOURNAL WRITE FAILED: a journal entry for this run could "
-            f"not be written to {args.journal} — any orders placed above "
-            f"are live on the exchange but missing from the audit trail. "
-            f"Recover the entry from the log before the next cycle."
+            f"  JOURNAL WRITE FAILED: at least one journal entry for this "
+            f"run could not be written to {args.journal} — real fills may "
+            f"be missing from the audit trail. The exact line is in the "
+            f"process log ('Unwritten journal entry payload …') — append "
+            f"it to the journal before the next cycle."
         )
 
     healthy = result.outcome == "success" or skipped_warmup
