@@ -159,11 +159,13 @@ duration > 60s/120s — slow exchange round-trips; clears on the next fast
 cycle), and `*_journal_read_error` (journal unreadable)
 exist for both jobs (`trade_lab_*` on `prometheus.trade_lab.<metric>`
 contexts, `trade_lab_mainnet_*` on `prometheus.trade_lab_mainnet.<metric>`).
-Mainnet additionally gets two warn alarms on the real-money book:
+Mainnet additionally gets three warn alarms on the real-money book:
 `trade_lab_mainnet_skipped_drift` (cumulative skipped quote drift > 5 USDT,
-~5% of the live book) and `trade_lab_mainnet_equity_drop` (equity down >10%
+~5% of the live book), `trade_lab_mainnet_equity_drop` (equity down >10%
 from its 2-day max — `tradelab_equity_usd` only updates on successful daily
-cycles, hence the wide baseline window).
+cycles, hence the wide baseline window), and `trade_lab_mainnet_equity_floor`
+(equity < 80 USDT absolute — approaching the ~70 USDT capital floor where the
+ladder half-step breaks min-notional; see execution README § Capital floor).
 
 Apply: `sudo systemctl restart netdata` first if the mainnet scrape job is
 new (alarms cannot attach to charts that do not exist yet), then
