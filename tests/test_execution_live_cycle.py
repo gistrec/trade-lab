@@ -1118,6 +1118,53 @@ def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
     assert state.get(today_coid).status == "closed"
 
 
+def test_reserve_cap_sized_after_pending_filter(tmp_path):
+    """Codex review worked example: $5k locked by a pending BTC buy +
+    $5k free; targets $5k BTC / $5k ETH. The BTC intent sits out as
+    pending, so the cap must size the ETH buy off the full free $5k —
+    capping the PRE-filter plan scales both buys to ~$2.5k and strands
+    the filtered pair's share of the quote."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "buy")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.1, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    # The pending BTC buy holds $5k of the quote in `used`.
+    stub.balance["USDT"] = {"free": 5_000.0, "used": 5_000.0, "total": 10_000.0}
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    [call] = stub.create_order_calls
+    assert call["symbol"] == "ETH/USDT"
+    # $5k free × (1 − 10 bp) — NOT ≈$2.5k from a pre-filter cap.
+    assert call["amount"] * 50_000.0 == pytest.approx(5_000.0 * 0.999)
+    cycle = _read_cycles(tmp_path)[-1]
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons == {"BTC/USDT": "pending_order", "ETH/USDT": "funding_cap"}
+    # The pending skip carries the UNSCALED gap, not a capped remnant.
+    btc = next(s for s in cycle["orders_skipped"]
+               if s["symbol"] == "BTC/USDT")
+    assert btc["desired_notional"] == pytest.approx(5_000.0)
+    # Drift counts the 10 bp funding-cap shave; the transient pending
+    # skip stays out.
+    assert cycle["total_skipped_quote_drift"] == pytest.approx(5_000.0 * 0.001)
+
+
 def test_day_two_rerun_after_filled_day_one_places_nothing(tmp_path, monkeypatch):
     """Day-boundary pin of the recompute-from-balance property: day 1's
     buys FILLED and the balance reflects them → a day-2 run (new coid,

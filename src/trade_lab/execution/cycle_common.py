@@ -125,9 +125,14 @@ def run_read_phase(
     snap: SignalSnapshot,
     *,
     log: logging.Logger = logger,
+    reserve_cap: bool = True,
 ) -> ReadPhase:
     """Balance → equity → tickers → allocation → constraints → delta plan
-    → holdings-in-quote. Read-only; any step may raise (fail loud)."""
+    → holdings-in-quote. Read-only; any step may raise (fail loud).
+
+    ``reserve_cap=False`` skips the RESERVE_BPS buy cap: the live cycle
+    applies it itself AFTER pending-order filtering, so filtered pairs
+    do not eat the free quote of the intents that actually go out."""
     balance = broker.fetch_balance_snapshot()
     equity = broker.estimate_total_equity_usd(snapshot=balance)
 
@@ -153,7 +158,7 @@ def run_read_phase(
         constraints=constraints,
         quote_currency=quote,
         # Enables the RESERVE_BPS buy cap (#28, owner-sanctioned).
-        quote_free=balance.quote_free,
+        quote_free=balance.quote_free if reserve_cap else None,
     )
 
     current_holdings_quote = {

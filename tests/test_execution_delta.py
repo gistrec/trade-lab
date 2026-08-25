@@ -258,13 +258,15 @@ def test_full_cash_entry_reserves_10bp_of_free_quote():
         allocation=alloc, current_holdings={},
         constraints={}, quote_currency="USDT", quote_free=quote_free,
     )
-    assert plan.skipped == []
     total = sum(o.notional_quote for o in plan.orders)
     assert total <= quote_free * (1 - RESERVE_BPS / 10_000) + 1e-6
     assert total < quote_free
     assert total == pytest.approx(quote_free * 0.999)
     by_sym = {o.symbol: o.notional_quote for o in plan.orders}
     assert by_sym["BTC/USDT"] / by_sym["ETH/USDT"] == pytest.approx(0.6 / 0.4)
+    # The shaved 10 bp is journaled as first-class funding_cap drift.
+    assert [s.reason for s in plan.skipped] == ["funding_cap", "funding_cap"]
+    assert total_skipped_quote_drift(plan) == pytest.approx(quote_free * 0.001)
 
 
 def test_partial_rebalance_below_cap_unchanged_by_reserve():
@@ -315,6 +317,57 @@ def test_pure_sell_plan_unaffected_by_reserve():
         constraints=_binance_like_constraints(), quote_currency="USDT",
     )
     assert compute_delta_plan(**kwargs, quote_free=3.0) == compute_delta_plan(**kwargs)
+
+
+def test_cap_holds_after_lot_step_requantization():
+    """Codex review: scaling the RAW delta and requantizing can bounce
+    the total back above the cap (one asset, $100 target, price $1, step
+    0.19: quantized 99.94 → cap 99.90 → scaled raw ≈99.96 → truncates
+    back to 99.94). The POST-quantization total must honor the cap."""
+    alloc = compute_target_allocation(
+        signal=1.0, total_equity=100.0, prices={"BTC": 1.0},
+        basket=("BTC",), weights={"BTC": 1.0},
+    )
+    cons = {
+        "BTC/USDT": MarketConstraints(
+            symbol="BTC/USDT", min_amount=None, min_cost=None,
+            amount_precision=None, raw={"precision": {"amount": 0.19}},
+            precision_mode=ccxt.TICK_SIZE,
+        ),
+    }
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings={}, constraints=cons,
+        quote_currency="USDT", quote_free=100.0,
+    )
+    cap = 100.0 * (1 - RESERVE_BPS / 10_000)
+    [order] = plan.orders
+    assert order.notional_quote <= cap
+    assert order.base_amount == pytest.approx(525 * 0.19)   # max lots ≤ cap
+    # Still on the lot grid — ccxt re-truncation must be a no-op.
+    assert float(ccxt.decimal_to_precision(
+        order.base_amount, ccxt.TRUNCATE, 0.19, ccxt.TICK_SIZE,
+    )) == order.base_amount
+    [skip] = plan.skipped
+    assert skip.reason == "funding_cap"
+    assert skip.desired_notional == pytest.approx(99.94 - order.notional_quote)
+
+
+def test_zero_free_quote_records_true_gap_as_funding_cap():
+    """quote_free=0 with no sells → cap 0 suppresses every buy. The skip
+    records must carry the ORIGINAL unscaled gap under 'funding_cap' —
+    scaled-to-zero desired values would report zero drift and blame the
+    lot step."""
+    alloc = _allocation(equity=70_000.0)
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings={},
+        constraints=_binance_like_constraints(), quote_currency="USDT",
+        quote_free=0.0,
+    )
+    assert plan.orders == []
+    assert {s.symbol for s in plan.skipped} == {"BTC/USDT", "ETH/USDT"}
+    assert all(s.reason == "funding_cap" for s in plan.skipped)
+    assert all(s.desired_notional > 0 for s in plan.skipped)
+    assert total_skipped_quote_drift(plan) == pytest.approx(70_000.0, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
