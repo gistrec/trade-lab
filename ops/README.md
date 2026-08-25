@@ -82,8 +82,8 @@ the marker shipped.)
 **Two environments ⇒ two instances.** `ops/ecosystem.health.config.js`
 ships `trade-lab-health` (testnet journal, port 7001) and
 `trade-lab-health-mainnet` (`cycles_mainnet.jsonl`, port 7002, daily
-check disabled during the observation phase). A 200 from
-`/healthz/daily` can therefore also mean "disabled by config" — the
+check live since the 2026-08-24 mainnet live cron). A 200 from
+`/healthz/daily` can also mean "disabled by config" — the
 JSON `reason` field distinguishes the two.
 
 ## Run it
