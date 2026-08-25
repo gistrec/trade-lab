@@ -764,6 +764,54 @@ def test_mirror_after_cycle_updates_all_present_environments(
     )["last_error"] is None
 
 
+def test_mirror_after_cycle_state_outside_root_is_failure(
+    monkeypatch, tmp_path
+):
+    # The cycle's real order-state file must lie under the scanned
+    # <data_dir>/state/ — otherwise the reconcile silently skips the
+    # duplicate-order suppressor and a green status would lie.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    stray = tmp_path / "cron-home" / "data" / "state" / "orders.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=stray,
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert "state file not under mirror root" in status["last_error"]
+
+
+def test_mirror_after_cycle_state_under_root_is_success(
+    monkeypatch, tmp_path
+):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    state = data / "state" / "orders.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=state,
+    )
+
+    assert _read_status(
+        data / "journal" / "mirror_status.json"
+    )["last_error"] is None
+
+
 def test_mirror_after_cycle_noncanonical_journal_fails_loud(
     monkeypatch, tmp_path
 ):

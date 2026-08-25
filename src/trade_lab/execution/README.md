@@ -234,12 +234,14 @@ hard exit before the broker is constructed.
 ### Daily cron
 
 ```cron
-5 0 * * * /opt/trade-lab/.venv/bin/trade-lab paper-place-orders --env-file /opt/trade-lab/.env.testnet --journal /opt/trade-lab/data/journal/cycles.jsonl >> /opt/trade-lab/data/logs/paper-place-orders.log 2>&1
+5 0 * * * /opt/trade-lab/.venv/bin/trade-lab paper-place-orders --env-file /opt/trade-lab/.env.testnet --state /opt/trade-lab/data/state/orders.json --journal /opt/trade-lab/data/journal/cycles.jsonl >> /opt/trade-lab/data/logs/paper-place-orders.log 2>&1
 ```
 
 (One line — crontab has no backslash line continuation. The default
-`.env.testnet` resolves relative to the process CWD, and cron does not
-`cd` — always pass an absolute `--env-file` in crontab entries.)
+`.env.testnet` and `--state` resolve relative to the process CWD, and
+cron does not `cd` — always pass absolute `--env-file`, `--state` and
+`--journal` in crontab entries. A state file outside the journal's
+`data/` root turns the db-mirror status into a loud failure.)
 
 00:05 UTC gives the daily candle a few minutes to settle in
 Binance's API before the strategy reads it. Same minute pattern as

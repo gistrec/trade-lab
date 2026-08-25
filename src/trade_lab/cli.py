@@ -1265,7 +1265,9 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # every path, including the journaled failure above — mirror it
         # off-host without touching the cycle's own exit code.
         from .execution.db_mirror import mirror_after_cycle
-        mirror_after_cycle(args.journal, sandbox=config.sandbox)
+        mirror_after_cycle(
+            args.journal, sandbox=config.sandbox, state_path=state_path
+        )
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")

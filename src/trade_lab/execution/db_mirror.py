@@ -739,6 +739,7 @@ def mirror_after_cycle(
     vintage_root: Optional[Path] = None,
     *,
     sandbox: bool,
+    state_path: "Path | str | None" = None,
 ) -> None:
     """Best-effort post-cycle mirror — never raises.
 
@@ -769,9 +770,18 @@ def mirror_after_cycle(
         finally:
             conn.close()
         logger.info("db mirror: %s", report.summary())
-        update_mirror_statuses(
-            journal_dir, error=drift_error(report), always=sandbox
-        )
+        state_gap = None
+        if state_path is not None:
+            sp = Path(state_path).expanduser().resolve()
+            if sp.parent != (data_dir / "state").resolve():
+                # The cycle's real order-state file (the duplicate-order
+                # suppressor) sits outside the scanned root — a green
+                # status would lie about the file that matters most.
+                state_gap = f"state file not under mirror root: {sp}"
+        error = "; ".join(
+            e for e in (drift_error(report), state_gap) if e
+        ) or None
+        update_mirror_statuses(journal_dir, error=error, always=sandbox)
     except Exception as exc:
         logger.warning(
             "db mirror failed (trading unaffected; the next cycle or "
