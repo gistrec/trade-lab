@@ -179,6 +179,7 @@ def run_dry_cycle(
             _success_cycle(
                 cycle_id, started_at, context, snap, balance, equity, result,
                 decision_age_s=decision_age_s,
+                price_fallbacks=read.price_fallbacks or None,
             ),
         )
     return result
@@ -207,6 +208,7 @@ def _success_cycle(
     result: DryRunResult,
     *,
     decision_age_s: float,
+    price_fallbacks: Optional[dict] = None,
 ) -> Cycle:
     ended_at = datetime.now(timezone.utc)
     return Cycle(
@@ -228,6 +230,7 @@ def _success_cycle(
         orders_planned=list(result.orders_planned),
         orders_skipped=list(result.orders_skipped),
         total_skipped_quote_drift=result.total_skipped_quote_drift,
+        price_fallbacks=price_fallbacks,
     )
 
 

@@ -17,6 +17,9 @@ must accept all known versions and skip unknown ones with a warning
 outcome ``skipped_warmup`` + optional ``skip_reason`` dict for the
 testnet-only "SMA warm-up structurally impossible" first-class skip;
 readers that predate it simply see an unfamiliar outcome string.
+Second additive v2 extension (2026-08-25, no version bump): optional
+``price_fallbacks`` dict on success cycles whose sizing used a
+candle-close fallback price for at least one symbol.
 
 Atomicity
 =========
@@ -108,6 +111,11 @@ class Cycle:
     # "bars_available": int, "bars_required": int, "message": str}.
     # CLAUDE.md: skipped actions are first-class outputs with an explicit
     # reason field. None for every other outcome.
+    price_fallbacks: Optional[dict] = None
+    # symbol -> {"source": "candle_close_fallback", "age_s": float} for
+    # tickers that failed and were sized on the (stale) candle close.
+    # None when every ticker succeeded — divergent pricing is a
+    # first-class output, not just a cron-log warning.
     schema_version: int = JOURNAL_SCHEMA_VERSION
 
 
