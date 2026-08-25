@@ -87,11 +87,24 @@ def is_live_cycle(cycle: dict) -> bool:
     journal warm'.
 
     Caveat: a live cycle that raised *before* placing any order also writes
-    ``orders_executed=None`` (live_cycle.py:592), so it reads as non-live
-    here — but such a cycle still surfaces through its ``outcome=="failed"``
-    in :func:`recent_incidents`, so nothing is lost.
+    ``orders_executed=None``, so it reads as non-live here. Use
+    :func:`is_live_attempt` wherever such a failure must still count as live.
     """
     return cycle.get("orders_executed") is not None
+
+
+def is_live_attempt(cycle: dict) -> bool:
+    """True if the cycle ran in live (real-order) mode, even if it raised
+    before placing anything.
+
+    Prefers the durable ``context.mode`` marker (written for exactly this);
+    pre-marker rows carry no mode and fall back to placed-orders semantics.
+    """
+    ctx = cycle.get("context")
+    mode = ctx.get("mode") if isinstance(ctx, dict) else None
+    if mode is not None:
+        return mode == "live"
+    return is_live_cycle(cycle)
 
 
 def first_live_cycle_time(cycles: list[dict]) -> Optional[datetime]:
@@ -107,6 +120,9 @@ def first_live_cycle_time(cycles: list[dict]) -> Optional[datetime]:
     """
     best: Optional[datetime] = None
     for c in cycles:
+        # Placed-orders semantics on purpose (not is_live_attempt): a live
+        # attempt that failed before placing must not date the start of
+        # live trading on the charts.
         if not is_live_cycle(c):
             continue
         t = parse_iso(c.get("ended_at"))
@@ -152,7 +168,7 @@ def recent_incidents(cycles: list[dict]) -> list[dict]:
             out.append({
                 "ended_at": c.get("ended_at"),
                 "outcome": str(c.get("outcome") or "?"),
-                "mode": "LIVE" if is_live_cycle(c) else "DRY",
+                "mode": "LIVE" if is_live_attempt(c) else "DRY",
                 "cycle_id": (c.get("cycle_id") or "?")[:8],
                 "error_type": err.get("type") if isinstance(err, dict) else None,
                 "error_message": err.get("message") if isinstance(err, dict) else None,
@@ -212,12 +228,14 @@ def unresolved_order_incidents(cycles: list[dict]) -> list[dict]:
                     continue
                 seen.add(str(coid))
             status = o.get("terminal_status")
-            # 'partial' is exchange-terminal: reconstruction persists it as
-            # 'closed' in order-state, so no later row will ever resolve it
-            # here — without this it pins the verdict at DOWN forever. The
-            # cycle-level 'partial' outcome still surfaces via
-            # recent_incidents, and the row stays in open_order_incidents.
-            if status in RESOLVED_ORDER_STATUSES or status == "partial":
+            # 'partial' resolves only when exchange-terminal (terminal_at
+            # set): order-state persists that as 'closed', so no later row
+            # will ever resolve it here and it would pin DOWN forever. A
+            # timeout-partial (terminal_at None) is STILL LIVE on the
+            # exchange and stays unresolved until a later row closes it.
+            if status in RESOLVED_ORDER_STATUSES or (
+                status == "partial" and o.get("terminal_at") is not None
+            ):
                 continue
             out.append({
                 "ended_at": c.get("ended_at"),
@@ -511,17 +529,18 @@ class JournalReader:
         return self._cache[-1] if self._cache else None
 
     def latest_live_cycle(self) -> Optional[dict]:
-        """Most recent cycle that placed real orders, or None.
+        """Most recent live (real-order) cycle, or None.
 
         The 6-hourly dry-run and the daily live run share one journal, so
         :meth:`latest_cycle` is almost always a dry-run — a dead daily order
         cron stays invisible while dry-runs keep the journal fresh. This is
-        the clock that answers 'is the real order cron still alive?'. See
-        :func:`is_live_cycle` for the discriminator and its one caveat.
+        the clock that answers 'is the real order cron still alive?'.
+        :func:`is_live_attempt`, not :func:`is_live_cycle`: a live cycle
+        that failed before placing still means the cron fired.
         """
         self._refresh_if_changed()
         for c in reversed(self._cache):
-            if is_live_cycle(c):
+            if is_live_attempt(c):
                 return c
         return None
 

@@ -21,7 +21,8 @@ import pytest
 from trade_lab.monitoring.data_source import (
     JournalReader, KNOWN_SCHEMA_VERSIONS, Staleness, TradeEvent, as_float,
     cycle_orders_executed, duration_series,
-    duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
+    duration_stats, equity_series, first_live_cycle_time, is_live_attempt,
+    is_live_cycle,
     largest_inter_cycle_gap,
     unfillable_drift_series,
     open_order_incidents, parse_iso,
@@ -582,12 +583,44 @@ def _live_cycle(cycle_id="live", ended_at=None, outcome="success",
     return c
 
 
+def _failed_live_attempt(cycle_id="boom", ended_at=None):
+    """A live cycle that raised BEFORE placing anything: context.mode is
+    'live' but orders_executed stays None."""
+    c = _cycle_entry(cycle_id, ended_at=ended_at, outcome="failed",
+                     schema_version=2)
+    c["context"]["mode"] = "live"
+    c["orders_executed"] = None
+    return c
+
+
 def test_is_live_cycle_true_only_when_orders_executed_is_a_list():
     assert is_live_cycle({"orders_executed": []}) is True
     assert is_live_cycle({"orders_executed": [{"symbol": "BTC/USDT"}]}) is True
     # dry-run: explicit None or absent → not live
     assert is_live_cycle({"orders_executed": None}) is False
     assert is_live_cycle({}) is False
+
+
+def test_is_live_attempt_prefers_context_mode():
+    # A failed live attempt journals orders_executed=None — the durable
+    # context.mode marker must win over placed-orders semantics.
+    assert is_live_attempt(_failed_live_attempt()) is True
+    assert is_live_attempt(
+        {"context": {"mode": "dry_run"}, "orders_executed": None}
+    ) is False
+    # mode wins even against a populated orders list (defensive symmetry).
+    assert is_live_attempt(
+        {"context": {"mode": "dry_run"}, "orders_executed": []}
+    ) is False
+
+
+def test_is_live_attempt_falls_back_to_orders_executed_pre_marker():
+    """Pre-marker rows (no context.mode) keep the old discriminator."""
+    assert is_live_attempt({"orders_executed": []}) is True
+    assert is_live_attempt({"orders_executed": None}) is False
+    assert is_live_attempt({"context": {"sandbox": True}}) is False
+    assert is_live_attempt({"context": "garbage-non-dict",
+                            "orders_executed": []}) is True
 
 
 def test_latest_live_cycle_ignores_dry_runs(tmp_path):
@@ -609,6 +642,34 @@ def test_latest_live_cycle_none_when_only_dry_runs(tmp_path):
     _write_journal(journal, [_cycle_entry("dry1"), _cycle_entry("dry2")])
     reader = JournalReader(journal)
     assert reader.latest_live_cycle() is None
+
+
+def test_latest_live_cycle_finds_failed_live_attempt(tmp_path):
+    """A live cycle that raised before placing anything (orders_executed=None,
+    context.mode='live') is still the live cron firing — with no placed-order
+    live cycle ever, it must not read as 'no live cycle yet'."""
+    journal = tmp_path / "j.jsonl"
+    entries = [_cycle_entry("dry1"), _failed_live_attempt("boom"),
+               _cycle_entry("dry2")]
+    _write_journal(journal, entries)
+    reader = JournalReader(journal)
+    assert reader.latest_live_cycle()["cycle_id"] == "boom"
+
+
+def test_recent_incidents_failed_live_attempt_labeled_live():
+    cycles = [_failed_live_attempt("boom"), _cycle_entry("dry_after")]
+    incidents = recent_incidents(cycles)
+    assert [i["cycle_id"] for i in incidents] == ["boom"]
+    assert incidents[0]["mode"] == "LIVE"
+
+
+def test_recent_incidents_failed_dry_cycle_stays_dry():
+    cycles = [_cycle_entry("dryboom", outcome="failed")]
+    c = cycles[0]
+    c["context"]["mode"] = "dry_run"
+    incidents = recent_incidents(cycles)
+    assert [i["cycle_id"] for i in incidents] == ["dryboom"]
+    assert incidents[0]["mode"] == "DRY"
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +714,17 @@ def test_first_live_cycle_time_skips_unparseable_timestamp():
     bad["ended_at"] = None
     good = _live_cycle("good", ended_at=_exec_at(3))
     assert first_live_cycle_time([bad, good]) == parse_iso(_exec_at(3))
+
+
+def test_first_live_cycle_time_ignores_failed_live_attempt():
+    """Deliberate exception to is_live_attempt: a live attempt that failed
+    before placing must not date the charts' 'live trading started' marker."""
+    cycles = [
+        _failed_live_attempt("boom", ended_at=_exec_at(0)),
+        _live_cycle("real", ended_at=_exec_at(2)),
+    ]
+    assert first_live_cycle_time(cycles) == parse_iso(_exec_at(2))
+    assert first_live_cycle_time([_failed_live_attempt("only")]) is None
 
 
 def test_recent_incidents_scans_window_not_just_latest():
@@ -812,19 +884,49 @@ def test_unresolved_orders_match_on_full_id_not_display_truncation():
     assert out[0]["client_order_id"] == b[:24]
 
 
-def test_unresolved_orders_partial_is_final_not_open():
-    """Reconstruction persists a partial fill as closed in order-state, so
-    no later journal row will ever resolve it — it must not stay open.
-    The cycle-level 'partial' outcome still reaches recent_incidents."""
+def test_unresolved_orders_exchange_terminal_partial_is_resolved():
+    """An exchange-terminal partial (terminal_at set) is persisted as closed
+    in order-state, so no later journal row will ever resolve it — it must
+    not stay open. The cycle-level 'partial' outcome still reaches
+    recent_incidents."""
     cycles = [
         _live_cycle("c1", outcome="partial", orders_executed=[
-            {"terminal_status": "partial", "client_order_id": "coid-1"},
+            {"terminal_status": "partial", "client_order_id": "coid-1",
+             "terminal_at": "2026-08-20T00:00:00+00:00"},
         ]),
     ]
     assert unresolved_order_incidents(cycles) == []
     assert [i["cycle_id"] for i in recent_incidents(cycles)] == ["c1"]
     # ...and the history list still shows the row.
     assert [o["status"] for o in open_order_incidents(cycles)] == ["partial"]
+
+
+def test_unresolved_orders_timeout_partial_stays_open():
+    """A partial from a wait-for-ack timeout (terminal_at None) is STILL
+    LIVE on the exchange — it must hold the verdict open, not resolve."""
+    cycles = [
+        _live_cycle("c1", outcome="partial", orders_executed=[
+            {"terminal_status": "partial", "client_order_id": "coid-1",
+             "terminal_at": None, "symbol": "BTC/USDT", "side": "buy"},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["status"] == "partial"
+
+
+def test_unresolved_orders_timeout_partial_resolved_by_later_closed_row():
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "partial", "client_order_id": "coid-1",
+             "terminal_at": None},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": "coid-1",
+             "terminal_at": "2026-08-21T00:00:00+00:00"},
+        ]),
+    ]
+    assert unresolved_order_incidents(cycles) == []
 
 
 def test_unresolved_orders_missing_id_cannot_be_resolved():

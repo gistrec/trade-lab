@@ -306,11 +306,23 @@ def _stub_st(monkeypatch, capture):
 def test_cycle_mode_live_vs_dry():
     from trade_lab.monitoring.app import _cycle_mode
 
+    # Pre-marker rows (no context.mode): placed-orders fallback.
     assert _cycle_mode({"orders_executed": []}) == "LIVE"
     assert _cycle_mode({"orders_executed": [{"symbol": "BTC"}]}) == "LIVE"
     assert _cycle_mode({"orders_executed": None}) == "DRY"
     assert _cycle_mode({}) == "DRY"
     assert _cycle_mode(None) == "DRY"
+
+
+def test_cycle_mode_failed_live_attempt_is_live():
+    """A live cycle that raised before placing (orders_executed=None) must
+    still be labeled LIVE via the durable context.mode marker."""
+    from trade_lab.monitoring.app import _cycle_mode
+
+    assert _cycle_mode({"context": {"mode": "live"},
+                        "orders_executed": None}) == "LIVE"
+    assert _cycle_mode({"context": {"mode": "dry_run"},
+                        "orders_executed": None}) == "DRY"
 
 
 class _LiveReader:
@@ -527,6 +539,55 @@ def test_health_verdict_healthy_without_live_cycle_says_so():
     assert "live cycle OK" not in why
 
 
+def _write_journal_rows(path, rows):
+    import json
+
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_health_verdict_failed_live_attempt_not_no_live_cycle_yet(tmp_path):
+    """A live cycle that raised before placing (orders_executed=None,
+    context.mode='live') aged past the incident cut must NOT read as
+    'HEALTHY — no live cycle yet': the live cron fired and is now overdue."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import JournalReader
+
+    journal = tmp_path / "j.jsonl"
+    _write_journal_rows(journal, [
+        {"schema_version": 2, "cycle_id": "boom",
+         "ended_at": _iso_ago(days=3), "outcome": "failed",
+         "context": {"mode": "live"}, "orders_executed": None,
+         "error": {"type": "RuntimeError", "message": "kaput"}},
+        {"schema_version": 2, "cycle_id": "dry",
+         "ended_at": _iso_ago(hours=1), "outcome": "success",
+         "context": {"mode": "dry_run"}, "orders_executed": None},
+    ])
+    level, why = _health_verdict(JournalReader(journal))
+    assert level == "DOWN"
+    assert "live order cron overdue" in why
+    assert "no live cycle yet" not in why
+
+
+def test_health_verdict_failed_dry_cycle_still_no_live_cycle_yet(tmp_path):
+    """The dry twin of the case above must keep the old reading."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import JournalReader
+
+    journal = tmp_path / "j.jsonl"
+    _write_journal_rows(journal, [
+        {"schema_version": 2, "cycle_id": "dryboom",
+         "ended_at": _iso_ago(days=3), "outcome": "failed",
+         "context": {"mode": "dry_run"}, "orders_executed": None,
+         "error": {"type": "RuntimeError", "message": "kaput"}},
+        {"schema_version": 2, "cycle_id": "dry",
+         "ended_at": _iso_ago(hours=1), "outcome": "success",
+         "context": {"mode": "dry_run"}, "orders_executed": None},
+    ])
+    level, why = _health_verdict(JournalReader(journal))
+    assert level == "HEALTHY"
+    assert "no live cycle yet" in why
+
+
 def test_health_verdict_down_on_read_error():
     from trade_lab.monitoring.app import _health_verdict
     from trade_lab.monitoring.data_source import Staleness
@@ -638,21 +699,40 @@ def test_health_verdict_fresh_failed_cycle_is_degraded():
 
 
 def test_health_verdict_partial_fill_is_degraded_not_down():
-    """Reconstruction persists 'partial' as closed in order-state, so no
-    later row can resolve it — it must not pin DOWN; the partial cycle
-    outcome still degrades while recent."""
+    """An exchange-terminal partial (terminal_at set) is persisted as closed
+    in order-state, so no later row can resolve it — it must not pin DOWN;
+    the partial cycle outcome still degrades while recent."""
     from trade_lab.monitoring.app import _health_verdict
     from trade_lab.monitoring.data_source import Staleness
 
     live = {"outcome": "partial", "ended_at": _iso_ago(hours=2),
             "orders_executed": [{"terminal_status": "partial",
-                                 "client_order_id": "coid-1"}]}
+                                 "client_order_id": "coid-1",
+                                 "terminal_at": _iso_ago(hours=2)}]}
     reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
                            staleness=Staleness.FRESH, cycles=[live],
                            live=live)
     level, why = _health_verdict(reader)
     assert level == "DEGRADED"
     assert "unresolved" not in why
+
+
+def test_health_verdict_timeout_partial_is_down():
+    """A partial from a wait-for-ack timeout (terminal_at None) is still
+    live on the exchange — it must hold DOWN until a later row closes it."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    live = {"outcome": "partial", "ended_at": _iso_ago(hours=2),
+            "orders_executed": [{"terminal_status": "partial",
+                                 "client_order_id": "coid-1",
+                                 "terminal_at": None}]}
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.FRESH, cycles=[live],
+                           live=live)
+    level, why = _health_verdict(reader)
+    assert level == "DOWN"
+    assert "unresolved" in why
 
 
 def test_incident_is_recent_within_and_beyond_cut():
