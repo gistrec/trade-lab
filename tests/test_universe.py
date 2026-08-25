@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from trade_lab.data.coin_registry import CoinMeta, stablecoins
-from trade_lab.data.universe import build_pit_universe, closes_for_universe
+from trade_lab.data.universe import (
+    PITMcapGapError,
+    build_pit_universe,
+    closes_for_universe,
+)
 
 
 def _date_index(n: int, start: str = "2020-01-01") -> pd.DatetimeIndex:
@@ -248,3 +253,125 @@ def test_closes_for_universe_masks_out_ineligible_cells():
 def test_empty_inputs_return_empty_frame():
     eligibility = build_pit_universe(pd.DataFrame(), pd.DataFrame())
     assert eligibility.empty
+
+
+# ---------------------------------------------------------------------------
+# strict_mcap_dates — fail loud on NaN mcap at a rebalance date (issue #14)
+# ---------------------------------------------------------------------------
+
+
+def _nan_mcap_setup(n: int = 120):
+    idx = _date_index(n)
+    registry = {
+        "BIG":   CoinMeta("big-id",   "BIG/USDT",   "2020-01-01", None),
+        "NOCAP": CoinMeta("nocap-id", "NOCAP/USDT", "2020-01-01", None),
+    }
+    market_caps = pd.DataFrame(
+        {"BIG": np.full(n, 1e11), "NOCAP": np.full(n, np.nan)},
+        index=idx,
+    )
+    volumes = pd.DataFrame(
+        {"BIG": np.full(n, 5e9), "NOCAP": np.full(n, 5e8)},
+        index=idx,
+    )
+    return registry, market_caps, volumes
+
+
+def test_strict_mcap_dates_raise_on_nan_for_tradable_coin():
+    registry, market_caps, volumes = _nan_mcap_setup()
+    with pytest.raises(PITMcapGapError, match="NOCAP @ 2020-02-01") as excinfo:
+        build_pit_universe(
+            market_caps, volumes, candidates=registry,
+            top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+            strict_mcap_dates=["2020-02-01"],
+        )
+    assert excinfo.value.gaps == [
+        ("NOCAP", pd.Timestamp("2020-02-01", tz="UTC"))
+    ]
+
+
+def test_strict_mcap_dates_pass_when_all_observed():
+    registry, market_caps, volumes = _nan_mcap_setup()
+    market_caps["NOCAP"] = 1e9  # gap repaired
+    strict = build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+        strict_mcap_dates=["2020-02-01", "2020-03-01"],
+    )
+    loose = build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+    )
+    pd.testing.assert_frame_equal(strict, loose)
+
+
+def test_strict_mcap_date_without_panel_row_raises():
+    registry, market_caps, volumes = _nan_mcap_setup()
+    market_caps["NOCAP"] = 1e9
+    with pytest.raises(PITMcapGapError, match="no panel row"):
+        build_pit_universe(
+            market_caps, volumes, candidates=registry,
+            top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+            strict_mcap_dates=["2030-01-01"],
+        )
+
+
+def test_default_none_keeps_silent_ineligibility_for_other_dates():
+    """Without strict_mcap_dates the legacy behavior stays: NaN mcap only
+    makes the coin ineligible; NaN on a non-strict date never raises."""
+    registry, market_caps, volumes = _nan_mcap_setup()
+    eligibility = build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+    )
+    assert (eligibility["NOCAP"] == False).all()
+    # NaN outside the strict set is likewise tolerated.
+    market_caps["NOCAP"] = 1e9
+    market_caps.loc[market_caps.index[5], "BIG"] = np.nan
+    build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+        strict_mcap_dates=["2020-02-01"],
+    )
+
+
+def test_strict_mcap_dates_ignore_non_tradable_and_stablecoins():
+    """Delisted pairs and excluded stablecoins are not rank candidates —
+    their NaN mcap on a strict date must not raise."""
+    n = 200
+    idx = _date_index(n)
+    registry = _registry()
+    market_caps = pd.DataFrame(
+        {
+            "BIG":   np.full(n, 1e11),
+            "MED":   np.full(n, 1e10),
+            "SMALL": np.full(n, 1e9),
+            "DEAD":  np.full(n, np.nan),   # delisted 2020-05-01
+            "FAKE":  np.full(n, np.nan),   # stablecoin, excluded
+        },
+        index=idx,
+    )
+    volumes = pd.DataFrame(
+        {c: np.full(n, 1e9) for c in market_caps.columns}, index=idx
+    )
+    # 2020-06-01 is past DEAD's delisting; FAKE is filtered as stablecoin.
+    build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=5, volume_lookback_days=30, exclude_stablecoins=True,
+        strict_mcap_dates=["2020-06-01"],
+    )
+    # Before delisting DEAD is tradable, so its NaN must raise.
+    with pytest.raises(PITMcapGapError, match="DEAD @ 2020-03-01"):
+        build_pit_universe(
+            market_caps, volumes, candidates=registry,
+            top_n=5, volume_lookback_days=30, exclude_stablecoins=True,
+            strict_mcap_dates=["2020-03-01"],
+        )
+
+
+def test_strict_mcap_dates_on_empty_panel_raise():
+    with pytest.raises(PITMcapGapError):
+        build_pit_universe(
+            pd.DataFrame(), pd.DataFrame(),
+            strict_mcap_dates=["2020-01-01"],
+        )
