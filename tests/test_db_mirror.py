@@ -789,6 +789,58 @@ def test_mirror_after_cycle_state_outside_root_is_failure(
     assert "state file not under mirror root" in status["last_error"]
 
 
+def test_mirror_after_cycle_state_glob_mismatch_is_failure(
+    monkeypatch, tmp_path
+):
+    # Right directory, wrong suffix: reconcile scans state/*.json only,
+    # so orders.state would be silently skipped — that is a failure too.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    state = data / "state" / "orders.state"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=state,
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert "state file not under mirror root" in status["last_error"]
+
+
+def test_cmd_db_mirror_failure_updates_status(monkeypatch, tmp_path):
+    # A failed MANUAL reconcile must reach /metrics too, not stay green
+    # until the next post-cycle hook.
+    import argparse
+
+    from trade_lab.cli import cmd_db_mirror
+
+    _mirror_env(monkeypatch)
+
+    def boom(config):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("trade_lab.execution.db_mirror.connect", boom)
+    journal_dir = tmp_path / "data" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "cycles.jsonl").write_text("")
+
+    args = argparse.Namespace(
+        data_dir=str(tmp_path / "data"),
+        vintage_root=str(tmp_path / "vintages"),
+    )
+    with pytest.raises(RuntimeError, match="db down"):
+        cmd_db_mirror(args)
+
+    status = _read_status(journal_dir / "mirror_status.json")
+    assert "RuntimeError: db down" in status["last_error"]
+
+
 def test_mirror_after_cycle_state_under_root_is_success(
     monkeypatch, tmp_path
 ):

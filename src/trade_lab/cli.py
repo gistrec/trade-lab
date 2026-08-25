@@ -1356,18 +1356,25 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
             "MYSQL_HOST is not set in the selected env file — "
             "the MySQL mirror is unconfigured."
         )
-    conn = connect(config)
+    journal_dir = Path(args.data_dir) / "journal"
     try:
-        report = reconcile(conn, Path(args.data_dir),
-                           Path(args.vintage_root))
-    finally:
-        conn.close()
+        conn = connect(config)
+        try:
+            report = reconcile(conn, Path(args.data_dir),
+                               Path(args.vintage_root))
+        finally:
+            conn.close()
+    except Exception as exc:
+        # A failed manual recovery attempt must reach /metrics too —
+        # not stay green until the next post-cycle hook.
+        update_mirror_statuses(
+            journal_dir, error=f"{type(exc).__name__}: {exc}"
+        )
+        raise
     print(report.summary())
     # The manual reconcile covers the same files as the hook — keep the
     # /metrics status in step with it (drift stays a failure there too).
-    update_mirror_statuses(
-        Path(args.data_dir) / "journal", error=drift_error(report)
-    )
+    update_mirror_statuses(journal_dir, error=drift_error(report))
     if report.drift:
         raise SystemExit(2)
 

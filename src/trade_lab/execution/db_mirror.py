@@ -773,10 +773,14 @@ def mirror_after_cycle(
         state_gap = None
         if state_path is not None:
             sp = Path(state_path).expanduser().resolve()
-            if sp.parent != (data_dir / "state").resolve():
-                # The cycle's real order-state file (the duplicate-order
-                # suppressor) sits outside the scanned root — a green
-                # status would lie about the file that matters most.
+            # Must match the reconcile collection rule (state/*.json)
+            # exactly — the parent alone passes for orders.state, which
+            # the glob skips. A green status must never cover an
+            # unmirrored duplicate-order suppressor.
+            if (
+                sp.parent != (data_dir / "state").resolve()
+                or sp.suffix != ".json"
+            ):
                 state_gap = f"state file not under mirror root: {sp}"
         error = "; ".join(
             e for e in (drift_error(report), state_gap) if e
