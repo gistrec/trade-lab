@@ -200,6 +200,9 @@ def run_live_cycle(
     # journaled, then re-raised so the cron stderr sees the traceback.
     rebal_date = datetime.now(timezone.utc).date()
     order_results: list[OrderResult] = []
+    # Pre-bound so the failure handler can thread read.price_fallbacks
+    # into the failed-cycle entry even when the read phase never ran.
+    read = None
     try:
         snap = compute_live_signal(
             broker,
@@ -402,6 +405,11 @@ def run_live_cycle(
             context=context,
             exc=exc,
             partial_orders=order_results,
+            # Partial orders sized on a candle-close fallback must stay
+            # attributable on the incident path, not just on success.
+            price_fallbacks=(
+                (read.price_fallbacks or None) if read is not None else None
+            ),
         )
         raise
 
@@ -763,12 +771,14 @@ def _write_failed_cycle(
     context: dict,
     exc: BaseException,
     partial_orders: list[OrderResult],
+    price_fallbacks: Optional[dict] = None,
 ) -> None:
     cycle = failed_cycle(
         cycle_id, started_at, datetime.now(timezone.utc), context, exc,
         orders_executed=(
             [r.to_dict() for r in partial_orders] if partial_orders else None
         ),
+        price_fallbacks=price_fallbacks,
     )
     try:
         journal.append(cycle)

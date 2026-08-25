@@ -98,6 +98,9 @@ def run_dry_cycle(
     started_at = datetime.now(timezone.utc)
     context = build_context(broker, mode="dry_run")
 
+    # Pre-bound so the failure handler can thread read.price_fallbacks
+    # into the failed-cycle entry even when the read phase never ran.
+    read = None
     try:
         snap = compute_live_signal(
             broker,
@@ -167,6 +170,10 @@ def run_dry_cycle(
                 failed_cycle(
                     cycle_id, started_at, datetime.now(timezone.utc),
                     context, exc,
+                    price_fallbacks=(
+                        (read.price_fallbacks or None)
+                        if read is not None else None
+                    ),
                 ),
             )
         raise
