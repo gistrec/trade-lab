@@ -1288,11 +1288,13 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         print(
             f"  JOURNAL WRITE FAILED: at least one journal entry for this "
             f"run could not be written to {args.journal} — real fills may "
-            f"be missing from the audit trail. The exact line is in the "
-            f"process log ('Unwritten journal entry payload …'). Recovery: "
-            f"grep the journal for that cycle_id FIRST — an fsync failure "
-            f"can land the entry despite the error — and append the logged "
-            f"line only if it is absent."
+            f"be missing from the audit trail. The entry is in the process "
+            f"log ('Unwritten journal entry payload …'); JSON logs wrap it "
+            f"in the record's msg field — extract with "
+            f"jq -r 'select(.msg|startswith(\"Unwritten journal\"))"
+            f"|.msg|sub(\"^[^{{]*\";\"\")'. Recovery: grep the journal for "
+            f"that cycle_id FIRST — an fsync failure can land the entry "
+            f"despite the error — and append only if absent."
         )
 
     healthy = result.outcome == "success" or skipped_warmup

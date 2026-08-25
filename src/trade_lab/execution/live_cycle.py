@@ -626,8 +626,10 @@ def _placed_at_ms(placed_at: str) -> Optional[int]:
 
 def _log_unwritten(cycle: Cycle) -> None:
     # A failed append discards the payload — the process log is the
-    # recovery path: the logged line is the exact journal line, append
-    # it verbatim.
+    # recovery path. The text after the first '{' is the exact journal
+    # line; the default JSON log formatter wraps it (escaped) in the
+    # record's msg field, so recovery extracts, never copies the raw
+    # log line.
     try:
         logger.error(
             "Unwritten journal entry payload %s: %s",
