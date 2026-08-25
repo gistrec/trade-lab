@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from .backtest.engine import run_backtest
 from .backtest.metrics import benchmark_verdict, compute_metrics
@@ -1718,7 +1719,8 @@ def build_parser() -> argparse.ArgumentParser:
             help="Per-environment dotenv file: .env.testnet (default) or "
                  ".env.mainnet. The testnet/mainnet switch. A missing "
                  "file is an error, not a silent fallback; the file "
-                 "overrides ambient shell vars.",
+                 "replaces ambient shell vars in the TRADE_LAB_PAPER_* "
+                 "and MYSQL_* families (omitted keys are cleared).",
         )
 
     p_ps = sub.add_parser(
@@ -1837,6 +1839,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Env families owned by the per-environment paper env files
+# (paper.env.example). NOT the monitoring/health/logging families —
+# other processes own those.
+_ENV_FILE_OWNED_PREFIXES = ("TRADE_LAB_PAPER_", "MYSQL_")
+
+
 def main(argv: list[str] | None = None) -> None:
     # Structured logging first, so every command emits parseable JSON lines
     # (TRADE_LAB_LOG_JSON=false for a human format).
@@ -1869,6 +1877,21 @@ def main(argv: list[str] | None = None) -> None:
         # shell (e.g. from an earlier `source .env.mainnet`) would
         # silently win over the file — a run labelled testnet could
         # carry a mainnet config through the three-flag gate.
+        #
+        # override=True only beats keys the file SETS. Ambient residue
+        # in the owned families for keys the file OMITS (e.g.
+        # MYSQL_SSL_DISABLED, TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS) must
+        # not act as an explicit opt-in/out — clear it first.
+        # A valueless line ("KEY" without "=") parses as None and
+        # load_dotenv skips it — it must count as ABSENT here, or the
+        # ambient value it fails to overwrite would survive the sweep.
+        file_keys = {
+            k for k, v in dotenv_values(env_file).items() if v is not None
+        }
+        for key in [k for k in os.environ
+                    if k.startswith(_ENV_FILE_OWNED_PREFIXES)]:
+            if key not in file_keys:
+                del os.environ[key]
         load_dotenv(env_file, override=True)
     else:
         load_dotenv()
