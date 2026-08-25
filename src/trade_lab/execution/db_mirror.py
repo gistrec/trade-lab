@@ -60,7 +60,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 import pymysql
@@ -110,7 +110,7 @@ class MirrorConfigError(RuntimeError):
 
 
 class MirrorIntegrityError(RuntimeError):
-    """A mirrored payload does not match its content hash.
+    """Mirrored data cannot be trusted (bad content hash, hostile path).
 
     Distinct from MirrorConfigError so `except MirrorConfigError` cannot
     swallow data corruption along with a typo'd env var. Carries the
@@ -230,7 +230,10 @@ def plan_journal_inserts(
     Pure planning: the caller supplies the mirror's ``MAX(line_no)`` and
     ``COUNT(*)`` for this source. Drift = the mirror holds lines the
     local file no longer has (truncated/rewritten file) — reported, not
-    repaired.
+    repaired, and inserts FREEZE: appending onto a broken numbering
+    identity mints duplicate rows (e.g. a renumbered mirror against a
+    not-yet-republished file), so a drifted source sends nothing until
+    an operator re-runs restore/--force.
     """
     to_insert = [(n, p) for n, p in local_lines if n > mirrored_max_line]
     local_at_or_below_mark = sum(
@@ -242,8 +245,9 @@ def plan_journal_inserts(
             f"mirror holds {mirrored_count} lines up to line "
             f"{mirrored_max_line} but the local file has only "
             f"{local_at_or_below_mark} there — local truncation? "
-            f"NOT repaired automatically"
+            f"NOT repaired automatically; inserts frozen for this source"
         )
+        to_insert = []
     return to_insert, drift
 
 
@@ -264,6 +268,18 @@ def collect_vintage_files(vintage_root: Path) -> dict[str, Path]:
 
 # ── reconcile / restore ──────────────────────────────────────────────
 
+def _insert_journal_lines(
+    cur, source: str, lines: list[tuple[int, str]], now: datetime
+) -> None:
+    # IGNORE: a concurrent mirror of the same tail must be a no-op, not
+    # a PK explosion.
+    cur.executemany(
+        "INSERT IGNORE INTO journal_lines "
+        "(source, line_no, payload, mirrored_at) "
+        "VALUES (%s, %s, %s, %s)",
+        [(source, n, p, now) for n, p in lines],
+    )
+
 @dataclass
 class MirrorReport:
     journal_lines_inserted: int = 0
@@ -282,12 +298,56 @@ class MirrorReport:
         return out
 
 
+def _mirror_lock_name(cur) -> str:
+    # Named locks are server-wide; scope to the schema so two databases
+    # on one shared MySQL never contend. Hashed: GET_LOCK caps names at
+    # 64 chars and a schema name alone can exceed that.
+    cur.execute("SELECT DATABASE()")
+    row = cur.fetchone()
+    schema = str(row[0]) if row and row[0] else ""
+    digest = hashlib.sha256(schema.encode("utf-8")).hexdigest()[:16]
+    return f"trade_lab_db_mirror:{digest}"
+
+
+def _acquire_mirror_lock(conn) -> bool:
+    # Advisory lock: reconcile and restore mutually exclude. The races a
+    # concurrent pair can produce (restore renumbering under a reconcile
+    # planned on the old numbering, stale state payloads) are impossible
+    # to detect after the fact — so they are prevented, not detected.
+    # Limitation: a writer running a pre-lock binary bypasses this.
+    with conn.cursor() as cur:
+        cur.execute("SELECT GET_LOCK(%s, 0)", (_mirror_lock_name(cur),))
+        row = cur.fetchone()
+    return bool(row and row[0] == 1)
+
+
+def _release_mirror_lock(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT RELEASE_LOCK(%s)", (_mirror_lock_name(cur),))
+
+
 def reconcile(
     conn,
     data_dir: Path = DEFAULT_DATA_DIR,
     vintage_root: Path = DEFAULT_VINTAGE_ROOT,
 ) -> MirrorReport:
     """Mirror journal/state files and harness vintages into MySQL."""
+    if not _acquire_mirror_lock(conn):
+        raise MirrorIntegrityError(
+            "another mirror/restore pass holds the db-mirror lock — "
+            "refusing a concurrent write"
+        )
+    try:
+        return _reconcile_locked(conn, data_dir, vintage_root)
+    finally:
+        _release_mirror_lock(conn)
+
+
+def _reconcile_locked(
+    conn,
+    data_dir: Path,
+    vintage_root: Path,
+) -> MirrorReport:
     now = datetime.now(timezone.utc)
     report = MirrorReport()
 
@@ -308,14 +368,7 @@ def reconcile(
                 report.drift.append(f"{source}: {drift}")
                 logger.warning("db mirror drift — %s: %s", source, drift)
             if to_insert:
-                # IGNORE: a concurrent mirror of the same tail must be a
-                # no-op, not a PK explosion.
-                cur.executemany(
-                    "INSERT IGNORE INTO journal_lines "
-                    "(source, line_no, payload, mirrored_at) "
-                    "VALUES (%s, %s, %s, %s)",
-                    [(source, n, p, now) for n, p in to_insert],
-                )
+                _insert_journal_lines(cur, source, to_insert, now)
                 report.journal_lines_inserted += len(to_insert)
 
         for path in sorted(data_dir.glob("state/*.json")):
@@ -410,6 +463,44 @@ def restore_vintages(conn, vintage_root: Path = DEFAULT_VINTAGE_ROOT) -> int:
     return written
 
 
+def _restore_target(data_dir: Path, source: str) -> Path:
+    """Validated write target for a mirrored ``source``.
+
+    ``source`` comes straight from the DB: a compromised mirror must not
+    turn restore into an arbitrary file write, so anything that could
+    land outside ``data_dir`` (absolute, drive/UNC-qualified, ``..``)
+    raises before any filesystem touch.
+    """
+    posix, windows = PurePosixPath(source), PureWindowsPath(source)
+    if (
+        posix.is_absolute()
+        or windows.drive
+        or ".." in posix.parts
+        or ".." in windows.parts
+    ):
+        raise MirrorIntegrityError(
+            f"refusing to restore {source!r}: escapes {data_dir}"
+        )
+    target = data_dir / source
+    root = data_dir.resolve()
+    resolved = target.resolve()
+    # Backstop (symlinks, oddball separators): strictly inside data_dir.
+    if resolved == root or not resolved.is_relative_to(root):
+        raise MirrorIntegrityError(
+            f"refusing to restore {source!r}: escapes {data_dir}"
+        )
+    return target
+
+
+def _open_staged(path: Path):
+    # 0640 from the first byte (fchmod pins it against umask) — a chmod
+    # after writing leaves a window where a default-umask file is
+    # readable by any local user.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+    os.fchmod(fd, 0o640)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
 def restore(
     conn, data_dir: Path = DEFAULT_DATA_DIR, force: bool = False
 ) -> list[str]:
@@ -418,13 +509,49 @@ def restore(
     Refuses to overwrite an existing non-empty file unless ``force`` —
     a live host's files are ahead of the mirror by up to one cycle, and
     silently rolling them back would be data loss.
+
+    A restored journal file is compact (torn lines' reserved numbers
+    collapse), so each written source's mirror rows are renumbered to
+    the restored file. Order per source: stage the replacement next to
+    the target, renumber + COMMIT, publish with an atomic rename — a DB
+    failure (missing DELETE/INSERT grant, dead connection) aborts with
+    the live file untouched, and a crash between commit and publish
+    leaves original-file-vs-compact-mirror drift that reconcile reports
+    loudly with inserts frozen (rerun with --force repairs it).
+    Restore takes the same advisory lock as reconcile: a renumber
+    interleaved with a live mirror pass can strand rows on the old
+    numbering with no detectable drift, so concurrency is refused
+    outright, not reconciled after the fact.
     """
+    if not _acquire_mirror_lock(conn):
+        raise MirrorIntegrityError(
+            "a mirror pass holds the db-mirror lock — refusing to "
+            "restore against a moving mirror"
+        )
+    try:
+        return _restore_locked(conn, data_dir, force)
+    finally:
+        _release_mirror_lock(conn)
+
+
+def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
+    now = datetime.now(timezone.utc)
     written: list[str] = []
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT source FROM journal_lines")
         journal_sources = [row[0] for row in cur.fetchall()]
+        cur.execute("SELECT source FROM state_files")
+        state_sources = [row[0] for row in cur.fetchall()]
+        # Every source vetted before the first write: one hostile row
+        # must not leave a partial restore behind.
+        journal_targets = {
+            s: _restore_target(data_dir, s) for s in journal_sources
+        }
+        state_targets = {
+            s: _restore_target(data_dir, s) for s in state_sources
+        }
         for source in journal_sources:
-            target = data_dir / source
+            target = journal_targets[source]
             if target.exists() and target.stat().st_size > 0 and not force:
                 logger.warning(
                     "db-restore: %s exists — refusing to overwrite "
@@ -433,30 +560,64 @@ def restore(
                 continue
             cur.execute(
                 "SELECT payload FROM journal_lines WHERE source = %s "
-                "ORDER BY line_no",
+                "ORDER BY line_no FOR UPDATE",
                 (source,),
             )
+            payloads = [payload for (payload,) in cur.fetchall()]
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8") as fh:
-                for (payload,) in cur.fetchall():
-                    fh.write(payload + "\n")
+            staged = target.with_name(target.name + ".restoring")
+            try:
+                with _open_staged(staged) as fh:
+                    for payload in payloads:
+                        fh.write(payload + "\n")
+                    # Staged bytes must be durable BEFORE the renumber
+                    # commits — a post-commit power loss must not leave a
+                    # compact mirror against a hollow replacement.
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                cur.execute(
+                    "DELETE FROM journal_lines WHERE source = %s", (source,)
+                )
+                _insert_journal_lines(
+                    cur, source, list(enumerate(payloads, start=1)), now
+                )
+                # Stage → commit → atomic publish: see docstring.
+                conn.commit()
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
             written.append(source)
 
-        cur.execute("SELECT source, payload FROM state_files")
-        for source, payload in cur.fetchall():
-            target = data_dir / source
+        for source in state_sources:
+            target = state_targets[source]
             if target.exists() and target.stat().st_size > 0 and not force:
                 logger.warning(
                     "db-restore: %s exists — refusing to overwrite "
                     "(--force to override)", target,
                 )
                 continue
+            # Locking read at write time: a plain SELECT under REPEATABLE
+            # READ would return the transaction's opening snapshot, not
+            # the payload current now (matters only vs pre-lock writers,
+            # but FOR UPDATE costs nothing under the advisory lock).
+            cur.execute(
+                "SELECT payload FROM state_files WHERE source = %s "
+                "FOR UPDATE",
+                (source,),
+            )
+            (payload,) = cur.fetchone()
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-            # Same contract as OrderStateStore: owner rw, group r.
-            os.chmod(target, 0o640)
+            staged = target.with_name(target.name + ".restoring")
+            try:
+                with _open_staged(staged) as fh:
+                    fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
             written.append(source)
+    conn.commit()
     return written
 
 

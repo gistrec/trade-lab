@@ -46,6 +46,15 @@ class FakeCursor:
         s = " ".join(sql.split())
         if s.startswith("CREATE TABLE"):
             pass
+        elif s.startswith("SELECT DATABASE()"):
+            self._rows = [("testdb",)]
+        elif s.startswith("SELECT GET_LOCK"):
+            assert params[0].startswith("trade_lab_db_mirror:")  # schema-scoped
+            self._rows = [(0 if self.store.get("lock_busy") else 1,)]
+        elif s.startswith("SELECT RELEASE_LOCK"):
+            self.store.setdefault("lock_releases", 0)
+            self.store["lock_releases"] += 1
+            self._rows = [(1,)]
         elif s.startswith("SELECT COALESCE(MAX(line_no), 0), COUNT(*)"):
             rows = self.store["journal"].get(params[0], {})
             self._rows = [(max(rows) if rows else 0, len(rows))]
@@ -54,10 +63,16 @@ class FakeCursor:
         elif s.startswith("SELECT payload FROM journal_lines"):
             rows = self.store["journal"][params[0]]
             self._rows = [(p,) for _, p in sorted(rows.items())]
+        elif s.startswith("SELECT source FROM state_files"):
+            self._rows = [(k,) for k in sorted(self.store["state"])]
         elif s.startswith("SELECT source, payload FROM state_files"):
             self._rows = sorted(self.store["state"].items())
+        elif s.startswith("SELECT payload FROM state_files WHERE source"):
+            self._rows = [(self.store["state"][params[0]],)]
         elif s.startswith("INSERT INTO state_files"):
             self.store["state"][params[0]] = params[1]
+        elif s.startswith("DELETE FROM journal_lines"):
+            self.store["journal"].pop(params[0], None)
         elif s.startswith("SELECT content_hash FROM vintages"):
             self._rows = [(k,) for k in sorted(self.store["vintages"])]
         elif s.startswith("SELECT content_hash, payload, bytes_raw"):
@@ -174,6 +189,17 @@ def test_plan_reports_truncation_as_drift():
     assert drift is not None and "truncation" in drift
 
 
+def test_plan_freezes_inserts_while_drifted():
+    """Renumbered mirror (1,2,3) vs a not-yet-republished original file
+    (1,2,4): inserting physical line 4 would duplicate the old row-4
+    payload under a new number. Drift must freeze inserts, not just
+    complain."""
+    local = [(1, "a"), (2, "b"), (4, "d")]
+    to_insert, drift = plan_journal_inserts(local, 3, 3)
+    assert drift is not None and "frozen" in drift
+    assert to_insert == []
+
+
 # ── reconcile / restore round-trip ───────────────────────────────────
 
 def test_reconcile_is_incremental_and_round_trips(tmp_path):
@@ -242,6 +268,211 @@ def test_restore_refuses_existing_files_without_force(tmp_path):
     written = restore(conn, data, force=True)
     assert written == ["journal/cycles.jsonl"]
     assert len(collect_journal_lines(data / "journal" / "cycles.jsonl")) == 1
+
+
+# ── restore path traversal ───────────────────────────────────────────
+
+HOSTILE_SOURCES = ["../../x", "/abs/path", "a/../../b", "C:/x"]
+
+
+@pytest.mark.parametrize("source", HOSTILE_SOURCES)
+def test_restore_rejects_hostile_journal_source(tmp_path, source):
+    conn = FakeConn()
+    conn.store["journal"][source] = {1: json.dumps({"a": 1})}
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore(conn, data)
+    assert source in str(excinfo.value)
+    # Nothing touched the filesystem — not even data_dir itself.
+    assert not data.exists()
+    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "outer" / "b").exists()
+    assert not Path("/abs/path").exists()
+
+
+@pytest.mark.parametrize("source", HOSTILE_SOURCES)
+def test_restore_rejects_hostile_state_source(tmp_path, source):
+    conn = FakeConn()
+    conn.store["state"][source] = '{"__meta__": {}}'
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError) as excinfo:
+        restore(conn, data)
+    assert source in str(excinfo.value)
+    assert not data.exists()
+    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "outer" / "b").exists()
+    assert not Path("/abs/path").exists()
+
+
+def test_restore_rejects_absolute_source_inside_a_real_dir(tmp_path):
+    # Absolute path that WOULD be writable — must still refuse.
+    escape = tmp_path / "escape.jsonl"
+    conn = FakeConn()
+    conn.store["journal"][str(escape)] = {1: json.dumps({"a": 1})}
+    with pytest.raises(MirrorIntegrityError):
+        restore(conn, tmp_path / "data")
+    assert not escape.exists()
+
+
+def test_restore_hostile_row_aborts_before_any_benign_write(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["../../evil.json"] = "{}"
+    data = tmp_path / "outer" / "data"
+    with pytest.raises(MirrorIntegrityError):
+        restore(conn, data)
+    assert not data.exists()
+    assert not (tmp_path / "evil.json").exists()
+
+
+def test_restore_accepts_benign_nested_sources(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["state/orders.json"] = '{"__meta__": {}}'
+    data = tmp_path / "data"
+    written = restore(conn, data)
+    assert sorted(written) == ["journal/cycles.jsonl", "state/orders.json"]
+    assert (data / "journal" / "cycles.jsonl").read_text() == (
+        json.dumps({"a": 1}) + "\n"
+    )
+
+
+# ── restore renumbers the mirror to the compact file ─────────────────
+
+def test_restore_renumbers_mirror_to_the_compact_file(tmp_path):
+    # Torn line reserved line 3 in the mirror; the restored file is
+    # compact, so without renumbering the next appended cycle would sit
+    # at/below the stale high-water mark and never reach the mirror.
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    conn.store["journal"][src] = {
+        1: json.dumps({"cycle_id": "a"}),
+        2: json.dumps({"cycle_id": "b"}),
+        4: json.dumps({"cycle_id": "d"}),
+    }
+    data = tmp_path / "data"
+    assert restore(conn, data) == [src]
+
+    restored = data / "journal" / "cycles.jsonl"
+    assert [n for n, _ in collect_journal_lines(restored)] == [1, 2, 3]
+    assert conn.store["journal"][src] == {
+        1: json.dumps({"cycle_id": "a"}),
+        2: json.dumps({"cycle_id": "b"}),
+        3: json.dumps({"cycle_id": "d"}),
+    }
+
+    # The regression this guards: the next appended cycle must land.
+    with open(restored, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cycle_id": "e"}) + "\n")
+    report = reconcile(conn, data, tmp_path / "vintages")
+    assert report.journal_lines_inserted == 1
+    assert not report.drift
+    assert conn.store["journal"][src][4] == json.dumps({"cycle_id": "e"})
+
+
+def test_restore_refuses_when_mirror_lock_is_busy(tmp_path):
+    """A live reconcile can interleave with the renumber in ways drift
+    detection cannot see — concurrency is refused, not reconciled."""
+    conn = FakeConn()
+    conn.store["lock_busy"] = True
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+
+    with pytest.raises(MirrorIntegrityError, match="db-mirror lock"):
+        restore(conn, tmp_path / "data")
+    assert not (tmp_path / "data").exists()
+    assert conn.commits == 0
+
+
+def test_reconcile_refuses_when_mirror_lock_is_busy(tmp_path):
+    conn = FakeConn()
+    conn.store["lock_busy"] = True
+    with pytest.raises(MirrorIntegrityError, match="db-mirror lock"):
+        reconcile(conn, tmp_path / "data", tmp_path / "vintages")
+
+
+def test_mirror_lock_released_after_success(tmp_path):
+    conn = FakeConn()
+    (tmp_path / "data").mkdir()
+    reconcile(conn, tmp_path / "data", tmp_path / "vintages")
+    restore(conn, tmp_path / "fresh")
+    assert conn.store.get("lock_releases") == 2
+
+
+def test_restore_db_failure_aborts_before_any_file_write(tmp_path):
+    """DB-first ordering: a failed renumber (e.g. the DR user lacks the
+    DELETE grant) must abort BEFORE the compact file exists — otherwise
+    disk and mirror numbering diverge exactly the way #9 fixed."""
+    class _NoDeleteGrantCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            if sql.lstrip().startswith("DELETE"):
+                raise RuntimeError("DELETE command denied to user 'dr'")
+            super().execute(sql, params)
+
+    class _NoDeleteGrantConn(FakeConn):
+        def cursor(self):
+            return _NoDeleteGrantCursor(self.store)
+
+    conn = _NoDeleteGrantConn()
+    src = "journal/cycles.jsonl"
+    mirrored = {1: json.dumps({"a": 1}), 2: json.dumps({"b": 2}),
+                4: json.dumps({"d": 4})}
+    conn.store["journal"][src] = dict(mirrored)
+    data = tmp_path / "data"
+
+    with pytest.raises(RuntimeError, match="DELETE command denied"):
+        restore(conn, data)
+
+    assert not (data / "journal" / "cycles.jsonl").exists()
+    assert conn.store["journal"][src] == mirrored
+    assert conn.commits == 0
+
+
+def test_restore_publish_failure_leaves_no_staged_litter(tmp_path, monkeypatch):
+    """A failed atomic publish must not leave .restoring files behind,
+    and the live target must stay untouched."""
+    import trade_lab.execution.db_mirror as dm
+
+    def _boom(src, dst):
+        raise OSError("rename denied")
+
+    monkeypatch.setattr(dm.os, "replace", _boom)
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    conn.store["journal"][src] = {1: json.dumps({"a": 1})}
+    data = tmp_path / "data"
+
+    with pytest.raises(OSError, match="rename denied"):
+        restore(conn, data)
+
+    assert not (data / "journal" / "cycles.jsonl").exists()
+    assert list((data / "journal").glob("*.restoring")) == []
+
+
+def test_restore_success_leaves_no_staged_litter(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["state/orders.json"] = '{"__meta__": {}}'
+    data = tmp_path / "data"
+    restore(conn, data)
+    assert (data / "journal" / "cycles.jsonl").exists()
+    assert (data / "state" / "orders.json").exists()
+    assert list(data.rglob("*.restoring")) == []
+    # os.replace publishes the staged inode's mode — both files pinned to
+    # owner rw / group r, never the umask default.
+    for rel in ("journal/cycles.jsonl", "state/orders.json"):
+        assert (data / rel).stat().st_mode & 0o777 == 0o640
+
+
+def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    mirrored = {1: json.dumps({"a": 1}), 4: json.dumps({"d": 4})}
+    conn.store["journal"][src] = dict(mirrored)
+    data = tmp_path / "data"
+    _write_journal(data / "journal" / "cycles.jsonl", [{"a": 1}, {"b": 2}])
+
+    assert restore(conn, data) == []  # refused, no force
+    assert conn.store["journal"][src] == mirrored
 
 
 # ── the post-cycle hook must never raise ─────────────────────────────
