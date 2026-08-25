@@ -335,3 +335,31 @@ def test_cli_missing_reference_exits_2(tmp_path, capsys):
     )
     assert rc == 2
     assert "MONITOR ERROR" in capsys.readouterr().err
+
+
+def test_cli_log_path_is_directory_exits_2_not_1(tmp_path, capsys):
+    """IsADirectoryError (OSError, not ValueError) must be a tool error (2),
+    not indistinguishable from a --fail-on-breach exit 1."""
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_dir = tmp_path / "logdir"
+    log_dir.mkdir()
+    rc = fingerprint_cli_main(_cli_args(log_dir, ref_p, "--fail-on-breach"))
+    assert rc == 2
+    assert "MONITOR ERROR" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--sustained-days", "--multi-metric-threshold"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_cli_nonpositive_thresholds_rejected_at_parse_time(
+    tmp_path, capsys, flag, value
+):
+    """Thresholds < 1 make breach vacuous (0 >= 0 flags a clean journal) —
+    argparse must reject them with its native exit 2."""
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    with pytest.raises(SystemExit) as excinfo:
+        fingerprint_cli_main(_cli_args(log_p, ref_p, flag, value))
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert flag in err
+    assert "must be >= 1" in err
