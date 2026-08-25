@@ -190,6 +190,46 @@ def open_order_incidents(cycles: list[dict]) -> list[dict]:
     return out
 
 
+def unresolved_order_incidents(cycles: list[dict]) -> list[dict]:
+    """Open orders after cross-cycle resolution by client_order_id.
+
+    Verdict counterpart of :func:`open_order_incidents` (which keeps the
+    full history for the Status tab): the NEWEST row per id decides — a
+    later reconstruction row finding a timed-out order closed clears it.
+    Matching uses the FULL id; the 24-char cut is display-only. A row
+    without an id can never be claimed by a later row, so it is judged
+    alone. Newest-first.
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for c in reversed(cycles):  # newest-first: first row per id is its
+        for o in cycle_orders_executed(c):  # latest state, the rest history
+            if not isinstance(o, dict):
+                continue
+            coid = o.get("client_order_id")
+            if coid:
+                if str(coid) in seen:
+                    continue
+                seen.add(str(coid))
+            status = o.get("terminal_status")
+            # 'partial' is exchange-terminal: reconstruction persists it as
+            # 'closed' in order-state, so no later row will ever resolve it
+            # here — without this it pins the verdict at DOWN forever. The
+            # cycle-level 'partial' outcome still surfaces via
+            # recent_incidents, and the row stays in open_order_incidents.
+            if status in RESOLVED_ORDER_STATUSES or status == "partial":
+                continue
+            out.append({
+                "ended_at": c.get("ended_at"),
+                "cycle_id": (c.get("cycle_id") or "?")[:8],
+                "client_order_id": (o.get("client_order_id") or "?")[:24],
+                "symbol": o.get("symbol"),
+                "side": (o.get("side") or "").upper(),
+                "status": str(status or "?"),
+            })
+    return out
+
+
 @dataclass(frozen=True)
 class CadenceGap:
     """The longest pause between consecutive cycles, with its boundaries.
