@@ -14,6 +14,7 @@ from trade_lab.paper_trading.fingerprint import (
     load_reference,
     save_reference,
 )
+from trade_lab.paper_trading.fingerprint_cli import main as fingerprint_cli_main
 from trade_lab.paper_trading.fingerprint_monitor import (
     check_journal_against_reference,
     compute_live_metrics_from_journal,
@@ -262,3 +263,75 @@ def test_monitor_handles_corrupted_reference_loud(tmp_path):
     log_p = tmp_path / "log.jsonl"
     with pytest.raises(ValueError, match="content-hash mismatch"):
         check_journal_against_reference(log_p, ref_p)
+
+
+# ---------------------------------------------------------------------------
+# fingerprint_cli.py exit codes
+# ---------------------------------------------------------------------------
+
+def _write_breach_journal(log_p):
+    """Equity rises then crashes 80% → drawdown deeper than any reference DD."""
+    n = 250
+    for i in range(n):
+        eq = 10_000.0 * (1.5 ** (i / n)) if i < n / 2 else 2_000.0
+        append_row(_journal_row(
+            (pd.Timestamp("2026-01-01", tz="UTC") + pd.Timedelta(days=i)).strftime("%Y-%m-%d"),
+            0.5, eq,
+        ), log_p)
+
+
+def _write_clean_journal(log_p):
+    """Replay the reference's own series → inside bands by construction."""
+    close, pos, equity, sma, idx = _synthetic_series()
+    for i in range(200):
+        append_row(_journal_row(
+            idx[i].strftime("%Y-%m-%d"), float(pos.iloc[i]), float(equity.iloc[i]),
+        ), log_p)
+
+
+def _cli_args(log_p, ref_p, *extra):
+    return ["--log-path", str(log_p), "--reference-path", str(ref_p), *extra]
+
+
+def test_cli_fail_on_breach_exits_1_human_summary(tmp_path, capsys):
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    _write_breach_journal(log_p)
+    rc = fingerprint_cli_main(_cli_args(log_p, ref_p, "--fail-on-breach"))
+    assert rc == 1
+    assert "drawdown breach" in capsys.readouterr().out.lower()
+
+
+def test_cli_fail_on_breach_exits_1_json(tmp_path, capsys):
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    _write_breach_journal(log_p)
+    rc = fingerprint_cli_main(_cli_args(log_p, ref_p, "--fail-on-breach", "--json"))
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["drawdown"]["breached"] is True
+
+
+def test_cli_breach_without_flag_stays_exit_0(tmp_path, capsys):
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    _write_breach_journal(log_p)
+    rc = fingerprint_cli_main(_cli_args(log_p, ref_p))
+    assert rc == 0
+    assert "drawdown breach" in capsys.readouterr().out.lower()
+
+
+def test_cli_fail_on_breach_clean_journal_exits_0(tmp_path):
+    ref_p, _ = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    _write_clean_journal(log_p)
+    rc = fingerprint_cli_main(_cli_args(log_p, ref_p, "--fail-on-breach"))
+    assert rc == 0
+
+
+def test_cli_missing_reference_exits_2(tmp_path, capsys):
+    rc = fingerprint_cli_main(
+        _cli_args(tmp_path / "log.jsonl", tmp_path / "missing_ref.json")
+    )
+    assert rc == 2
+    assert "MONITOR ERROR" in capsys.readouterr().err

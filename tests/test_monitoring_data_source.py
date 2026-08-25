@@ -26,6 +26,7 @@ from trade_lab.monitoring.data_source import (
     unfillable_drift_series,
     open_order_incidents, parse_iso,
     recent_incidents, trade_events,
+    unresolved_order_incidents,
 )
 
 
@@ -741,6 +742,116 @@ def test_open_order_incidents_empty_when_all_resolved():
         ]),
     ]
     assert open_order_incidents(cycles) == []
+
+
+def test_unresolved_orders_later_closed_row_resolves_timeout():
+    """The sticking-verdict regression: an order times out, next day's
+    reconstruction journals it closed — the coid is resolved, not open."""
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "timeout", "client_order_id": "coid-1"},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": "coid-1"},
+        ]),
+    ]
+    assert unresolved_order_incidents(cycles) == []
+    # The Status-tab list keeps the full history — the timeout row stays.
+    assert [o["status"] for o in open_order_incidents(cycles)] == ["timeout"]
+
+
+def test_unresolved_orders_without_resolution_stay_open():
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "timeout", "client_order_id": "coid-1",
+             "symbol": "BTC/USDT", "side": "buy"},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": "other"},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["status"] == "timeout"
+    assert out[0]["side"] == "BUY"
+
+
+def test_unresolved_orders_dedup_keeps_newest_state_only():
+    """Two unresolved rows for one coid are ONE open order (newest state),
+    not two incidents."""
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "timeout", "client_order_id": "coid-1"},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "lost_track", "client_order_id": "coid-1"},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["status"] == "lost_track"
+    assert out[0]["cycle_id"] == "c2"
+
+
+def test_unresolved_orders_match_on_full_id_not_display_truncation():
+    """Display cuts coids to 24 chars; resolution must not — two ids
+    sharing a 24-char prefix are different orders."""
+    a = "x" * 24 + "AAAA"
+    b = "x" * 24 + "BBBB"
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "timeout", "client_order_id": a},
+            {"terminal_status": "timeout", "client_order_id": b},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "closed", "client_order_id": a},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["client_order_id"] == b[:24]
+
+
+def test_unresolved_orders_partial_is_final_not_open():
+    """Reconstruction persists a partial fill as closed in order-state, so
+    no later journal row will ever resolve it — it must not stay open.
+    The cycle-level 'partial' outcome still reaches recent_incidents."""
+    cycles = [
+        _live_cycle("c1", outcome="partial", orders_executed=[
+            {"terminal_status": "partial", "client_order_id": "coid-1"},
+        ]),
+    ]
+    assert unresolved_order_incidents(cycles) == []
+    assert [i["cycle_id"] for i in recent_incidents(cycles)] == ["c1"]
+    # ...and the history list still shows the row.
+    assert [o["status"] for o in open_order_incidents(cycles)] == ["partial"]
+
+
+def test_unresolved_orders_missing_id_cannot_be_resolved():
+    """A row without a client_order_id is judged alone — a later closed
+    row (also id-less) must not claim to resolve it."""
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            {"terminal_status": "timeout", "symbol": "BTC/USDT"},
+        ]),
+        _live_cycle("c2", orders_executed=[
+            {"terminal_status": "closed"},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)
+    assert len(out) == 1
+    assert out[0]["status"] == "timeout"
+
+
+def test_unresolved_orders_skip_non_dict_order_entry():
+    cycles = [
+        _live_cycle("c1", orders_executed=[
+            "garbage-non-dict",
+            {"terminal_status": "timeout", "client_order_id": "coid-1"},
+        ]),
+    ]
+    out = unresolved_order_incidents(cycles)   # must not raise
+    assert len(out) == 1
 
 
 def test_largest_gap_reports_its_boundaries():

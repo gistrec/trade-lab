@@ -19,7 +19,7 @@ from .allocator import TargetAllocation, compute_target_allocation
 from .broker import BalanceSnapshot, Broker, BrokerError, MarketConstraints
 from .delta import DeltaPlan, compute_delta_plan
 from .journal import Cycle, get_git_commit_short, get_python_version
-from .signal import SignalSnapshot
+from .signal import SignalSnapshot, decision_age_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,15 @@ def gather_ticker_prices(
     snap: SignalSnapshot,
     *,
     log: logging.Logger = logger,
-) -> dict[str, float]:
-    """Live ticker prices, falling back to candle close on per-pair failure."""
+) -> tuple[dict[str, float], dict[str, dict]]:
+    """Live ticker prices, falling back to candle close on per-pair failure.
+
+    Returns ``(prices, fallbacks)``: ``fallbacks`` marks every symbol
+    priced from the candle close (source + price age in seconds) so the
+    journal can attribute a stale-priced sizing decision post-hoc.
+    """
     ticker_prices: dict[str, float] = {}
+    fallbacks: dict[str, dict] = {}
     quote = broker.config.quote_currency
     for sym in broker.config.basket:
         try:
@@ -64,7 +70,14 @@ def gather_ticker_prices(
             # closes is an invariant violation that must raise HERE, not
             # surface as a 0.0 price deep inside the allocator.
             ticker_prices[sym] = snap.asset_closes[sym]
-    return ticker_prices
+            fallbacks[sym] = {
+                "source": "candle_close_fallback",
+                # asof is the bar's OPEN; its close (the price we just
+                # substituted) is a day later — decision_age_seconds
+                # measures from that close.
+                "age_s": round(decision_age_seconds(snap.asof), 1),
+            }
+    return ticker_prices, fallbacks
 
 
 def gather_constraints(
@@ -100,6 +113,7 @@ class ReadPhase:
     balance: BalanceSnapshot
     equity: float
     ticker_prices: dict[str, float]
+    price_fallbacks: dict[str, dict]   # empty when every ticker succeeded
     allocation: TargetAllocation
     constraints: dict[str, MarketConstraints]
     plan: DeltaPlan
@@ -120,7 +134,7 @@ def run_read_phase(
     # The broker's ticker prices, not the candle closes from the signal
     # step — they are the freshest and reflect what the order will
     # actually fill against.
-    ticker_prices = gather_ticker_prices(broker, snap, log=log)
+    ticker_prices, price_fallbacks = gather_ticker_prices(broker, snap, log=log)
 
     allocation = compute_target_allocation(
         signal=snap.signal,
@@ -149,6 +163,7 @@ def run_read_phase(
         balance=balance,
         equity=equity,
         ticker_prices=ticker_prices,
+        price_fallbacks=price_fallbacks,
         allocation=allocation,
         constraints=constraints,
         plan=plan,

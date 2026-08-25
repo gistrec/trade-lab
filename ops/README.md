@@ -145,18 +145,34 @@ sudo cp ops/netdata/go.d/prometheus.conf.example /etc/netdata/go.d/prometheus.co
 sudo systemctl restart netdata   # go.d job changes need a restart
 ```
 
-Charts appear under the `trade_lab` job. The exporter is **total**: a corrupt
-or missing journal degrades individual metrics (or sets
-`tradelab_journal_read_error 1`) rather than failing the scrape.
+Charts appear under the `trade_lab` (testnet, :7001) and `trade_lab_mainnet`
+(mainnet, :7002) jobs. The exporter is **total**: a corrupt or missing
+journal degrades individual metrics (or sets `tradelab_journal_read_error 1`)
+rather than failing the scrape.
 
 **Value-based alarms** (`ops/netdata/health.d/trade_lab_metrics.conf`, →
-`botcrit`) complement the httpcheck dead-man's-switch: `trade_lab_open_orders`
-(any executed order stuck in a non-terminal state — the `lost_track == 0`
-SLO), `trade_lab_cycle_latency` (max cycle duration > 60s/120s — slow exchange
-round-trips), and `trade_lab_journal_read_error` (journal unreadable). Each
-targets a unique `prometheus.trade_lab.<metric>` context, so no scoping is
-needed. Install with `sudo cp ... && sudo netdatacli reload-health` (the
-metric charts already exist, so no restart).
+`botcrit`) complement the httpcheck dead-man's-switch, per environment:
+`*_open_orders` (any executed order stuck in a non-terminal state — the
+`lost_track == 0` SLO), `*_cycle_latency` (max cycle duration > 60s/120s —
+slow exchange round-trips), and `*_journal_read_error` (journal unreadable)
+exist for both jobs (`trade_lab_*` on `prometheus.trade_lab.<metric>`
+contexts, `trade_lab_mainnet_*` on `prometheus.trade_lab_mainnet.<metric>`).
+Mainnet additionally gets two warn alarms on the real-money book:
+`trade_lab_mainnet_skipped_drift` (cumulative skipped quote drift > 5 USDT,
+~5% of the live book) and `trade_lab_mainnet_equity_drop` (equity down >10%
+from its 2-day max — `tradelab_equity_usd` only updates on successful daily
+cycles, hence the wide baseline window).
+
+Apply: `sudo systemctl restart netdata` first if the mainnet scrape job is
+new (alarms cannot attach to charts that do not exist yet), then
+`sudo cp ops/netdata/health.d/trade_lab_metrics.conf /etc/netdata/health.d/
+&& sudo netdatacli reload-health`. Verify on the box that the contexts exist
+and the alarms attached:
+
+```bash
+curl -s localhost:19999/api/v1/contexts | grep -o '"prometheus\.trade_lab_mainnet\.[^"]*"'
+curl -s "localhost:19999/api/v1/alarms?all" | grep -o '"name": *"trade_lab_mainnet_[^"]*"'
+```
 
 **Host clock alarms** (`ops/netdata/health.d/trade_lab_clock.conf`, → `botcrit`)
 are the infra-side twin of the broker's `_check_clock_skew()` pre-flight guard:

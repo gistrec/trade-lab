@@ -333,6 +333,7 @@ def run_live_cycle(
             pending_skips=pending_skips,
             order_results=order_results,
             decision_age_s=decision_age_s,
+            price_fallbacks=read.price_fallbacks or None,
         )
         return LiveCycleResult(
             cycle_id=main_cycle_id,
@@ -710,6 +711,7 @@ def _write_main_cycle(
     pending_skips: list[SkippedDelta],
     order_results: list[OrderResult],
     decision_age_s: float,
+    price_fallbacks: Optional[dict] = None,
 ) -> bool:
     """Returns True when the append failed — orders are already placed,
     so the failure is surfaced via LiveCycleResult, not raised."""
@@ -740,6 +742,7 @@ def _write_main_cycle(
             replace(plan, skipped=submin_skips)
         ),
         orders_executed=[r.to_dict() for r in order_results],
+        price_fallbacks=price_fallbacks,
     )
     try:
         journal.append(cycle)

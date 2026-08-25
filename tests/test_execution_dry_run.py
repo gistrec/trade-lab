@@ -300,6 +300,66 @@ def test_dry_run_keyboard_interrupt_journals_failed_and_reraises(tmp_path):
     assert cycle["error"]["type"] == "KeyboardInterrupt"
 
 
+def test_dry_run_journals_candle_close_price_fallback(tmp_path, caplog):
+    """A failed ticker falls back to the candle close for sizing (documented
+    posture) — but the journal must carry a per-symbol marker with the
+    price's source and age, so a stale-priced sizing decision stays
+    attributable post-hoc, not buried in cron logs."""
+    import json
+    import logging
+
+    from trade_lab.execution.journal import JournalWriter
+    from trade_lab.execution.signal import decision_age_seconds
+
+    class _EthTickerDownStub(_StubExchange):
+        def fetch_ticker(self, symbol):
+            if symbol == "ETH/USDT":
+                return {}  # no last/close → BrokerError in fetch_ticker_price
+            return super().fetch_ticker(symbol)
+
+    broker = Broker(_config(), _EthTickerDownStub())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+    with caplog.at_level(logging.WARNING, logger="trade_lab.execution.dry_run"):
+        result = run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    # The warning stays (fail-loud letter), on the orchestrator's logger.
+    warn = [
+        r for r in caplog.records
+        if "Ticker for ETH failed" in r.getMessage()
+    ]
+    assert len(warn) == 1
+    assert warn[0].name == "trade_lab.execution.dry_run"
+
+    # Sizing used the candle close (stub closes end at 300.0), not 0.0.
+    eth = next(o for o in result.orders_planned if o["symbol"] == "ETH/USDT")
+    assert eth["price_used"] == pytest.approx(300.0)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    fb = cycle["price_fallbacks"]
+    assert set(fb) == {"ETH"}
+    assert fb["ETH"]["source"] == "candle_close_fallback"
+    expected_age = decision_age_seconds(pd.Timestamp(cycle["signal"]["asof"]))
+    assert fb["ETH"]["age_s"] == pytest.approx(expected_age, abs=60.0)
+    assert fb["ETH"]["age_s"] >= 0.0
+    # The BTC ticker succeeded — no marker for it.
+    assert "BTC" not in fb
+
+
+def test_dry_run_all_tickers_ok_journals_no_price_fallbacks(tmp_path):
+    """Healthy tickers → price_fallbacks stays None: the marker means
+    'stale price used', never 'field present on every cycle'."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+
+    broker = Broker(_config(), _StubExchange())
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+    run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["price_fallbacks"] is None
+
+
 def test_dry_run_records_exchange_latency_in_journal(tmp_path):
     """A successful dry cycle stamps context.exchange_latency — read-only
     telemetry the /metrics exporter surfaces. Metadata only."""

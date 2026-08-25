@@ -5,10 +5,12 @@ Typical operator invocation (manual or cron)::
     .venv/bin/python -m trade_lab.paper_trading.fingerprint_cli
 
 Reports breach status of the live journal against the frozen
-reference fingerprint. Exit code is **always 0** unless a real
-error (missing files, hash mismatch, etc.) occurred — the monitor
-is descriptive, not normative, and is not allowed to auto-fail the
-strategy.
+reference fingerprint. Exit codes: 0 — report produced (default even
+on breach: the monitor is descriptive, not normative, and is not
+allowed to auto-fail the strategy); 1 — breach detected AND
+``--fail-on-breach`` was passed (opt-in, for cron wrappers that
+alert on non-zero exit); 2 — tool error (missing files, hash
+mismatch, etc.).
 """
 from __future__ import annotations
 
@@ -57,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit the full BreachReport as JSON instead of the human summary.",
     )
+    parser.add_argument(
+        "--fail-on-breach",
+        action="store_true",
+        help=(
+            "Exit 1 on any breach (drawdown / sustained / multi-metric). "
+            "Default stays exit 0 — descriptive, not normative."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -74,9 +84,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"MONITOR ERROR: {exc}", file=sys.stderr)
         return 2
 
+    breached = (
+        report.drawdown.breached
+        or report.overall_sustained_breach
+        or report.overall_multi_metric_breach
+    )
+    rc = 1 if (args.fail_on_breach and breached) else 0
+
     if args.json:
         print(json.dumps(asdict(report), indent=2, default=str))
-        return 0
+        return rc
 
     # Human-readable summary
     print(f"Journal: {report.journal_n_rows} rows  ({report.journal_window})")
@@ -114,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Sustained breach: {report.overall_sustained_breach}")
     print(f"Multi-metric breach: {report.overall_multi_metric_breach}")
     print(f"\nADVISORY: {report.advisory}")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

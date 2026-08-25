@@ -565,6 +565,117 @@ def test_health_verdict_degraded_on_stale():
     assert level == "DEGRADED"
 
 
+def _iso_ago(**kw):
+    return (datetime.now(timezone.utc) - timedelta(**kw)).isoformat()
+
+
+def test_health_verdict_healthy_after_timeout_resolved():
+    """The sticking-banner regression: a timeout resolved by a later
+    reconstruction row (same coid) must not keep the verdict DOWN for
+    the rest of the 500-cycle window."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    live = {"outcome": "success", "ended_at": _iso_ago(hours=2),
+            "orders_executed": []}
+    cycles = [
+        {"outcome": "unknown_orders", "ended_at": _iso_ago(days=5),
+         "orders_executed": [{"terminal_status": "timeout",
+                              "client_order_id": "coid-1"}]},
+        {"outcome": "reconstructed", "ended_at": _iso_ago(days=4),
+         "orders_executed": [{"terminal_status": "closed",
+                              "client_order_id": "coid-1"}]},
+        live,
+    ]
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=3),
+                           staleness=Staleness.FRESH, cycles=cycles,
+                           live=live)
+    level, why = _health_verdict(reader)
+    assert level == "HEALTHY"
+    assert "unresolved" not in why
+
+
+def test_health_verdict_old_unresolved_order_still_down():
+    """A truly-open order gets NO age-cut — DOWN until resolved."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    cycles = [{"outcome": "unknown_orders", "ended_at": _iso_ago(days=30),
+               "orders_executed": [{"terminal_status": "timeout",
+                                    "client_order_id": "coid-1"}]}]
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.FRESH, cycles=cycles)
+    level, why = _health_verdict(reader)
+    assert level == "DOWN"
+    assert "unresolved" in why
+
+
+def test_health_verdict_old_failed_cycle_is_history_not_degraded():
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    cycles = [{"outcome": "failed", "ended_at": _iso_ago(days=10),
+               "orders_executed": None},
+              {"outcome": "success", "ended_at": _iso_ago(hours=2),
+               "orders_executed": None}]
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=2),
+                           staleness=Staleness.FRESH, cycles=cycles)
+    level, _why = _health_verdict(reader)
+    assert level == "HEALTHY"
+
+
+def test_health_verdict_fresh_failed_cycle_is_degraded():
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    cycles = [{"outcome": "failed", "ended_at": _iso_ago(hours=3),
+               "orders_executed": None}]
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.FRESH, cycles=cycles)
+    level, why = _health_verdict(reader)
+    assert level == "DEGRADED"
+    assert "recent incident" in why
+
+
+def test_health_verdict_partial_fill_is_degraded_not_down():
+    """Reconstruction persists 'partial' as closed in order-state, so no
+    later row can resolve it — it must not pin DOWN; the partial cycle
+    outcome still degrades while recent."""
+    from trade_lab.monitoring.app import _health_verdict
+    from trade_lab.monitoring.data_source import Staleness
+
+    live = {"outcome": "partial", "ended_at": _iso_ago(hours=2),
+            "orders_executed": [{"terminal_status": "partial",
+                                 "client_order_id": "coid-1"}]}
+    reader = _HealthReader(stats=_mk_stats(valid_cycles=1),
+                           staleness=Staleness.FRESH, cycles=[live],
+                           live=live)
+    level, why = _health_verdict(reader)
+    assert level == "DEGRADED"
+    assert "unresolved" not in why
+
+
+def test_incident_is_recent_within_and_beyond_cut():
+    from trade_lab.monitoring.app import (
+        EXPECTED_INTERVAL_S, GAP_RECENT_MULTIPLIER, _incident_is_recent,
+    )
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    cut = EXPECTED_INTERVAL_S * GAP_RECENT_MULTIPLIER
+    fresh = {"ended_at": (now - timedelta(seconds=cut / 2)).isoformat()}
+    old = {"ended_at": (now - timedelta(seconds=cut * 2)).isoformat()}
+    assert _incident_is_recent(fresh, now=now) is True
+    assert _incident_is_recent(old, now=now) is False
+
+
+def test_incident_is_recent_unparseable_timestamp_counts_as_recent():
+    """No timestamp cannot prove age — fail loud, keep it in the verdict."""
+    from trade_lab.monitoring.app import _incident_is_recent
+
+    assert _incident_is_recent({"ended_at": None}) is True
+    assert _incident_is_recent({"ended_at": "garbage"}) is True
+
+
 def test_ladder_prev_day_delta_dedups_by_day():
     from trade_lab.monitoring.app import _ladder_prev_day_delta
 

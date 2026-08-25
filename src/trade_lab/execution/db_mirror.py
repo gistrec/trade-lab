@@ -147,6 +147,7 @@ def mirror_config_from_env() -> Optional[MirrorConfig]:
     ``MYSQL_PASSWORD`` / ``MYSQL_DB``. With ``MYSQL_HOST`` unset the mirror is
     disabled (None). ``MYSQL_SSL_CA`` selects the CA bundle for TLS
     verification, defaulting to the system bundle (trusts public CAs).
+    Cleartext only via an explicit ``MYSQL_SSL_DISABLED=true``.
     """
     host = os.getenv("MYSQL_HOST", "").strip()
     if not host:
@@ -161,9 +162,7 @@ def mirror_config_from_env() -> Optional[MirrorConfig]:
         port = int(os.getenv("MYSQL_PORT", "3306"))
     except ValueError as exc:
         raise MirrorConfigError("MYSQL_PORT must be an integer") from exc
-    ssl_ca = os.getenv(
-        "MYSQL_SSL_CA", "/etc/ssl/certs/ca-certificates.crt"
-    ).strip() or None
+    ssl_ca = _ssl_ca_from_env()
     return MirrorConfig(
         host=host,
         port=port,
@@ -172,6 +171,44 @@ def mirror_config_from_env() -> Optional[MirrorConfig]:
         database=database,
         ssl_ca=ssl_ca,
     )
+
+
+def _ssl_ca_from_env() -> Optional[str]:
+    # None means cleartext downstream (connect passes ssl=None), so it is
+    # only ever produced by the explicit opt-out flag — never by an empty
+    # MYSQL_SSL_CA (a template artefact must not silently drop TLS).
+    disabled_raw = os.getenv("MYSQL_SSL_DISABLED")
+    ca_raw = os.getenv("MYSQL_SSL_CA")
+    if disabled_raw is None:
+        disabled = False
+    else:
+        v = disabled_raw.strip().lower()
+        if v not in ("true", "false"):
+            raise MirrorConfigError(
+                f"MYSQL_SSL_DISABLED must be 'true' or 'false', "
+                f"got {disabled_raw!r}"
+            )
+        disabled = v == "true"
+    if disabled:
+        if ca_raw is not None and ca_raw.strip():
+            raise MirrorConfigError(
+                "MYSQL_SSL_DISABLED=true contradicts a non-empty "
+                "MYSQL_SSL_CA — drop one of them"
+            )
+        logger.warning(
+            "db mirror: MYSQL_SSL_DISABLED=true — the MySQL connection "
+            "is CLEARTEXT (credentials and journal data unencrypted)"
+        )
+        return None
+    if ca_raw is None:
+        return "/etc/ssl/certs/ca-certificates.crt"
+    ssl_ca = ca_raw.strip()
+    if not ssl_ca:
+        raise MirrorConfigError(
+            "MYSQL_SSL_CA is set but empty — set a CA bundle path, or set "
+            "MYSQL_SSL_DISABLED=true to deliberately connect without TLS"
+        )
+    return ssl_ca
 
 
 def connect(config: MirrorConfig) -> pymysql.connections.Connection:
