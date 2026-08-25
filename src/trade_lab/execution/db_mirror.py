@@ -553,6 +553,11 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
                 with open(staged, "w", encoding="utf-8") as fh:
                     for payload in payloads:
                         fh.write(payload + "\n")
+                    # Staged bytes must be durable BEFORE the renumber
+                    # commits — a post-commit power loss must not leave a
+                    # compact mirror against a hollow replacement.
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 cur.execute(
                     "DELETE FROM journal_lines WHERE source = %s", (source,)
                 )
@@ -574,10 +579,13 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
                     "(--force to override)", target,
                 )
                 continue
-            # Fetched at write time, not with the upfront source list —
-            # the upfront snapshot could go stale over the journal loop.
+            # Locking read at write time: a plain SELECT under REPEATABLE
+            # READ would return the transaction's opening snapshot, not
+            # the payload current now (matters only vs pre-lock writers,
+            # but FOR UPDATE costs nothing under the advisory lock).
             cur.execute(
-                "SELECT payload FROM state_files WHERE source = %s",
+                "SELECT payload FROM state_files WHERE source = %s "
+                "FOR UPDATE",
                 (source,),
             )
             (payload,) = cur.fetchone()
@@ -586,6 +594,8 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
             try:
                 with open(staged, "w", encoding="utf-8") as fh:
                     fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 # Same contract as OrderStateStore: owner rw, group r.
                 os.chmod(staged, 0o640)
                 os.replace(staged, target)
