@@ -346,6 +346,35 @@ def test_restore_renumbers_mirror_to_the_compact_file(tmp_path):
     assert conn.store["journal"][src][4] == json.dumps({"cycle_id": "e"})
 
 
+def test_restore_db_failure_aborts_before_any_file_write(tmp_path):
+    """DB-first ordering: a failed renumber (e.g. the DR user lacks the
+    DELETE grant) must abort BEFORE the compact file exists — otherwise
+    disk and mirror numbering diverge exactly the way #9 fixed."""
+    class _NoDeleteGrantCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            if sql.lstrip().startswith("DELETE"):
+                raise RuntimeError("DELETE command denied to user 'dr'")
+            super().execute(sql, params)
+
+    class _NoDeleteGrantConn(FakeConn):
+        def cursor(self):
+            return _NoDeleteGrantCursor(self.store)
+
+    conn = _NoDeleteGrantConn()
+    src = "journal/cycles.jsonl"
+    mirrored = {1: json.dumps({"a": 1}), 2: json.dumps({"b": 2}),
+                4: json.dumps({"d": 4})}
+    conn.store["journal"][src] = dict(mirrored)
+    data = tmp_path / "data"
+
+    with pytest.raises(RuntimeError, match="DELETE command denied"):
+        restore(conn, data)
+
+    assert not (data / "journal" / "cycles.jsonl").exists()
+    assert conn.store["journal"][src] == mirrored
+    assert conn.commits == 0
+
+
 def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):
     conn = FakeConn()
     src = "journal/cycles.jsonl"

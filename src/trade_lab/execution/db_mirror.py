@@ -455,8 +455,15 @@ def restore(
 
     A restored journal file is compact (torn lines' reserved numbers
     collapse), so each written source's mirror rows are renumbered to
-    the restored file in the same transaction — a stale high-water mark
-    would filter the next appended cycle out of every future reconcile.
+    the restored file. Order per source: renumber + COMMIT first, file
+    write second — a DB failure (missing DELETE/INSERT grant, dead
+    connection) then aborts before any filesystem touch, and a crash
+    between commit and file write leaves a mismatch that reconcile's
+    drift complaint reports loudly (rerun with --force repairs it).
+    The row SELECT locks the source (FOR UPDATE), so a concurrent
+    reconcile from a still-alive old host cannot slip a row into the
+    range mid-renumber; a row committed after the restore surfaces as
+    drift, never as a silent hole.
     """
     now = datetime.now(timezone.utc)
     written: list[str] = []
@@ -483,20 +490,22 @@ def restore(
                 continue
             cur.execute(
                 "SELECT payload FROM journal_lines WHERE source = %s "
-                "ORDER BY line_no",
+                "ORDER BY line_no FOR UPDATE",
                 (source,),
             )
             payloads = [payload for (payload,) in cur.fetchall()]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8") as fh:
-                for payload in payloads:
-                    fh.write(payload + "\n")
             cur.execute(
                 "DELETE FROM journal_lines WHERE source = %s", (source,)
             )
             _insert_journal_lines(
                 cur, source, list(enumerate(payloads, start=1)), now
             )
+            # Commit BEFORE touching the filesystem: see docstring.
+            conn.commit()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as fh:
+                for payload in payloads:
+                    fh.write(payload + "\n")
             written.append(source)
 
         for source, payload in state_rows:
