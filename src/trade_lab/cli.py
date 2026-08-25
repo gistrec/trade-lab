@@ -1294,7 +1294,11 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
             f"jq -r 'select(.msg|startswith(\"Unwritten journal\"))"
             f"|.msg|sub(\"^[^{{]*\";\"\")'. Recovery: grep the journal for "
             f"that cycle_id FIRST — an fsync failure can land the entry "
-            f"despite the error — and append only if absent."
+            f"despite the error — and append only if absent. If the log "
+            f"shares the journal's filesystem and both are lost (disk "
+            f"full), the fills are still reconstructable from the "
+            f"exchange by clientOrderId (the exchange is the source of "
+            f"truth)."
         )
 
     healthy = result.outcome == "success" or skipped_warmup
