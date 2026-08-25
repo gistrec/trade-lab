@@ -212,6 +212,15 @@ def _ssl_ca_from_env() -> Optional[str]:
 
 
 def connect(config: MirrorConfig) -> pymysql.connections.Connection:
+    if config.ssl_ca and not os.path.isfile(config.ssl_ca):
+        # ssl.create_default_context raises a bare FileNotFoundError with
+        # no filename — name the path and the knob instead. The default
+        # bundle path is Linux-specific (absent on e.g. macOS).
+        raise MirrorConfigError(
+            f"MYSQL_SSL_CA bundle not found: {config.ssl_ca!r} — set "
+            "MYSQL_SSL_CA to an existing CA file (the default is the "
+            "Linux system bundle)"
+        )
     conn = pymysql.connect(
         host=config.host,
         port=config.port,

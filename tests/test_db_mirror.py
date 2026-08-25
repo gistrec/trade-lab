@@ -701,6 +701,17 @@ def test_mirror_status_write_failure_never_raises(
     )
 
 
+def test_connect_missing_ca_bundle_names_the_path(tmp_path):
+    from trade_lab.execution.db_mirror import MirrorConfig, connect
+
+    cfg = MirrorConfig(
+        host="h", port=3306, user="u", password="p", database="d",
+        ssl_ca=str(tmp_path / "no-such-ca.pem"),
+    )
+    with pytest.raises(MirrorConfigError, match="no-such-ca.pem"):
+        connect(cfg)
+
+
 def test_mirror_after_cycle_paths_ignore_cwd(monkeypatch, tmp_path):
     # Cron invokes the hook with an absolute --journal from its own CWD;
     # the reconcile root and the status file must derive from the
