@@ -14,8 +14,9 @@ independent decisions, not one.
 from .config import PaperConfig, load_paper_config, PaperConfigError
 from .broker import Broker, BrokerError, ConnectionRefused, MarketConstraints
 from .signal import (
-    InsufficientWarmupError, SignalSnapshot, SignalComputationError,
-    compute_live_signal, required_basket_bars,
+    InsufficientWarmupError, MS_REBALANCE_MAX_GAP_DAYS, SignalSnapshot,
+    SignalComputationError, compute_live_signal, min_live_candles,
+    required_basket_bars,
 )
 from .allocator import TargetAllocation, compute_target_allocation
 from .delta import (
@@ -53,6 +54,7 @@ __all__ = [
     "JournalWriter",
     "LiveCycleResult",
     "MAX_LINE_BYTES",
+    "MS_REBALANCE_MAX_GAP_DAYS",
     "MarketConstraints",
     "NON_TERMINAL_STATUSES",
     "OrderIntent",
@@ -73,6 +75,7 @@ __all__ = [
     "compute_live_signal",
     "compute_target_allocation",
     "load_paper_config",
+    "min_live_candles",
     "place_order",
     "print_dry_run",
     "required_basket_bars",
