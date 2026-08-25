@@ -46,6 +46,12 @@ class FakeCursor:
         s = " ".join(sql.split())
         if s.startswith("CREATE TABLE"):
             pass
+        elif s.startswith("SELECT GET_LOCK"):
+            self._rows = [(0 if self.store.get("lock_busy") else 1,)]
+        elif s.startswith("SELECT RELEASE_LOCK"):
+            self.store.setdefault("lock_releases", 0)
+            self.store["lock_releases"] += 1
+            self._rows = [(1,)]
         elif s.startswith("SELECT COALESCE(MAX(line_no), 0), COUNT(*)"):
             rows = self.store["journal"].get(params[0], {})
             self._rows = [(max(rows) if rows else 0, len(rows))]
@@ -54,8 +60,12 @@ class FakeCursor:
         elif s.startswith("SELECT payload FROM journal_lines"):
             rows = self.store["journal"][params[0]]
             self._rows = [(p,) for _, p in sorted(rows.items())]
+        elif s.startswith("SELECT source FROM state_files"):
+            self._rows = [(k,) for k in sorted(self.store["state"])]
         elif s.startswith("SELECT source, payload FROM state_files"):
             self._rows = sorted(self.store["state"].items())
+        elif s.startswith("SELECT payload FROM state_files WHERE source"):
+            self._rows = [(self.store["state"][params[0]],)]
         elif s.startswith("INSERT INTO state_files"):
             self.store["state"][params[0]] = params[1]
         elif s.startswith("DELETE FROM journal_lines"):
@@ -344,6 +354,34 @@ def test_restore_renumbers_mirror_to_the_compact_file(tmp_path):
     assert report.journal_lines_inserted == 1
     assert not report.drift
     assert conn.store["journal"][src][4] == json.dumps({"cycle_id": "e"})
+
+
+def test_restore_refuses_when_mirror_lock_is_busy(tmp_path):
+    """A live reconcile can interleave with the renumber in ways drift
+    detection cannot see — concurrency is refused, not reconciled."""
+    conn = FakeConn()
+    conn.store["lock_busy"] = True
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+
+    with pytest.raises(MirrorIntegrityError, match="db-mirror lock"):
+        restore(conn, tmp_path / "data")
+    assert not (tmp_path / "data").exists()
+    assert conn.commits == 0
+
+
+def test_reconcile_refuses_when_mirror_lock_is_busy(tmp_path):
+    conn = FakeConn()
+    conn.store["lock_busy"] = True
+    with pytest.raises(MirrorIntegrityError, match="db-mirror lock"):
+        reconcile(conn, tmp_path / "data", tmp_path / "vintages")
+
+
+def test_mirror_lock_released_after_success(tmp_path):
+    conn = FakeConn()
+    (tmp_path / "data").mkdir()
+    reconcile(conn, tmp_path / "data", tmp_path / "vintages")
+    restore(conn, tmp_path / "fresh")
+    assert conn.store.get("lock_releases") == 2
 
 
 def test_restore_db_failure_aborts_before_any_file_write(tmp_path):

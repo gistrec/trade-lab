@@ -294,12 +294,48 @@ class MirrorReport:
         return out
 
 
+_MIRROR_LOCK = "trade_lab_db_mirror"
+
+
+def _acquire_mirror_lock(conn) -> bool:
+    # Advisory lock: reconcile and restore mutually exclude. The races a
+    # concurrent pair can produce (restore renumbering under a reconcile
+    # planned on the old numbering, stale state payloads) are impossible
+    # to detect after the fact — so they are prevented, not detected.
+    # Limitation: a writer running a pre-lock binary bypasses this.
+    with conn.cursor() as cur:
+        cur.execute("SELECT GET_LOCK(%s, 0)", (_MIRROR_LOCK,))
+        row = cur.fetchone()
+    return bool(row and row[0] == 1)
+
+
+def _release_mirror_lock(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT RELEASE_LOCK(%s)", (_MIRROR_LOCK,))
+
+
 def reconcile(
     conn,
     data_dir: Path = DEFAULT_DATA_DIR,
     vintage_root: Path = DEFAULT_VINTAGE_ROOT,
 ) -> MirrorReport:
     """Mirror journal/state files and harness vintages into MySQL."""
+    if not _acquire_mirror_lock(conn):
+        raise MirrorIntegrityError(
+            "another mirror/restore pass holds the db-mirror lock — "
+            "refusing a concurrent write"
+        )
+    try:
+        return _reconcile_locked(conn, data_dir, vintage_root)
+    finally:
+        _release_mirror_lock(conn)
+
+
+def _reconcile_locked(
+    conn,
+    data_dir: Path,
+    vintage_root: Path,
+) -> MirrorReport:
     now = datetime.now(timezone.utc)
     report = MirrorReport()
 
@@ -460,25 +496,37 @@ def restore(
     connection) then aborts before any filesystem touch, and a crash
     between commit and file write leaves a mismatch that reconcile's
     drift complaint reports loudly (rerun with --force repairs it).
-    The row SELECT locks the source (FOR UPDATE), so a concurrent
-    reconcile from a still-alive old host cannot slip a row into the
-    range mid-renumber; a row committed after the restore surfaces as
-    drift, never as a silent hole.
+    Restore takes the same advisory lock as reconcile: a renumber
+    interleaved with a live mirror pass can strand rows on the old
+    numbering with no detectable drift, so concurrency is refused
+    outright, not reconciled after the fact.
     """
+    if not _acquire_mirror_lock(conn):
+        raise MirrorIntegrityError(
+            "a mirror pass holds the db-mirror lock — refusing to "
+            "restore against a moving mirror"
+        )
+    try:
+        return _restore_locked(conn, data_dir, force)
+    finally:
+        _release_mirror_lock(conn)
+
+
+def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
     now = datetime.now(timezone.utc)
     written: list[str] = []
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT source FROM journal_lines")
         journal_sources = [row[0] for row in cur.fetchall()]
-        cur.execute("SELECT source, payload FROM state_files")
-        state_rows = list(cur.fetchall())
+        cur.execute("SELECT source FROM state_files")
+        state_sources = [row[0] for row in cur.fetchall()]
         # Every source vetted before the first write: one hostile row
         # must not leave a partial restore behind.
         journal_targets = {
             s: _restore_target(data_dir, s) for s in journal_sources
         }
         state_targets = {
-            s: _restore_target(data_dir, s) for s, _ in state_rows
+            s: _restore_target(data_dir, s) for s in state_sources
         }
         for source in journal_sources:
             target = journal_targets[source]
@@ -508,7 +556,7 @@ def restore(
                     fh.write(payload + "\n")
             written.append(source)
 
-        for source, payload in state_rows:
+        for source in state_sources:
             target = state_targets[source]
             if target.exists() and target.stat().st_size > 0 and not force:
                 logger.warning(
@@ -516,6 +564,13 @@ def restore(
                     "(--force to override)", target,
                 )
                 continue
+            # Fetched at write time, not with the upfront source list —
+            # the upfront snapshot could go stale over the journal loop.
+            cur.execute(
+                "SELECT payload FROM state_files WHERE source = %s",
+                (source,),
+            )
+            (payload,) = cur.fetchone()
             target.parent.mkdir(parents=True, exist_ok=True)
             with open(target, "w", encoding="utf-8") as fh:
                 fh.write(payload)
