@@ -164,9 +164,14 @@ file; a hash change indicates an input changed.
 ```
 
 Reports whether live journal behaviour sits inside the reference
-bands. **Descriptive only — never auto-kills.** Exit code is always
-0 unless a real error occurred (missing reference, content-hash
-mismatch, etc.).
+bands. **Descriptive only — never auto-kills.** Exit codes:
+
+* `0` — report produced. Default even on breach: descriptive, not
+  normative.
+* `1` — breach detected (drawdown / sustained / multi-metric) AND
+  the opt-in `--fail-on-breach` flag was passed. For cron wrappers
+  that alert on non-zero exit.
+* `2` — tool error (missing reference, content-hash mismatch, etc.).
 
 The monitor's advisory levels (in increasing seriousness):
 
