@@ -7,13 +7,15 @@ Typical operator invocation (manual or cron)::
 Exit codes — same contract as ``fingerprint_cli``: 0 — report produced
 (default even on breach: descriptive, not normative); 1 — tracking
 threshold breached AND ``--fail-on-breach`` was passed; 2 — tool error
-(missing journal, filesystem failure; argparse exits 2 natively on
-invalid flag values).
+(missing journal, filesystem failure, corrupt mainnet journal lines,
+harness-row schema drift; argparse exits 2 natively on invalid flag
+values).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -25,10 +27,15 @@ from .execution_tracking import (
 
 
 def _positive_float(value: str) -> float:
-    # A nonpositive threshold flags every journal — vacuous, reject at parse.
+    # A nonpositive threshold flags every journal — vacuous. NaN compares
+    # False against everything, so it would slip past "<= 0" and disarm
+    # the breach check forever (and emit non-standard NaN in --json);
+    # inf never breaches either. Reject all of them at parse.
     parsed = float(value)
-    if parsed <= 0.0:
-        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"must be a finite number > 0, got {value}"
+        )
     return parsed
 
 
@@ -89,8 +96,11 @@ def main(argv: list[str] | None = None) -> int:
         # exit 2 too, or they'd surface as 1 — the --fail-on-breach code.
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
         return 2
-    except ValueError as exc:
-        # non-positive equity on an aligned date, etc.
+    except (ValueError, TypeError) as exc:
+        # ValueError: non-positive equity, corrupt mainnet journal lines,
+        # harness-row schema drift. TypeError: a HarnessLogRow construction
+        # that slipped past the per-row wrap — still a tool error, never
+        # exit 1 (the breach code).
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
         return 2
 
@@ -115,21 +125,41 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     tr = report.transitions
-    print("  position transitions:")
-    print(f"    real order events = {tr.n_real_order_events}")
-    print(f"    ladder transitions = {tr.n_ladder_transitions}")
-    print(f"    min-notional skips (legitimate) = {tr.n_min_notional_skips}")
-    print(f"    transitions covered by skips = {tr.n_transitions_skip_covered}")
-    for e in tr.orders_without_transition:
+    print("  per-symbol trades (sim-expected vs real):")
+    print(f"    real fill events = {tr.n_real_fill_events}")
+    print(
+        f"    sim trade dates = {tr.n_sim_trade_dates} "
+        f"(intended trades = {tr.n_sim_intended_trades})"
+    )
+    print(f"    live min-notional skips (legitimate) = {tr.n_min_notional_skips}")
+    print(f"    trades covered by skips = {tr.n_trades_skip_covered}")
+    for m in tr.missing_trades:
         print(
-            f"    ORDER WITHOUT TRANSITION: {e['date']} {e['symbol']} "
-            f"{e['side']} {e['filled_notional_quote']:.2f} quote "
-            f"(cycle {e['cycle_id']})"
+            f"    MISSING TRADE: {m['date']} {m['symbol']} "
+            f"expected {m['expected_side']}, no fill and no covering skip"
         )
-    for t in tr.transitions_without_order:
+    for m in tr.wrong_direction_trades:
         print(
-            f"    TRANSITION WITHOUT ORDER: {t['date']} "
-            f"{t['prior']} -> {t['new']}"
+            f"    WRONG DIRECTION: {m['date']} {m['symbol']} "
+            f"expected {m['expected_side']}, got {m['actual_side']}"
+        )
+    for m in tr.partial_fills:
+        print(
+            f"    PARTIAL FILL: {m['date']} {m['symbol']} {m['side']} "
+            f"filled {m['filled_amount']} of {m['intended_amount']} "
+            f"({m['client_order_id']})"
+        )
+    for e in tr.unexpected_orders:
+        print(
+            f"    UNEXPECTED ORDER: {e['date']} {e['symbol']} "
+            f"{e['side']} {e['filled_notional_quote']:.2f} quote "
+            f"(cycle {e['cycle_id']}) — no sim-intended trade"
+        )
+    if report.real_unknown_version_lines:
+        print(
+            f"\n  WARNING: {report.real_unknown_version_lines} mainnet "
+            "journal line(s) with unknown schema_version skipped — "
+            "incomplete data."
         )
     print(f"\nADVISORY: {report.advisory}")
     return rc

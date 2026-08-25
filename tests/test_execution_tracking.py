@@ -1,6 +1,7 @@
 """Execution-tracking layer (issue #11): real mainnet vs simulation."""
 from __future__ import annotations
 
+import itertools
 import json
 
 import pytest
@@ -8,6 +9,9 @@ import pytest
 from trade_lab.paper_trading.execution_tracking import (
     DEFAULT_GAP_THRESHOLD_PCT,
     check_execution_tracking,
+    live_min_notional_skips,
+    real_equity_by_date,
+    real_order_events,
 )
 from trade_lab.paper_trading.execution_tracking_cli import main as tracking_cli_main
 from trade_lab.paper_trading.journal import HarnessLogRow, append_row
@@ -17,16 +21,26 @@ from trade_lab.paper_trading.journal import HarnessLogRow, append_row
 # Synthetic journal builders (no network, no exchange)
 # ---------------------------------------------------------------------------
 
-def _sim_row(date_iso: str, equity: float, ladder: float = 0.5) -> HarnessLogRow:
+def _sim_row(
+    date_iso: str,
+    equity: float,
+    ladder: float = 0.5,
+    prior: float | None = None,
+    intended: dict | None = None,
+) -> HarnessLogRow:
+    # Default: no transition (prior == ladder) and no intended trades, so
+    # equity-only tests carry no trade expectations.
+    prior = ladder if prior is None else prior
+    intended = {} if intended is None else intended
     return HarnessLogRow(
         date=date_iso, config_hash="x" * 64, vintage_content_hash="y" * 64,
         basket_close=100.0, sma_value=99.0, sma_gate_open=True,
-        ladder_state=ladder, prior_ladder_state=0.0,
+        ladder_state=ladder, prior_ladder_state=prior,
         per_lookback_states={"28": 1, "60": 1},
         per_lookback_returns={"28": 0.01, "60": 0.01},
         target_weights={"BTC": ladder / 7},
-        current_weights={"BTC": 0.0},
-        intended_trades={"BTC": ladder / 7},
+        current_weights={"BTC": prior / 7},
+        intended_trades=intended,
         portfolio_equity=equity,
         daily_return=0.0, gross_position_return=0.0, net_position_return=0.0,
     )
@@ -38,24 +52,27 @@ def _cycle(
     ladder: float,
     *,
     outcome: str = "success",
+    mode: str = "live",
+    signal: bool = True,
     orders_executed=None,
     orders_skipped=None,
     cycle_id: str = "aabbccdd-0000",
+    ended_at: str | None = None,
 ) -> dict:
     return {
         "schema_version": 2,
         "cycle_id": cycle_id,
         "started_at": f"{date_iso}T06:05:00+00:00",
-        "ended_at": f"{date_iso}T06:05:30+00:00",
+        "ended_at": ended_at or f"{date_iso}T06:05:30+00:00",
         "duration_ms": 30000,
         "outcome": outcome,
         "error": None,
-        "context": {"exchange": "binance", "sandbox": False, "mode": "live"},
+        "context": {"exchange": "binance", "sandbox": False, "mode": mode},
         "signal": {
             "asof": f"{date_iso}T00:00:00+00:00",
             "ladder_value": ladder,
             "sma_gate_open": True,
-        },
+        } if signal else None,
         "equity_usd": equity,
         "orders_executed": orders_executed,
         "orders_skipped": orders_skipped,
@@ -63,24 +80,41 @@ def _cycle(
     }
 
 
-def _filled_order(symbol: str = "BTC/USDT", side: str = "buy") -> dict:
+_COID_SEQ = itertools.count()
+
+
+def _filled_order(
+    symbol: str = "BTC/USDT",
+    side: str = "buy",
+    *,
+    coid: str | None = None,
+    terminal_status: str = "closed",
+    intended_amount: float = 0.001,
+    filled_amount: float = 0.001,
+) -> dict:
     return {
-        "client_order_id": "tsmom_x",
+        # Distinct default ids: events dedupe by clientOrderId.
+        "client_order_id": coid or f"tsmom_x_{next(_COID_SEQ)}",
         "symbol": symbol,
         "side": side,
-        "terminal_status": "closed",
-        "filled_amount": 0.001,
+        "terminal_status": terminal_status,
+        "intended_amount": intended_amount,
+        "filled_amount": filled_amount,
         "filled_notional_quote": 25.0,
     }
 
 
-def _min_notional_skip(symbol: str = "DOGE/USDT") -> dict:
+def _min_notional_skip(
+    symbol: str = "DOGE/USDT",
+    side: str = "buy",
+    reason: str = "notional 3.0000 < min_cost 5",
+) -> dict:
     return {
         "symbol": symbol,
-        "desired_side": "buy",
+        "desired_side": side,
         "desired_amount": 10.0,
         "desired_notional": 3.0,
-        "reason": "notional 3.0000 < min_cost 5",
+        "reason": reason,
     }
 
 
@@ -100,6 +134,10 @@ def _cli(real_p, sim_p, *extra) -> list[str]:
 
 
 DATES = ["2026-08-01", "2026-08-02", "2026-08-03"]
+
+# Sim intent for a 0.5 -> 1.0 ladder step on one asset.
+BTC_BUY = {"BTC": 0.5 / 7}
+BTC_SELL = {"BTC": -0.5 / 7}
 
 
 # ---------------------------------------------------------------------------
@@ -175,104 +213,369 @@ def test_custom_threshold_widens_the_band(tmp_path):
     assert DEFAULT_GAP_THRESHOLD_PCT == 5.0  # documented starting point
 
 
-def test_last_cycle_of_the_day_wins(tmp_path):
-    """6-hourly dry-runs re-observe the same signal date; the latest
-    equity reading is the one compared."""
-    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+# ---------------------------------------------------------------------------
+# Consistent per-date equity sampling (Codex 3858329138)
+# ---------------------------------------------------------------------------
+
+def test_live_cycle_wins_over_later_dry_run(tmp_path):
+    """An 18:00 dry-run valuation must not replace the 00:05 live
+    observation — a different market window."""
+    real_p = tmp_path / "real.jsonl"
     _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5),
-        _cycle(DATES[0], 105.0, 0.5),   # later observation, same asof date
-        _cycle(DATES[1], 105.0, 0.5),
+        _cycle(DATES[0], 100.0, 0.5, mode="live", orders_executed=[]),
+        _cycle(DATES[0], 105.0, 0.5, mode="dry_run",
+               ended_at=f"{DATES[0]}T18:00:30+00:00"),
     ])
-    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
-    report = check_execution_tracking(real_p, sim_p)
-    # 105 → 105: flat, matching the flat sim; 100 → 105 would be +5%.
-    assert report.equity.cum_abs_return_diff == pytest.approx(0.0, abs=1e-12)
+    from trade_lab.monitoring.data_source import JournalReader
+    cycles = JournalReader(real_p).cycles(n=100)
+    assert real_equity_by_date(cycles) == {DATES[0]: 100.0}
+
+
+def test_live_cycle_wins_over_earlier_dry_run(tmp_path):
+    real_p = tmp_path / "real.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 105.0, 0.5, mode="dry_run"),
+        _cycle(DATES[0], 100.0, 0.5, mode="live", orders_executed=[]),
+        _cycle(DATES[0], 107.0, 0.5, mode="dry_run"),
+    ])
+    from trade_lab.monitoring.data_source import JournalReader
+    cycles = JournalReader(real_p).cycles(n=100)
+    assert real_equity_by_date(cycles) == {DATES[0]: 100.0}
+
+
+def test_first_dry_run_wins_when_no_live_cycle(tmp_path):
+    """Observation-only journal: the FIRST dry-run of the date is the
+    sample; later 6-hourly re-observations never overwrite it."""
+    real_p = tmp_path / "real.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, mode="dry_run"),
+        _cycle(DATES[0], 105.0, 0.5, mode="dry_run"),
+    ])
+    from trade_lab.monitoring.data_source import JournalReader
+    cycles = JournalReader(real_p).cycles(n=100)
+    assert real_equity_by_date(cycles) == {DATES[0]: 100.0}
 
 
 # ---------------------------------------------------------------------------
-# Position-transition check
+# Per-symbol trade check: expectations come from the SIM (Codex 3858329142)
 # ---------------------------------------------------------------------------
 
-def test_real_order_without_ladder_transition_flagged(tmp_path, capsys):
+def test_expected_trades_come_from_sim_not_mainnet(tmp_path):
+    """A mainnet-journal ladder move with its own matching order must NOT
+    self-legitimize: with no sim-intended trade the fill is unexpected."""
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5),
-        _cycle(DATES[1], 100.0, 0.5, orders_executed=[_filled_order()]),
-        _cycle(DATES[2], 100.0, 0.5),
-    ])
-    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
-    report = check_execution_tracking(real_p, sim_p)
-    tr = report.transitions
-    assert tr.n_ladder_transitions == 0
-    assert tr.n_real_order_events == 1
-    assert len(tr.orders_without_transition) == 1
-    assert tr.orders_without_transition[0]["symbol"] == "BTC/USDT"
-    assert "mismatch" in report.advisory.lower()
-    # Descriptive only: mismatches never drive the exit code.
-    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
-    assert "ORDER WITHOUT TRANSITION" in capsys.readouterr().out
-
-
-def test_transition_with_matching_order_not_flagged(tmp_path):
-    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
-    _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5),
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        # Production signal (erroneously) steps to 1.0 and trades on it.
         _cycle(DATES[1], 100.0, 1.0, orders_executed=[_filled_order()]),
-        _cycle(DATES[2], 100.0, 1.0),
+        _cycle(DATES[2], 100.0, 1.0, orders_executed=[]),
     ])
+    # The simulation never intended a trade.
     _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
     tr = check_execution_tracking(real_p, sim_p).transitions
-    assert tr.n_ladder_transitions == 1
-    assert tr.orders_without_transition == []
-    assert tr.transitions_without_order == []
+    assert tr.n_sim_trade_dates == 0
+    assert len(tr.unexpected_orders) == 1
+    assert tr.unexpected_orders[0]["symbol"] == "BTC/USDT"
+    assert tr.missing_trades == []
 
 
-def test_transition_without_order_flagged(tmp_path):
-    """Ladder moved but nothing was placed and nothing was journaled as
-    skipped → real execution silently missed a transition."""
+def test_sim_intended_trade_with_matching_fill_not_flagged(tmp_path):
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5),
-        _cycle(DATES[1], 100.0, 1.0),
-        _cycle(DATES[2], 100.0, 1.0),
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[_filled_order()]),
+        _cycle(DATES[2], 100.0, 1.0, orders_executed=[]),
     ])
-    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
-    tr = check_execution_tracking(real_p, sim_p).transitions
-    assert tr.transitions_without_order == [
-        {"date": DATES[1], "prior": 0.5, "new": 1.0}
-    ]
-
-
-def test_min_notional_skip_covers_transition_and_is_not_flagged(tmp_path):
-    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
-    _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5),
-        _cycle(DATES[1], 100.0, 1.0,
-               orders_executed=[], orders_skipped=[_min_notional_skip()]),
-        _cycle(DATES[2], 100.0, 1.0),
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+        _sim_row(DATES[2], 10_000.0, ladder=1.0),
     ])
-    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
     report = check_execution_tracking(real_p, sim_p)
     tr = report.transitions
-    assert tr.transitions_without_order == []
-    assert tr.n_transitions_skip_covered == 1
+    assert tr.n_sim_trade_dates == 1
+    assert tr.missing_trades == []
+    assert tr.wrong_direction_trades == []
+    assert tr.partial_fills == []
+    assert tr.unexpected_orders == []
+    assert "mismatch" not in report.advisory.lower()
+
+
+def test_sim_intended_trade_without_fill_flagged_missing(tmp_path, capsys):
+    """Sim intends a trade; real journal shows neither fill nor skip →
+    real execution silently missed it. Descriptive: exit stays 0."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(d, 100.0, 0.5, orders_executed=[]) for d in DATES
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+        _sim_row(DATES[2], 10_000.0, ladder=1.0),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.transitions.missing_trades == [
+        {"date": DATES[1], "symbol": "BTC", "expected_side": "buy"}
+    ]
+    assert "mismatch" in report.advisory.lower()
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+    assert "MISSING TRADE" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol granularity: partial / wrong-direction (Codex 3858329145)
+# ---------------------------------------------------------------------------
+
+def test_per_symbol_partial_basket_execution_surfaces(tmp_path):
+    """Sim intends BTC and ETH buys; only BTC filled → ETH missing.
+    A date-level 'any fill' check would have passed this."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0,
+               orders_executed=[_filled_order("BTC/USDT")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"BTC": 0.5 / 7, "ETH": 0.5 / 7}),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.missing_trades == [
+        {"date": DATES[1], "symbol": "ETH", "expected_side": "buy"}
+    ]
+    assert tr.unexpected_orders == []
+
+
+def test_wrong_direction_fill_flagged(tmp_path, capsys):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0,
+               orders_executed=[_filled_order("BTC/USDT", "sell")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.wrong_direction_trades == [{
+        "date": DATES[1], "symbol": "BTC",
+        "expected_side": "buy", "actual_side": "sell",
+    }]
+    assert tr.missing_trades == []
+    tracking_cli_main(_cli(real_p, sim_p))
+    assert "WRONG DIRECTION" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status,filled", [
+    ("partial", 0.001),   # exchange-terminal partial
+    ("closed", 0.0004),   # under-filled vs intent
+])
+def test_partial_fill_surfaces(tmp_path, capsys, status, filled):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    order = _filled_order(
+        terminal_status=status, intended_amount=0.001, filled_amount=filled,
+    )
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[order]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert len(tr.partial_fills) == 1
+    assert tr.partial_fills[0]["date"] == DATES[1]
+    assert tr.partial_fills[0]["symbol"] == "BTC/USDT"
+    assert tr.missing_trades == []
+    tracking_cli_main(_cli(real_p, sim_p))
+    assert "PARTIAL FILL" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Skip coverage: live + min-notional-class reasons only (Codex 3858329150)
+# ---------------------------------------------------------------------------
+
+def test_live_min_notional_skip_covers_missing_trade(tmp_path):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[],
+               orders_skipped=[_min_notional_skip("DOGE/USDT", "buy")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"DOGE": 0.5 / 7}),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert tr.missing_trades == []
+    assert tr.n_trades_skip_covered == 1
     assert tr.n_min_notional_skips == 1
     assert "mismatch" not in report.advisory.lower()
     assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
 
 
-def test_repeated_skips_on_one_date_count_once(tmp_path):
-    """The 6-hourly dry-run re-records the same skip — distinct
-    (date, symbol) must not inflate with observation time."""
+@pytest.mark.parametrize("reason", [
+    "amount 0.00000100 truncates to 0 at the exchange lot step",
+    "amount 0.00000100 < min_amount 0.001; notional 3.0000 < min_cost 5",
+])
+def test_all_delta_submin_reason_shapes_cover(tmp_path, reason):
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5, orders_skipped=[_min_notional_skip()]),
-        _cycle(DATES[0], 100.0, 0.5, orders_skipped=[_min_notional_skip()]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[],
+               orders_skipped=[_min_notional_skip("DOGE/USDT", "buy", reason)]),
     ])
-    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"DOGE": 0.5 / 7}),
+    ])
     tr = check_execution_tracking(real_p, sim_p).transitions
-    assert tr.n_min_notional_skips == 1
+    assert tr.missing_trades == []
+    assert tr.n_trades_skip_covered == 1
+
+
+def test_dry_run_skip_does_not_cover(tmp_path):
+    """Planning skips of the 6-hourly dry-run never blocked a real order."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[1], 100.0, 1.0, mode="dry_run",
+               orders_skipped=[_min_notional_skip("DOGE/USDT", "buy")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"DOGE": 0.5 / 7}),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_min_notional_skips == 0
+    assert tr.n_trades_skip_covered == 0
+    assert tr.missing_trades == [
+        {"date": DATES[1], "symbol": "DOGE", "expected_side": "buy"}
+    ]
+
+
+@pytest.mark.parametrize("reason", ["pending_order", "pending_funding_sell"])
+def test_pending_reason_skip_does_not_cover(tmp_path, reason):
+    """Transient pending_* skips are retried next cycle — they must not
+    legitimize a missed transition."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[],
+               orders_skipped=[_min_notional_skip("DOGE/USDT", "buy", reason)]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"DOGE": 0.5 / 7}),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_min_notional_skips == 0
+    assert tr.missing_trades == [
+        {"date": DATES[1], "symbol": "DOGE", "expected_side": "buy"}
+    ]
+
+
+def test_wrong_side_skip_does_not_cover(tmp_path):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[],
+               orders_skipped=[_min_notional_skip("DOGE/USDT", "sell")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"DOGE": 0.5 / 7}),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_trades_skip_covered == 0
+    assert tr.missing_trades == [
+        {"date": DATES[1], "symbol": "DOGE", "expected_side": "buy"}
+    ]
+
+
+def test_repeated_live_skips_on_one_date_count_once(tmp_path):
+    """A re-run live cycle re-records the same skip — distinct
+    (date, symbol) must not inflate with observation count."""
+    real_p = tmp_path / "real.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[],
+               orders_skipped=[_min_notional_skip()]),
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[],
+               orders_skipped=[_min_notional_skip()]),
+    ])
+    from trade_lab.monitoring.data_source import JournalReader
+    cycles = JournalReader(real_p).cycles(n=100)
+    assert len(live_min_notional_skips(cycles)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Signal-less records dated by clientOrderId (Codex 3858329155)
+# ---------------------------------------------------------------------------
+
+def test_signalless_partial_fill_dated_by_coid_not_ended_at(tmp_path):
+    """A failed live cycle journals fills without a signal; a
+    reconstruction recovery lands days later. Both must land on the
+    decision's signal date (coid YYYYMMDD − 1), not ended_at."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    # Decision made 2026-08-03 (the day after signal date 2026-08-02).
+    order = _filled_order(coid="tsmom_20260803_BTCUSDT_buy")
+    _write_real(real_p, [
+        _cycle(DATES[2], 100.0, 1.0, outcome="failed", signal=False,
+               orders_executed=[order],
+               ended_at=f"{DATES[2]}T00:06:00+00:00"),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    # Attributed to DATES[1] (signal date), matching the sim intent;
+    # ended_at attribution would flag missing at [1] + unexpected at [2].
+    assert tr.missing_trades == []
+    assert tr.unexpected_orders == []
+    assert tr.n_real_fill_events == 1
+
+
+def test_reconstruction_final_state_supersedes_failed_record(tmp_path):
+    """The same coid journaled twice (timeout partial, then reconstructed
+    closed) is ONE event with the final state — no stale false partial."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    coid = "tsmom_20260803_BTCUSDT_buy"
+    stale = _filled_order(
+        coid=coid, terminal_status="timeout",
+        intended_amount=0.001, filled_amount=0.0005,
+    )
+    final = _filled_order(
+        coid=coid, terminal_status="closed",
+        intended_amount=0.001, filled_amount=0.001,
+    )
+    _write_real(real_p, [
+        _cycle(DATES[2], 100.0, 1.0, outcome="failed", signal=False,
+               orders_executed=[stale]),
+        _cycle("2026-08-05", 100.0, 1.0, outcome="reconstructed", signal=False,
+               orders_executed=[final],
+               ended_at="2026-08-05T06:05:30+00:00"),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_real_fill_events == 1
+    assert tr.partial_fills == []
+    assert tr.missing_trades == []
+    assert tr.unexpected_orders == []
+
+
+def test_unparseable_coid_falls_back_to_ended_at(tmp_path):
+    real_p = tmp_path / "real.jsonl"
+    order = _filled_order(coid="manual_fix_123")
+    _write_real(real_p, [
+        _cycle(DATES[2], 100.0, 1.0, outcome="failed", signal=False,
+               orders_executed=[order]),
+    ])
+    from trade_lab.monitoring.data_source import JournalReader
+    events = real_order_events(JournalReader(real_p).cycles(n=100))
+    assert [e["date"] for e in events] == [DATES[2]]
 
 
 # ---------------------------------------------------------------------------
@@ -329,17 +632,19 @@ def test_non_positive_equity_on_aligned_date_exit_2(tmp_path, capsys):
     assert "TRACKING ERROR" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("value", ["0", "-1"])
-def test_nonpositive_threshold_rejected_at_parse_time(tmp_path, capsys, value):
-    """Threshold <= 0 makes the breach check vacuous — argparse must
-    reject with its native exit 2."""
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_invalid_threshold_rejected_at_parse_time(tmp_path, capsys, value):
+    """Threshold <= 0 makes the breach check vacuous; NaN compares False
+    everywhere (never breaches, non-standard JSON); inf never breaches.
+    argparse must reject all with its native exit 2 (Codex 3858329160)."""
     with pytest.raises(SystemExit) as excinfo:
         tracking_cli_main(_cli(
             tmp_path / "r.jsonl", tmp_path / "s.jsonl",
-            "--gap-threshold-pct", value,
+            # = form: argparse reads a bare "-inf" as an option flag.
+            f"--gap-threshold-pct={value}",
         ))
     assert excinfo.value.code == 2
-    assert "must be > 0" in capsys.readouterr().err
+    assert "must be a finite number > 0" in capsys.readouterr().err
 
 
 def test_failed_cycles_do_not_enter_equity_series(tmp_path):
@@ -354,3 +659,58 @@ def test_failed_cycles_do_not_enter_equity_series(tmp_path):
     assert report.equity.n_aligned_days == 2
     assert report.equity.level_gap_pct == pytest.approx(0.0, abs=1e-9)
     assert not report.equity.breached
+
+
+# ---------------------------------------------------------------------------
+# Reader data quality (Codex 3858329165) and sim schema drift (3858329169)
+# ---------------------------------------------------------------------------
+
+def test_corrupt_mainnet_journal_line_exit_2(tmp_path, capsys):
+    """A malformed line can hold the day's ladder change — reconciliation
+    over a journal with holes is a tool error, not a clean report."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5)])
+    with open(real_p, "a", encoding="utf-8") as f:
+        f.write("{corrupt json\n")
+    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    with pytest.raises(ValueError, match="corrupt"):
+        check_execution_tracking(real_p, sim_p)
+    rc = tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach"))
+    assert rc == 2
+    assert "corrupt" in capsys.readouterr().err
+
+
+def test_unknown_schema_version_lines_warn_incomplete(tmp_path, capsys):
+    """Unknown-version lines degrade to an explicit incomplete-data
+    warning: the report is produced (a version skew is actionable), but
+    'no mismatches' must not read as verified."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    unknown = _cycle(DATES[1], 100.0, 0.5)
+    unknown["schema_version"] = 99
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5), unknown])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.real_unknown_version_lines == 1
+    assert "INCOMPLETE DATA" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+    assert "INCOMPLETE DATA" in capsys.readouterr().out
+
+
+def test_sim_schema_drift_exit_2_names_the_row(tmp_path, capsys):
+    """An unknown field in a harness row (TypeError in HarnessLogRow) is
+    a tool error naming the row — never exit 1, the breach code."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5)])
+    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    import dataclasses
+    drifted = dataclasses.asdict(_sim_row(DATES[1], 10_000.0))
+    drifted["surprise_field"] = 1
+    with open(sim_p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(drifted) + "\n")
+    with pytest.raises(ValueError, match=DATES[1]):
+        check_execution_tracking(real_p, sim_p)
+    rc = tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "TRACKING ERROR" in err
+    assert DATES[1] in err  # message names the offending row

@@ -209,19 +209,32 @@ override `--sim-journal`), aligns by signal date, and reports:
 
 * **Equity tracking** — cumulative `sum |Δdaily-return|` plus the
   current level gap in % (both curves normalized to the first aligned
-  date). `--gap-threshold-pct` (default 5% — an owner-adjustable
-  starting point, not a calibrated bound) sets the breach level.
-* **Position transitions** — real filled orders vs journaled ladder
-  transitions, both directions. Min-notional skips are journaled with
-  reasons and are legitimate: counted separately, never alerted on.
+  date). Per date one consistent real cycle is sampled: the daily
+  live cycle, falling back to the first dry-run of the date only when
+  no live cycle exists (a later 6-hourly dry-run never overwrites the
+  live observation). `--gap-threshold-pct` (default 5% — an
+  owner-adjustable starting point, not a calibrated bound) sets the
+  breach level.
+* **Per-symbol trades** — expectations come from the HARNESS rows
+  (`intended_trades`), never from the mainnet journal itself (an
+  erroneous production signal and its own orders would match each
+  other); mainnet supplies only the actual side. Mismatches are
+  per-symbol: missing, wrong-direction, partial fill, unexpected.
+  Only LIVE-cycle skips with a sub-minimum reason (min-notional /
+  lot-step class from `delta.py`; not `pending_*`) may cover a
+  missing trade — counted separately, never alerted on.
 
 Exit codes — same contract as the fingerprint monitor:
 
 * `0` — report produced. Default even on breach; an empty overlap
   window (both journals exist but share no dates yet) is a
-  descriptive note, not an error.
+  descriptive note, not an error. Unknown-schema-version lines in
+  the mainnet journal degrade to an explicit incomplete-data warning.
 * `1` — tracking threshold breached AND `--fail-on-breach` passed.
-* `2` — tool error (missing journal file, unreadable path, …).
+* `2` — tool error (missing journal file, unreadable path, corrupt
+  mainnet journal lines — a malformed line can hold the very cycle
+  under reconciliation — or a harness row that no longer matches the
+  `HarnessLogRow` schema).
 
 Daily cron, after the 00:05 UTC live order cycle and the harness run
 (one line — crontab has no backslash line continuation; cron does not
