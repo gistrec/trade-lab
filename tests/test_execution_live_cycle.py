@@ -1690,3 +1690,52 @@ def test_ticker_fallback_raises_on_missing_close():
     )
     with pytest.raises(KeyError, match="ETH"):
         _gather_ticker_prices(broker, snap)
+
+
+class _EthTickerDownStub(_LiveStub):
+    def fetch_ticker(self, symbol):
+        if symbol == "ETH/USDT":
+            return {}  # no last/close → BrokerError in fetch_ticker_price
+        return super().fetch_ticker(symbol)
+
+
+def test_live_cycle_journals_candle_close_price_fallback(tmp_path):
+    """A failed ticker falls back to the candle close for order sizing
+    (documented posture) — the main-cycle journal entry must mark the
+    symbol with the price's source and age so the sizing miss is
+    attributable when reconciling execution against the backtest."""
+    from trade_lab.execution.signal import decision_age_seconds
+
+    stub = _EthTickerDownStub(basket=("BTC", "ETH"))
+    broker = _broker(stub)
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        broker, journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    cycle = _read_cycles(tmp_path)[-1]
+    fb = cycle["price_fallbacks"]
+    assert set(fb) == {"ETH"}
+    assert fb["ETH"]["source"] == "candle_close_fallback"
+    expected_age = decision_age_seconds(pd.Timestamp(cycle["signal"]["asof"]))
+    assert fb["ETH"]["age_s"] == pytest.approx(expected_age, abs=60.0)
+    # Sizing used the candle close (stub closes end at 300.0), not the
+    # healthy 50k ticker and not 0.0.
+    eth = next(o for o in cycle["orders_planned"] if o["symbol"] == "ETH/USDT")
+    assert eth["price_used"] == pytest.approx(300.0)
+
+
+def test_live_cycle_all_tickers_ok_journals_no_price_fallbacks(tmp_path):
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    clock = _MockClock()
+
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=_state(tmp_path),
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    assert _read_cycles(tmp_path)[-1]["price_fallbacks"] is None
