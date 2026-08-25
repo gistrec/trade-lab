@@ -179,13 +179,57 @@ The monitor's advisory levels (in increasing seriousness):
 * `Single-day single-metric breach` — noise.
 * `Bootstrap` — fewer than the rolling-window-length of journal
   rows; rolling metrics not yet evaluable.
-* `Multi-metric breach` — ≥ 3 metrics outside band simultaneously on
-  the same day. Operator review.
+* `Multi-metric breach` — ≥ 2 of the three daily metrics outside band
+  simultaneously on the same day (3 would demand unanimity). Operator
+  review.
 * `Sustained breach on a behavioral metric` — same metric breached
   for ≥ 7 consecutive days. Operator review.
 * `DRAWDOWN BREACH` — live drawdown deeper than the worst observed in
   the reference window (2022 bear). Forward to Step-4 look-ahead
   detector + operator review.
+
+Known limitation: the flip-frequency bands (M1/M3) have `p05 = 0.00`,
+so a strategy that goes dormant (flips stop entirely) never breaches
+the lower band — dormancy is undetectable by construction.
+
+## Execution tracking (real vs simulation)
+
+Third verification layer (issue #11), next to the fingerprint monitor
+and the look-ahead detector: reconciles **real mainnet execution**
+with the **simulated forward test**.
+
+```bash
+.venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli
+```
+
+Reads the mainnet execution journal (default
+`data/journal/cycles_mainnet.jsonl`, override `--real-journal`) and
+the harness journal (default `paper_trading/logs/journal.jsonl`,
+override `--sim-journal`), aligns by signal date, and reports:
+
+* **Equity tracking** — cumulative `sum |Δdaily-return|` plus the
+  current level gap in % (both curves normalized to the first aligned
+  date). `--gap-threshold-pct` (default 5% — an owner-adjustable
+  starting point, not a calibrated bound) sets the breach level.
+* **Position transitions** — real filled orders vs journaled ladder
+  transitions, both directions. Min-notional skips are journaled with
+  reasons and are legitimate: counted separately, never alerted on.
+
+Exit codes — same contract as the fingerprint monitor:
+
+* `0` — report produced. Default even on breach; an empty overlap
+  window (both journals exist but share no dates yet) is a
+  descriptive note, not an error.
+* `1` — tracking threshold breached AND `--fail-on-breach` passed.
+* `2` — tool error (missing journal file, unreadable path, …).
+
+Daily cron, after the 00:05 UTC live order cycle and the harness run
+(one line — crontab has no backslash line continuation; cron does not
+`cd`, so pass absolute journal paths):
+
+```cron
+50 0 * * * cd /home/user/trade-lab && .venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli --real-journal /home/user/trade-lab/data/journal/cycles_mainnet.jsonl --sim-journal /home/user/trade-lab/paper_trading/logs/journal.jsonl --fail-on-breach >> paper_trading/logs/tracking-cron.out 2>&1
+```
 
 ## Anti-patterns — DO NOT do these
 

@@ -16,6 +16,7 @@ from trade_lab.paper_trading.fingerprint import (
 )
 from trade_lab.paper_trading.fingerprint_cli import main as fingerprint_cli_main
 from trade_lab.paper_trading.fingerprint_monitor import (
+    DEFAULT_MULTI_METRIC_THRESHOLD,
     check_journal_against_reference,
     compute_live_metrics_from_journal,
 )
@@ -227,6 +228,35 @@ def test_monitor_sustained_metric_breach(tmp_path):
     report = check_journal_against_reference(log_p, ref_p)
     assert report.overall_sustained_breach
     assert "sustained" in report.advisory.lower() or "drawdown" in report.advisory.lower()
+
+
+def test_multi_metric_default_threshold_is_2():
+    """Only three daily metrics exist — 3 demanded unanimity."""
+    assert DEFAULT_MULTI_METRIC_THRESHOLD == 2
+
+
+def test_monitor_two_of_three_breached_metrics_is_multi_metric(tmp_path):
+    """Ladder AND gate flipping every day (both way above p95) with flat
+    equity → exactly 2 of 3 metrics breached per day. Fires under the
+    default threshold (2); the old default (3) never fired here."""
+    ref_p, fp = _ref_to_tmp(tmp_path)
+    log_p = tmp_path / "log.jsonl"
+    base = pd.Timestamp("2026-01-01", tz="UTC")
+    for i in range(200):
+        flip = i % 2 == 0
+        append_row(_journal_row(
+            (base + pd.Timedelta(days=i)).strftime("%Y-%m-%d"),
+            1.0 if flip else 0.0, 10_000.0, sma_open=flip,
+        ), log_p)
+    report = check_journal_against_reference(log_p, ref_p)
+    assert not report.drawdown.breached
+    assert report.multi_metric_days > 0
+    assert report.overall_multi_metric_breach
+    report_old = check_journal_against_reference(
+        log_p, ref_p, multi_metric_threshold=3,
+    )
+    assert report_old.multi_metric_days == 0
+    assert not report_old.overall_multi_metric_breach
 
 
 def test_live_metrics_helper_returns_aligned_series(tmp_path):
