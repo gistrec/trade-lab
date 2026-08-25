@@ -18,7 +18,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyarrow>=14.0",
     # MySQL mirror of data/journal + data/state (execution/db_mirror.py).
-    "pymysql>=1.1",
+    "pymysql>=1.2",  # ssl_disabled= (deterministic no-TLS) appeared in 1.2
 ]
 
 [project.optional-dependencies]

@@ -342,6 +342,25 @@ def test_env_file_set_keys_keep_the_file_value(monkeypatch, tmp_path):
     assert os.environ["MYSQL_SSL_DISABLED"] == "false"
 
 
+def test_env_file_valueless_key_counts_as_absent(monkeypatch, tmp_path):
+    """A valueless declaration ("KEY" without "=") parses as None and
+    load_dotenv skips it — it must not shield the ambient value from
+    the sweep."""
+    import trade_lab.cli as cli_mod
+
+    _pin_owned_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_DISABLED", "true")
+    monkeypatch.delenv("TRADE_LAB_PAPER_EXCHANGE", raising=False)
+
+    env_file = tmp_path / "testnet.env"
+    env_file.write_text("MYSQL_SSL_DISABLED\nTRADE_LAB_PAPER_SANDBOX=true\n")
+
+    with pytest.raises(SystemExit, match="Config error"):
+        cli_mod.main(["paper-status", "--env-file", str(env_file)])
+
+    assert "MYSQL_SSL_DISABLED" not in os.environ
+
+
 # ---------------------------------------------------------------------------
 # Hardened degrade paths (post-review fixes)
 # ---------------------------------------------------------------------------

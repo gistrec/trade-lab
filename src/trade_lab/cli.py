@@ -1882,7 +1882,12 @@ def main(argv: list[str] | None = None) -> None:
         # in the owned families for keys the file OMITS (e.g.
         # MYSQL_SSL_DISABLED, TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS) must
         # not act as an explicit opt-in/out — clear it first.
-        file_keys = set(dotenv_values(env_file))
+        # A valueless line ("KEY" without "=") parses as None and
+        # load_dotenv skips it — it must count as ABSENT here, or the
+        # ambient value it fails to overwrite would survive the sweep.
+        file_keys = {
+            k for k, v in dotenv_values(env_file).items() if v is not None
+        }
         for key in [k for k in os.environ
                     if k.startswith(_ENV_FILE_OWNED_PREFIXES)]:
             if key not in file_keys:
