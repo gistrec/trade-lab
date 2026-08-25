@@ -48,6 +48,7 @@ from trade_lab.monitoring.data_source import (
     duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
     largest_inter_cycle_gap, open_order_incidents, parse_iso,
     recent_incidents, TradeEvent, trade_events, unfillable_drift_series,
+    unresolved_order_incidents,
 )
 from trade_lab.uikit import render_tab_safely
 from trade_lab.monitoring import research
@@ -243,8 +244,10 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
         return ("DOWN", "no valid cycles in the journal")
 
     cycles = reader.cycles(n=500)
-    open_orders = open_order_incidents(cycles)
-    incidents = recent_incidents(cycles)
+    # Resolved by full client_order_id (unlike the Status-tab list, which
+    # keeps history); truly-open orders hold DOWN with no age-cut.
+    open_orders = unresolved_order_incidents(cycles)
+    incidents = [i for i in recent_incidents(cycles) if _incident_is_recent(i)]
     live = reader.latest_live_cycle()
     live_overdue = False
     if live is not None:
@@ -268,7 +271,7 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
         if staleness is Staleness.STALE:
             why.append("heartbeat stale")
         if incidents:
-            why.append(f"{len(incidents)} incident cycle(s) in window")
+            why.append(f"{len(incidents)} recent incident cycle(s)")
         return ("DEGRADED", "; ".join(why))
 
     # A dry-run-only journal (mainnet observation phase) has no live
@@ -568,6 +571,24 @@ def _gap_is_recent(
     """
     ref = now or datetime.now(timezone.utc)
     age = (ref - gap.ended).total_seconds()
+    return age <= EXPECTED_INTERVAL_S * GAP_RECENT_MULTIPLIER
+
+
+def _incident_is_recent(
+    incident: dict, now: Optional[datetime] = None,
+) -> bool:
+    """Same age-cut as :func:`_gap_is_recent`, for non-success cycles.
+
+    Past the cut a failed cycle is history for the VERDICT (the Status tab
+    still lists it) — otherwise one bad cycle keeps the banner DEGRADED for
+    the whole 500-cycle window. A missing/unparseable ``ended_at`` cannot
+    prove age, so it counts as recent.
+    """
+    ended = parse_iso(incident.get("ended_at"))
+    if ended is None:
+        return True
+    ref = now or datetime.now(timezone.utc)
+    age = (ref - ended).total_seconds()
     return age <= EXPECTED_INTERVAL_S * GAP_RECENT_MULTIPLIER
 
 
