@@ -350,12 +350,11 @@ def _assert_common_history_start(
 def _fetch_recent_candles(
     broker: Broker, symbol: str, limit: int,
 ) -> pd.DataFrame:
-    """Default candle fetcher: thin wrapper around ccxt.fetch_ohlcv.
-
-    Returns a UTC-indexed OHLCV frame in the same shape the backtest
-    used (columns ``open, high, low, close, volume``).
+    """Default candle fetcher: :meth:`Broker.fetch_ohlcv` (retried read)
+    → UTC-indexed OHLCV frame in the same shape the backtest used
+    (columns ``open, high, low, close, volume``).
     """
-    raw = broker.exchange.fetch_ohlcv(symbol, timeframe="1d", limit=limit)
+    raw = broker.fetch_ohlcv(symbol, timeframe="1d", limit=limit)
     if not raw:
         return pd.DataFrame(
             columns=["open", "high", "low", "close", "volume"]
