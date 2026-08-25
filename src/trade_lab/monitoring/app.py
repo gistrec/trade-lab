@@ -45,7 +45,7 @@ from trade_lab.monitoring.data_source import (
     CadenceGap, DOWN_MULTIPLIER, JournalReader, ReadStats, STALE_MULTIPLIER,
     Staleness,
     as_float, cycle_orders_executed, duration_series,
-    duration_stats, equity_series, first_live_cycle_time, is_live_cycle,
+    duration_stats, equity_series, first_live_cycle_time, is_live_attempt,
     largest_inter_cycle_gap, open_order_incidents, parse_iso,
     recent_incidents, TradeEvent, trade_events, unfillable_drift_series,
     unresolved_order_incidents,
@@ -161,13 +161,14 @@ def _cycle_context(cycle: Optional[dict]) -> dict:
 
 
 def _cycle_mode(cycle: Optional[dict]) -> str:
-    """'LIVE' if the cycle placed real orders, else 'DRY'.
+    """'LIVE' if the cycle ran in real-order mode, else 'DRY'.
 
     The journal is dominated ~4:1 by 6-hourly dry-runs, so the operator needs
     to know at a glance whether what they are looking at is the real daily
-    rebalance or a planning-only heartbeat.
+    rebalance or a planning-only heartbeat. ``is_live_attempt``: a live cycle
+    that failed before placing must still read as LIVE.
     """
-    return "LIVE" if is_live_cycle(cycle or {}) else "DRY"
+    return "LIVE" if is_live_attempt(cycle or {}) else "DRY"
 
 
 # ---------------------------------------------------------------------------
