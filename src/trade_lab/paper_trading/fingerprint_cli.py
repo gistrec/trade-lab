@@ -9,8 +9,9 @@ reference fingerprint. Exit codes: 0 — report produced (default even
 on breach: the monitor is descriptive, not normative, and is not
 allowed to auto-fail the strategy); 1 — breach detected AND
 ``--fail-on-breach`` was passed (opt-in, for cron wrappers that
-alert on non-zero exit); 2 — tool error (missing files, hash
-mismatch, etc.).
+alert on non-zero exit); 2 — tool error (filesystem failures, hash
+mismatch, etc.; argparse also exits 2 natively on invalid flag
+values, e.g. a nonpositive threshold).
 """
 from __future__ import annotations
 
@@ -21,6 +22,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .fingerprint_monitor import check_journal_against_reference
+
+
+def _positive_int(value: str) -> int:
+    # Thresholds < 1 make the breach checks vacuous (0 >= 0 flags a clean journal).
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,13 +53,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--sustained-days",
-        type=int,
+        type=_positive_int,
         default=7,
         help="Minimum consecutive days of single-metric breach to flag as 'sustained'.",
     )
     parser.add_argument(
         "--multi-metric-threshold",
-        type=int,
+        type=_positive_int,
         default=3,
         help="Minimum number of metrics breached on the same day to flag as 'multi-metric'.",
     )
@@ -76,7 +85,9 @@ def main(argv: list[str] | None = None) -> int:
             sustained_days_threshold=args.sustained_days,
             multi_metric_threshold=args.multi_metric_threshold,
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
+        # Not just FileNotFoundError: IsADirectoryError / PermissionError must
+        # exit 2 too, or they'd surface as 1 — the --fail-on-breach code.
         print(f"MONITOR ERROR: {exc}", file=sys.stderr)
         return 2
     except ValueError as exc:
