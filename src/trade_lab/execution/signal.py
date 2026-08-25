@@ -102,6 +102,34 @@ def required_basket_bars(
     return max(int(sma_filter_period), max(int(L) for L in lookbacks) + 1)
 
 
+# Max calendar gap from a window's first bar to the first in-window MS
+# rebalance (a month is at most 31 days).
+MS_REBALANCE_MAX_GAP_DAYS = 31
+
+
+def min_live_candles(
+    lookbacks: Sequence[int] = (28, 60),
+    sma_filter_period: int = 200,
+) -> int:
+    """Minimum ``candles_per_asset`` for exact backtest replication.
+
+    :func:`required_basket_bars` alone only warms the SMA. The basket
+    index forces a rebalance on the window's first bar
+    (``rebalance_mask.iloc[0] = True``: flat 1/N instead of the full
+    history's drifted weights, plus a zero bar-0 return), so index
+    levels match the backtest — up to a constant rebasing factor —
+    only from the first in-window MS rebalance onward. The whole
+    SMA/lookback range must lie past that point:
+    warm-up + :data:`MS_REBALANCE_MAX_GAP_DAYS` + the dropped
+    in-progress candle.
+    """
+    return (
+        required_basket_bars(lookbacks, sma_filter_period)
+        + MS_REBALANCE_MAX_GAP_DAYS
+        + 1
+    )
+
+
 def compute_live_signal(
     broker: Broker,
     *,
@@ -117,13 +145,11 @@ def compute_live_signal(
 ) -> SignalSnapshot:
     """Run the deployable strategy on freshly-fetched candles.
 
-    ``candles_per_asset`` must be large enough that every rolling
-    window inside the strategy is fully warmed. With ``sma_filter_period
-    = 200`` and ``lookbacks max = 60``, we need at least 200 completed
-    days plus the in-progress candle that gets dropped; 400 gives a
-    comfortable buffer for the monthly basket rebalance dates to line
-    up cleanly. Both the requested window and the *actual* basket depth
-    are enforced — an unwarmed SMA(200) must raise
+    ``candles_per_asset`` must be at least :func:`min_live_candles`
+    (232 for the deployable config) — the exact-backtest-replication
+    boundary, not just SMA warm-up; a 201–231 window would silently
+    approximate the signal instead. Both the requested window and the
+    *actual* basket depth are enforced — an unwarmed SMA(200) must raise
     :class:`SignalComputationError`, never silently read as "gate
     closed" (that would plan a full liquidation of the book).
 
@@ -135,16 +161,20 @@ def compute_live_signal(
     to pin the freshness guard against fixed historical frames.
     """
     required = required_basket_bars(lookbacks, sma_filter_period)
-    # +1: a live fetch's last row is the in-progress daily candle, which
-    # is dropped below — a request of exactly `required` bars could
-    # never produce a warmed basket against a real exchange.
-    if candles_per_asset < required + 1:
+    minimum = min_live_candles(lookbacks, sma_filter_period)
+    # Exact-replication floor, not just warm-up: below it the SMA range
+    # reaches into the window's pre-first-rebalance bars, which carry the
+    # index's initial-allocation artifact (see min_live_candles).
+    if candles_per_asset < minimum:
         raise SignalComputationError(
-            f"candles_per_asset={candles_per_asset} cannot warm the signal: "
-            f"need >= {required + 1} bars per asset "
+            f"candles_per_asset={candles_per_asset} cannot replicate the "
+            f"backtest exactly: need >= {minimum} bars per asset "
             f"({required} completed bars for SMA({sma_filter_period}) / "
             f"lookbacks {tuple(int(L) for L in lookbacks)} warm-up, plus "
-            f"the in-progress candle that is dropped)."
+            f"up to {MS_REBALANCE_MAX_GAP_DAYS} bars to the first "
+            f"in-window monthly rebalance, plus the in-progress candle "
+            f"that is dropped). A smaller window only approximates the "
+            f"backtest signal."
         )
     fetch = fetch_candles or _fetch_recent_candles
     asset_candles: dict[str, pd.DataFrame] = {}

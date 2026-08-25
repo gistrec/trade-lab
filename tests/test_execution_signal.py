@@ -16,8 +16,9 @@ from trade_lab.backtest.market_index import build_crypto_market_index_with_weigh
 from trade_lab.execution.broker import Broker
 from trade_lab.execution.config import PaperConfig
 from trade_lab.execution.signal import (
-    InsufficientWarmupError, SignalComputationError, SignalSnapshot,
-    compute_live_signal, required_basket_bars,
+    InsufficientWarmupError, MS_REBALANCE_MAX_GAP_DAYS,
+    SignalComputationError, SignalSnapshot, compute_live_signal,
+    min_live_candles, required_basket_bars,
 )
 
 
@@ -359,9 +360,11 @@ def test_one_bar_below_warmup_boundary_raises():
 
 
 def test_candles_per_asset_below_warmup_refused_before_any_fetch():
-    """A fetch window that cannot possibly warm the signal (200
-    requested = 199 completed after the in-progress bar drops) is
-    refused up front, before any exchange call."""
+    """231 requested bars warm the SMA but leave the SMA range inside
+    the window's initial-allocation artifact (exact replication needs
+    warm-up + up to 31 bars to the first in-window MS rebalance + the
+    dropped in-progress bar) — refused up front, before any exchange
+    call."""
     calls: list[str] = []
 
     def fetch(broker, pair, limit):
@@ -370,10 +373,23 @@ def test_candles_per_asset_below_warmup_refused_before_any_fetch():
 
     broker = Broker(_config(), _ExchangeStub())
     with pytest.raises(
-        SignalComputationError, match=r"candles_per_asset=200.*need >= 201",
+        SignalComputationError, match=r"candles_per_asset=231.*need >= 232",
     ):
-        compute_live_signal(broker, fetch_candles=fetch, candles_per_asset=200)
+        compute_live_signal(broker, fetch_candles=fetch, candles_per_asset=231)
     assert calls == [], "must refuse before burning exchange calls"
+
+
+def test_candles_per_asset_at_exact_replication_floor_computes():
+    """232 requested bars — the exact-replication floor — must compute
+    normally with a fully warmed gate."""
+    closes = (100 + np.linspace(0, 200, 500)).tolist()
+    fetch = _candles_factory({s: closes for s in _BASKET_7})
+    broker = Broker(_config(), _ExchangeStub())
+    snap = compute_live_signal(
+        broker, fetch_candles=fetch, candles_per_asset=232, now=_NOW,
+    )
+    assert snap.sma_value is not None
+    assert snap.signal == 1.0
 
 
 def test_depth_guard_raises_structured_insufficient_warmup_error():
@@ -442,6 +458,15 @@ def test_required_basket_bars_semantics():
         required_basket_bars((), 200)
 
 
+def test_min_live_candles_semantics():
+    """Exact-replication floor = warm-up + up to 31 bars to the first
+    in-window MS rebalance + the dropped in-progress candle."""
+    assert MS_REBALANCE_MAX_GAP_DAYS == 31
+    assert min_live_candles() == 232
+    assert min_live_candles((28, 60), 200) == 232
+    assert min_live_candles((28, 250), 200) == 251 + 31 + 1
+
+
 def test_deep_lookback_dominates_warmup_requirement():
     """With lookbacks deeper than the SMA, 250 bars warm SMA(200) but
     NOT pct_change(250) — the guard must key on max(lookback)+1, not
@@ -457,6 +482,50 @@ def test_deep_lookback_dominates_warmup_requirement():
         compute_live_signal(
             broker, fetch_candles=fetch, lookbacks=(28, 250),
             candles_per_asset=400,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Window-start invariance (why the floor is 232, not 201): at the minimum
+# window the signal must replicate the full history bit-exactly
+# ---------------------------------------------------------------------------
+
+
+def test_min_window_replicates_full_history_bit_exact():
+    """At 232 bars the whole SMA/lookback range lies past the first
+    in-window MS rebalance, where index levels differ from full history
+    only by a constant rebasing factor and weights are identical floats.
+    Divergent per-asset paths on purpose: with genuinely drifted weights
+    a shorter window's start artifact (flat 1/7 forced at bar 0) would
+    shift the gate margin and break these equalities."""
+    rng = np.random.default_rng(7)
+    closes = {
+        s: (100.0 * np.exp(np.cumsum(rng.normal(0.001, 0.02, 500)))).tolist()
+        for s in _BASKET_7
+    }
+    fetch = _candles_factory(closes)
+    broker = Broker(_config(), _ExchangeStub())
+    full = compute_live_signal(
+        broker, fetch_candles=fetch, candles_per_asset=500, now=_NOW,
+    )
+    tail = compute_live_signal(
+        broker, fetch_candles=fetch, candles_per_asset=232, now=_NOW,
+    )
+    assert tail.asof == full.asof
+    assert tail.signal == full.signal
+    assert tail.sma_gate_open == full.sma_gate_open
+    assert tail.per_lookback_states == full.per_lookback_states
+    # Weights depend only on the last rebalance's exact 1/N target and
+    # identical per-asset returns since — bit-exact, no tolerance.
+    assert tail.basket_weights == full.basket_weights
+    # Index levels are rebased to 100 per window, so compare the
+    # scale-free quantities the strategy actually keys on.
+    assert tail.basket_close / tail.sma_value == pytest.approx(
+        full.basket_close / full.sma_value, rel=1e-9,
+    )
+    for L in (28, 60):
+        assert tail.per_lookback_returns[L] == pytest.approx(
+            full.per_lookback_returns[L], rel=1e-9,
         )
 
 

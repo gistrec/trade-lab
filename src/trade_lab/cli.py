@@ -815,7 +815,6 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         Broker, BrokerError, InsufficientWarmupError, JournalEnvMismatch,
         JournalWriter, PaperConfigError, SignalComputationError,
         assert_journal_env, load_paper_config, print_dry_run, run_dry_cycle,
-        required_basket_bars,
     )
 
     try:
@@ -823,7 +822,7 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
 
-    _validate_candles_window(int(args.candles), required_basket_bars())
+    _validate_candles_window(int(args.candles))
 
     if args.journal:
         try:
@@ -877,24 +876,43 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
     print_dry_run(result, quote=config.quote_currency)
 
 
-def _validate_candles_window(candles: int, required_bars: int) -> None:
-    """Refuse a ``--candles`` window that cannot warm the signal.
-
-    ``required_bars`` completed bars are needed for the SMA/lookback
-    warm-up; +1 because the exchange's last daily candle is in-progress
-    and gets dropped by ``compute_live_signal``. Without this check an
-    unwarmed SMA(200) would silently read as "gate closed" (signal=0)
-    and the cycle would plan a full liquidation of the book.
+def _validate_candles_window(candles: int) -> None:
+    """Refuse a ``--candles`` window below ``min_live_candles`` — the
+    exact-backtest-replication floor, not just SMA warm-up (see
+    ``signal.min_live_candles``). A shorter window either approximates
+    the backtest signal or, unwarmed, reads as "gate closed" (signal=0)
+    and plans a full liquidation of the book.
     """
-    min_candles = required_bars + 1
+    from .execution import (
+        MS_REBALANCE_MAX_GAP_DAYS, min_live_candles, required_basket_bars,
+    )
+
+    min_candles = min_live_candles()
     if candles < min_candles:
         raise SystemExit(
-            f"REFUSED: --candles {candles} is below the signal warm-up "
-            f"minimum {min_candles} ({required_bars} completed bars for "
-            f"SMA(200) / lookback warm-up + the dropped in-progress "
-            f"candle). An unwarmed SMA silently reads as 'gate closed' "
-            f"and would plan a full liquidation."
+            f"REFUSED: --candles {candles} is below the exact-backtest-"
+            f"replication minimum {min_candles} ({required_basket_bars()} "
+            f"completed bars of SMA(200)/lookback warm-up + up to "
+            f"{MS_REBALANCE_MAX_GAP_DAYS} bars to the first in-window "
+            f"monthly rebalance + the dropped in-progress candle). A "
+            f"smaller window only approximates the backtest signal; an "
+            f"unwarmed SMA silently reads as 'gate closed' and would "
+            f"plan a full liquidation."
         )
+
+
+def _candles_help() -> str:
+    # Single source for both --candles help strings, so they can never
+    # drift from the enforced floor.
+    from .execution import MS_REBALANCE_MAX_GAP_DAYS, min_live_candles
+
+    return (
+        f"Daily candles fetched per asset (default 400; minimum "
+        f"{min_live_candles()} = SMA(200)/lookback warm-up + up to "
+        f"{MS_REBALANCE_MAX_GAP_DAYS} bars to the first in-window "
+        f"monthly rebalance + the dropped in-progress candle — the "
+        f"exact-backtest-replication floor, not just warm-up)."
+    )
 
 
 # A mainnet smoke test moves real money by design (tiny, deliberate,
@@ -1146,8 +1164,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         Broker, BrokerError, InstanceLockHeld, JournalEnvMismatch,
         JournalWriter, OrderStateEnvMismatch, OrderStateStore,
         PaperConfigError, SignalComputationError, acquire_instance_lock,
-        assert_journal_env, load_paper_config, required_basket_bars,
-        run_live_cycle,
+        assert_journal_env, load_paper_config, run_live_cycle,
     )
 
     try:
@@ -1155,7 +1172,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
     except PaperConfigError as exc:
         raise SystemExit(f"Config error: {exc}")
 
-    _validate_candles_window(int(args.candles), required_basket_bars())
+    _validate_candles_window(int(args.candles))
 
     # argparse's type=float happily accepts 'nan' and 'inf'; NaN slides
     # through the `>` age comparison and silently disables the gate whose
@@ -1696,9 +1713,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_env_file_flag(p_pd)
     p_pd.add_argument("--candles", type=int, default=400,
-                       help="Daily candles fetched per asset (default 400; "
-                            "minimum 201 = SMA(200)/lookback warm-up + the "
-                            "dropped in-progress candle).")
+                       help=_candles_help())
     p_pd.add_argument(
         "--journal", default=None,
         help="Path to append-only JSON Lines journal. If set, one Cycle entry "
@@ -1744,9 +1759,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "data/state/orders.json on testnet, "
                               "data/state/orders_mainnet.json on mainnet).")
     p_live.add_argument("--candles", type=int, default=400,
-                         help="Daily candles fetched per asset (default 400; "
-                              "minimum 201 = SMA(200)/lookback warm-up + the "
-                              "dropped in-progress candle).")
+                         help=_candles_help())
     p_live.add_argument("--timeout-s", dest="timeout_s", type=float, default=300.0,
                          help="Per-order wait-for-ack budget in seconds (default 300).")
     p_live.add_argument("--max-signal-age-h", dest="max_signal_age_h",
