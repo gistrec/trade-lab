@@ -186,6 +186,17 @@ def test_plan_reports_truncation_as_drift():
     assert drift is not None and "truncation" in drift
 
 
+def test_plan_freezes_inserts_while_drifted():
+    """Renumbered mirror (1,2,3) vs a not-yet-republished original file
+    (1,2,4): inserting physical line 4 would duplicate the old row-4
+    payload under a new number. Drift must freeze inserts, not just
+    complain."""
+    local = [(1, "a"), (2, "b"), (4, "d")]
+    to_insert, drift = plan_journal_inserts(local, 3, 3)
+    assert drift is not None and "frozen" in drift
+    assert to_insert == []
+
+
 # ── reconcile / restore round-trip ───────────────────────────────────
 
 def test_reconcile_is_incremental_and_round_trips(tmp_path):
@@ -411,6 +422,38 @@ def test_restore_db_failure_aborts_before_any_file_write(tmp_path):
     assert not (data / "journal" / "cycles.jsonl").exists()
     assert conn.store["journal"][src] == mirrored
     assert conn.commits == 0
+
+
+def test_restore_publish_failure_leaves_no_staged_litter(tmp_path, monkeypatch):
+    """A failed atomic publish must not leave .restoring files behind,
+    and the live target must stay untouched."""
+    import trade_lab.execution.db_mirror as dm
+
+    def _boom(src, dst):
+        raise OSError("rename denied")
+
+    monkeypatch.setattr(dm.os, "replace", _boom)
+    conn = FakeConn()
+    src = "journal/cycles.jsonl"
+    conn.store["journal"][src] = {1: json.dumps({"a": 1})}
+    data = tmp_path / "data"
+
+    with pytest.raises(OSError, match="rename denied"):
+        restore(conn, data)
+
+    assert not (data / "journal" / "cycles.jsonl").exists()
+    assert list((data / "journal").glob("*.restoring")) == []
+
+
+def test_restore_success_leaves_no_staged_litter(tmp_path):
+    conn = FakeConn()
+    conn.store["journal"]["journal/cycles.jsonl"] = {1: json.dumps({"a": 1})}
+    conn.store["state"]["state/orders.json"] = '{"__meta__": {}}'
+    data = tmp_path / "data"
+    restore(conn, data)
+    assert (data / "journal" / "cycles.jsonl").exists()
+    assert (data / "state" / "orders.json").exists()
+    assert list(data.rglob("*.restoring")) == []
 
 
 def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):

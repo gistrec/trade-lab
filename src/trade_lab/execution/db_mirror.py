@@ -230,7 +230,10 @@ def plan_journal_inserts(
     Pure planning: the caller supplies the mirror's ``MAX(line_no)`` and
     ``COUNT(*)`` for this source. Drift = the mirror holds lines the
     local file no longer has (truncated/rewritten file) — reported, not
-    repaired.
+    repaired, and inserts FREEZE: appending onto a broken numbering
+    identity mints duplicate rows (e.g. a renumbered mirror against a
+    not-yet-republished file), so a drifted source sends nothing until
+    an operator re-runs restore/--force.
     """
     to_insert = [(n, p) for n, p in local_lines if n > mirrored_max_line]
     local_at_or_below_mark = sum(
@@ -242,8 +245,9 @@ def plan_journal_inserts(
             f"mirror holds {mirrored_count} lines up to line "
             f"{mirrored_max_line} but the local file has only "
             f"{local_at_or_below_mark} there — local truncation? "
-            f"NOT repaired automatically"
+            f"NOT repaired automatically; inserts frozen for this source"
         )
+        to_insert = []
     return to_insert, drift
 
 
@@ -491,11 +495,12 @@ def restore(
 
     A restored journal file is compact (torn lines' reserved numbers
     collapse), so each written source's mirror rows are renumbered to
-    the restored file. Order per source: renumber + COMMIT first, file
-    write second — a DB failure (missing DELETE/INSERT grant, dead
-    connection) then aborts before any filesystem touch, and a crash
-    between commit and file write leaves a mismatch that reconcile's
-    drift complaint reports loudly (rerun with --force repairs it).
+    the restored file. Order per source: stage the replacement next to
+    the target, renumber + COMMIT, publish with an atomic rename — a DB
+    failure (missing DELETE/INSERT grant, dead connection) aborts with
+    the live file untouched, and a crash between commit and publish
+    leaves original-file-vs-compact-mirror drift that reconcile reports
+    loudly with inserts frozen (rerun with --force repairs it).
     Restore takes the same advisory lock as reconcile: a renumber
     interleaved with a live mirror pass can strand rows on the old
     numbering with no detectable drift, so concurrency is refused
@@ -542,18 +547,23 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
                 (source,),
             )
             payloads = [payload for (payload,) in cur.fetchall()]
-            cur.execute(
-                "DELETE FROM journal_lines WHERE source = %s", (source,)
-            )
-            _insert_journal_lines(
-                cur, source, list(enumerate(payloads, start=1)), now
-            )
-            # Commit BEFORE touching the filesystem: see docstring.
-            conn.commit()
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8") as fh:
-                for payload in payloads:
-                    fh.write(payload + "\n")
+            staged = target.with_name(target.name + ".restoring")
+            try:
+                with open(staged, "w", encoding="utf-8") as fh:
+                    for payload in payloads:
+                        fh.write(payload + "\n")
+                cur.execute(
+                    "DELETE FROM journal_lines WHERE source = %s", (source,)
+                )
+                _insert_journal_lines(
+                    cur, source, list(enumerate(payloads, start=1)), now
+                )
+                # Stage → commit → atomic publish: see docstring.
+                conn.commit()
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
             written.append(source)
 
         for source in state_sources:
@@ -572,10 +582,15 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
             )
             (payload,) = cur.fetchone()
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-            # Same contract as OrderStateStore: owner rw, group r.
-            os.chmod(target, 0o640)
+            staged = target.with_name(target.name + ".restoring")
+            try:
+                with open(staged, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                # Same contract as OrderStateStore: owner rw, group r.
+                os.chmod(staged, 0o640)
+                os.replace(staged, target)
+            finally:
+                staged.unlink(missing_ok=True)
             written.append(source)
     conn.commit()
     return written
