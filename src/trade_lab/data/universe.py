@@ -63,18 +63,24 @@ class PITMcapGapError(ValueError):
         )
 
 
+def _panel_ts(date, index: pd.DatetimeIndex) -> pd.Timestamp:
+    ts = pd.Timestamp(date)
+    if ts.tzinfo is None and index.tz is not None:
+        ts = ts.tz_localize(index.tz)
+    return ts
+
+
 def _assert_mcap_observed(
     market_caps: pd.DataFrame,
     tradable: pd.DataFrame,
     strict_dates: Iterable,
+    absent_gaps: Iterable[tuple[Optional[str], pd.Timestamp]] = (),
 ) -> None:
     """Owner-sanctioned fail-loud (issue #14): a NaN mcap on a rebalance
     date would silently change basket composition via ``na_option="bottom"``."""
-    gaps: list[tuple[Optional[str], pd.Timestamp]] = []
+    gaps: list[tuple[Optional[str], pd.Timestamp]] = list(absent_gaps)
     for date in strict_dates:
-        ts = pd.Timestamp(date)
-        if ts.tzinfo is None and market_caps.index.tz is not None:
-            ts = ts.tz_localize(market_caps.index.tz)
+        ts = _panel_ts(date, market_caps.index)
         if ts not in market_caps.index:
             gaps.append((None, ts))
             continue
@@ -209,7 +215,20 @@ def build_pit_universe(
                 tradable[symbol] = False
 
     if strict_dates:
-        _assert_mcap_observed(market_caps, tradable, strict_dates)
+        # A pool candidate with no panel column at all is an all-NaN column
+        # in disguise: the column restriction above would drop it before
+        # validation, silently shrinking the universe.
+        stables = stablecoins() if exclude_stablecoins else set()
+        absent_gaps: list[tuple[Optional[str], pd.Timestamp]] = []
+        for symbol in sorted(set(pool) - set(columns)):
+            meta = pool[symbol]
+            if meta.base in stables:
+                continue
+            for date in strict_dates:
+                ts = _panel_ts(date, market_caps.index)
+                if tradable_at(ts.strftime("%Y-%m-%d"), meta):
+                    absent_gaps.append((symbol, ts))
+        _assert_mcap_observed(market_caps, tradable, strict_dates, absent_gaps)
 
     # Zero-out market cap / volume for non-tradable cells so the rank
     # can never pick them. This is the *correctness* step — we must

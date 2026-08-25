@@ -140,6 +140,26 @@ def select_static_baskets(
 # ---------------------------------------------------------------------------
 
 
+def compute_forced_exits(
+    index: pd.DatetimeIndex, pool: dict
+) -> dict[str, pd.Timestamp]:
+    """Map registry-delisted coins to their last tradable panel bar.
+
+    Coin Metrics keeps pricing dead pairs, so without a forced exit a
+    holding delisted between rebalances accrues returns no Binance
+    account could realize (the LUNA/FTT class this diagnostic measures).
+    """
+    exits: dict[str, pd.Timestamp] = {}
+    for sym, meta in pool.items():
+        if meta.delisted_date is None:
+            continue
+        tradable = [ts for ts in index if tradable_at(ts.strftime("%Y-%m-%d"), meta)]
+        # Still tradable at the panel's last bar => nothing to force.
+        if tradable and tradable[-1] < index[-1]:
+            exits[sym] = tradable[-1]
+    return exits
+
+
 def build_membership_basket_index(
     closes: pd.DataFrame,
     baskets: dict[pd.Timestamp, tuple[str, ...]],
@@ -147,19 +167,24 @@ def build_membership_basket_index(
     fee_rate: float,
     slippage_rate: float,
     initial_capital: float,
+    forced_exits: dict[str, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
     """Equal-weight basket index with membership fixed between rebalances.
 
     Mirrors ``build_crypto_market_index_with_weights`` bar-for-bar
     (drift + renormalise between rebalances, ``fee+slippage`` per unit
     |weight change| on rebalance bars, initial deployment not charged)
-    with two deliberate differences that time-varying membership forces:
+    with three deliberate differences that time-varying membership forces:
 
     * membership changes only on the given rebalance bars, never on
       mid-month listings;
     * later membership *entries* are charged in full — entering the
       basket is a real trade, unlike the deployed builder's
-      new-listing credit.
+      new-listing credit;
+    * ``forced_exits`` (symbol -> last tradable bar) sells a delisted
+      holding at that bar regardless of the schedule: the return through
+      the bar is realized, the sale is charged, the freed weight sits in
+      cash until the next scheduled rebalance.
 
     With constant membership and all assets listed from bar 0 the output
     is identical to ``build_crypto_market_index`` (unit-tested).
@@ -171,18 +196,44 @@ def build_membership_basket_index(
     bars = list(closes.index)
     returns_arr = returns.to_numpy()
 
+    forced = dict(forced_exits or {})
+    unknown = sorted(set(forced) - set(cols))
+    if unknown:
+        raise SystemExit(f"forced exit for unknown column(s) {unknown}")
+    exits_by_bar: dict[pd.Timestamp, list[str]] = {}
+    for sym, exit_ts in forced.items():
+        exits_by_bar.setdefault(exit_ts, []).append(sym)
+
     weights = np.zeros((len(bars), len(cols)))
     cost_per_bar = np.zeros(len(bars))
     current = np.zeros(len(cols))
+    cash = 0.0
     first_bar = True
     for i, ts in enumerate(bars):
+        r = returns_arr[i]
+        held = current > 0
         if ts in baskets:
             members = baskets[ts]
+            dead = sorted(m for m in members if m in forced and forced[m] <= ts)
+            if dead:
+                raise SystemExit(
+                    f"basket admits delisted member(s) {dead} at {ts.date()} "
+                    "— refusing to buy into a forced exit"
+                )
             missing = [m for m in members if pd.isna(closes.at[ts, m])]
             if missing:
                 raise SystemExit(
                     f"missing close for basket member(s) {missing} at "
                     f"{ts.date()} — refusing to size a silently shrunken basket"
+                )
+            # Outgoing legs realize their final return on this bar too — a
+            # NaN here would otherwise become an invented flat exit via the
+            # fillna(0) in the portfolio-return sum.
+            if np.isnan(r[held]).any():
+                gone = [cols[j] for j in np.where(held & np.isnan(r))[0]]
+                raise SystemExit(
+                    f"missing close for held member(s) {gone} at {ts.date()} "
+                    "— refusing to invent a flat exit"
                 )
             target = np.zeros(len(cols))
             for m in members:
@@ -191,10 +242,9 @@ def build_membership_basket_index(
             charged = 0.0 if first_bar else turnover
             cost_per_bar[i] = charged * (fee_rate + slippage_rate)
             current = target
+            cash = 0.0
             first_bar = False
         else:
-            r = returns_arr[i]
-            held = current > 0
             if np.isnan(r[held]).any():
                 gone = [cols[j] for j in np.where(held & np.isnan(r))[0]]
                 raise SystemExit(
@@ -202,8 +252,19 @@ def build_membership_basket_index(
                     "— refusing to drift a silently shrunken basket"
                 )
             grown = current * (1.0 + np.where(np.isnan(r), 0.0, r))
-            total = grown.sum()
-            current = grown / total if total > 0 else current
+            total = cash + grown.sum()
+            if total > 0:
+                current = grown / total
+                cash = cash / total
+        # Forced delist exit at the last tradable bar: post-drift weight is
+        # sold (charged like any trade) and parked in cash — after this bar
+        # the dead coin's Coin Metrics series contributes nothing.
+        for sym in exits_by_bar.get(ts, ()):
+            j = col_pos[sym]
+            if current[j] > 0.0:
+                cost_per_bar[i] += current[j] * (fee_rate + slippage_rate)
+                cash += current[j]
+                current[j] = 0.0
         weights[i] = current
 
     weights_df = pd.DataFrame(weights, index=closes.index, columns=cols)
@@ -361,6 +422,7 @@ def run_diagnostic(
         fee_rate=PRODUCTION_CONFIG.fee_rate,
         slippage_rate=PRODUCTION_CONFIG.slippage_rate,
         initial_capital=PRODUCTION_CONFIG.initial_capital,
+        forced_exits=compute_forced_exits(closes.index, pool),
     )
     pit_index = build_membership_basket_index(closes, pit_baskets, **cost_kwargs)
     control_index = build_membership_basket_index(

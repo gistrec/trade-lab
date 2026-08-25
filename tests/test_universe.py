@@ -375,3 +375,40 @@ def test_strict_mcap_dates_on_empty_panel_raise():
             pd.DataFrame(), pd.DataFrame(),
             strict_mcap_dates=["2020-01-01"],
         )
+
+
+def test_strict_mcap_dates_catch_candidate_absent_from_panel():
+    """A tradable pool candidate with no panel column at all must gap —
+    the column restriction must not drop it before validation."""
+    registry, market_caps, volumes = _nan_mcap_setup()
+    market_caps["NOCAP"] = 1e9
+    registry["GHOST"] = CoinMeta("ghost-id", "GHOST/USDT", "2020-01-01", None)
+    with pytest.raises(PITMcapGapError, match="GHOST @ 2020-02-01") as excinfo:
+        build_pit_universe(
+            market_caps, volumes, candidates=registry,
+            top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+            strict_mcap_dates=["2020-02-01"],
+        )
+    assert ("GHOST", pd.Timestamp("2020-02-01", tz="UTC")) in excinfo.value.gaps
+
+
+def test_absent_candidate_untradable_on_strict_dates_passes():
+    registry, market_caps, volumes = _nan_mcap_setup()
+    market_caps["NOCAP"] = 1e9
+    registry["LATE"] = CoinMeta("late-id", "LATE/USDT", "2020-03-15", None)
+    build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=False,
+        strict_mcap_dates=["2020-02-01"],
+    )
+
+
+def test_absent_stablecoin_candidate_ignored_when_excluded():
+    registry, market_caps, volumes = _nan_mcap_setup()
+    market_caps["NOCAP"] = 1e9
+    registry["USDC"] = CoinMeta("usd-coin", "USDC/USDT", "2019-01-01", None)
+    build_pit_universe(
+        market_caps, volumes, candidates=registry,
+        top_n=20, volume_lookback_days=30, exclude_stablecoins=True,
+        strict_mcap_dates=["2020-02-01"],
+    )

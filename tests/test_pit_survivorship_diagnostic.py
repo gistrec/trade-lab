@@ -206,6 +206,116 @@ def test_rebalance_member_without_close_fails_loud():
         )
 
 
+def test_outgoing_holding_nan_close_on_rebalance_bar_fails_loud():
+    """The exit leg realizes Y's final return on the rebalance bar — a NaN
+    close there must raise, not become an invented flat exit via fillna(0)."""
+    n = 10
+    idx = _idx(n)
+    y = np.full(n, 200.0)
+    y[5:] = np.nan
+    closes = pd.DataFrame({"X": np.full(n, 100.0), "Y": y}, index=idx)
+    baskets = {idx[0]: ("X", "Y"), idx[5]: ("X",)}
+    with pytest.raises(SystemExit, match="held member.*Y"):
+        diag.build_membership_basket_index(
+            closes, baskets, fee_rate=0.001, slippage_rate=0.0005,
+            initial_capital=10_000.0,
+        )
+
+
+def test_forced_delist_exit_stops_return_accrual():
+    """Coin Metrics keeps pricing a delisted coin — after the forced exit
+    at its last tradable bar the pump must contribute exactly nothing."""
+    n = 12
+    idx = _idx(n)
+    y = np.full(n, 200.0)
+    y[4:] = 200.0 * 2.0 ** np.arange(1, 9)  # keeps pumping after delist
+    closes = pd.DataFrame({"X": np.full(n, 100.0), "Y": y}, index=idx)
+    baskets = {idx[0]: ("X", "Y"), idx[8]: ("X",)}
+    out = diag.build_membership_basket_index(
+        closes, baskets, fee_rate=0.001, slippage_rate=0.0005,
+        initial_capital=10_000.0, forced_exits={"Y": idx[3]},
+    )
+    hit = 1.0 - 0.5 * 0.0015  # sell (later: buy) half the book at fee+slip
+    assert np.isclose(out["close"].iloc[3], 100.0 * hit)
+    np.testing.assert_allclose(
+        out["close"].iloc[4:8].to_numpy(), 100.0 * hit, rtol=1e-12
+    )
+    # Freed weight sits in cash until the next scheduled rebalance, then
+    # redeploys into X — charged like any trade.
+    assert np.isclose(out["close"].iloc[8], 100.0 * hit * hit)
+    np.testing.assert_allclose(
+        out["close"].iloc[9:].to_numpy(), 100.0 * hit * hit, rtol=1e-12
+    )
+
+
+def test_delist_exit_reconciles_with_rebalance_validation():
+    """After a forced delist exit the dead coin's NaN tail must not trip
+    the rebalance-bar held-member check."""
+    n = 10
+    idx = _idx(n)
+    y = np.full(n, 200.0)
+    y[4:] = np.nan  # series goes dark right after the exit bar
+    closes = pd.DataFrame({"X": np.full(n, 100.0), "Y": y}, index=idx)
+    baskets = {idx[0]: ("X", "Y"), idx[5]: ("X",)}
+    out = diag.build_membership_basket_index(
+        closes, baskets, fee_rate=0.001, slippage_rate=0.0005,
+        initial_capital=10_000.0, forced_exits={"Y": idx[3]},
+    )
+    hit = 1.0 - 0.5 * 0.0015
+    assert np.isclose(out["close"].iloc[3], 100.0 * hit)
+    assert np.isclose(out["close"].iloc[-1], 100.0 * hit * hit)
+
+
+def test_forced_exit_guards_fail_loud():
+    n = 10
+    idx = _idx(n)
+    closes = pd.DataFrame({"X": np.full(n, 100.0)}, index=idx)
+    with pytest.raises(SystemExit, match="delisted member"):
+        diag.build_membership_basket_index(
+            closes, {idx[0]: ("X",)}, fee_rate=0.001, slippage_rate=0.0005,
+            initial_capital=10_000.0, forced_exits={"X": idx[0]},
+        )
+    with pytest.raises(SystemExit, match="unknown column"):
+        diag.build_membership_basket_index(
+            closes, {idx[0]: ("X",)}, fee_rate=0.001, slippage_rate=0.0005,
+            initial_capital=10_000.0, forced_exits={"Z": idx[3]},
+        )
+
+
+def test_compute_forced_exits_maps_to_last_tradable_bar():
+    idx = _idx(30)  # 2020-01-01 .. 2020-01-30
+    pool = {
+        "LIVE": CoinMeta("live-id", "LIVE/USDT", "2020-01-01", None),
+        "DEAD": CoinMeta("dead-id", "DEAD/USDT", "2020-01-01", "2020-01-15"),
+        "SOON": CoinMeta("soon-id", "SOON/USDT", "2020-01-01", "2099-01-01"),
+        "PRE":  CoinMeta("pre-id",  "PRE/USDT",  "2019-01-01", "2019-06-01"),
+    }
+    exits = diag.compute_forced_exits(idx, pool)
+    # delisted_date itself is already suspended -> exit the bar before.
+    assert exits == {"DEAD": pd.Timestamp("2020-01-14", tz="UTC")}
+
+
+def test_run_diagnostic_forces_exit_on_mid_month_delisting(tmp_path):
+    """C delists 2020-02-20 and its series goes dark: both index runs must
+    force-exit it at the last tradable bar instead of raising on the
+    held-member NaN check (or silently accruing post-delist returns)."""
+    prices, market_caps, volumes, pool = _stub_panel()
+    cutoff = pd.Timestamp("2020-02-20", tz="UTC")
+    prices.loc[prices.index >= cutoff, "C"] = np.nan
+    volumes.loc[volumes.index >= cutoff, "C"] = np.nan
+    market_caps["C"] = np.where(market_caps.index < cutoff, 5e10, np.nan)
+    pool = dict(pool)
+    pool["C"] = CoinMeta("c-id", "C/USDT", "2020-01-01", "2020-02-20")
+    payload = diag.run_diagnostic(
+        prices, market_caps, volumes, pool,
+        out_dir=tmp_path, static_basket=("A", "C"),
+    )
+    r1, r2, r3 = payload["rebalances"]
+    assert r1["members"] == ["A", "C"] and r2["members"] == ["A", "C"]
+    assert r3["members"] == ["A", "B"] and r3["removed"] == ["C"]
+    assert (tmp_path / "pit_survivorship_diagnostic.md").exists()
+
+
 def test_missing_coverage_requires_explicit_acknowledgement(tmp_path):
     """Empty cache + fetch=False: every registry coin lacks coverage and
     the loader must abort instead of silently shrinking the pool."""
