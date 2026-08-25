@@ -727,9 +727,15 @@ def _write_mirror_status(
             "last_error": error,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(status) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        # Per-writer staging: overlapping attempts are an expected path
+        # (advisory-lock refusal on one side, success on the other), and
+        # a shared .tmp would let them corrupt each other's publish.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(status) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
     except Exception:
         logger.warning("db mirror: status file write failed", exc_info=True)
 

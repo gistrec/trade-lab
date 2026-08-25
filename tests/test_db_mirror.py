@@ -617,7 +617,13 @@ def test_mirror_status_published_via_atomic_replace(monkeypatch, tmp_path):
         tmp_path / "data" / "journal" / "cycles.jsonl",
         tmp_path / "vintages", sandbox=True,
     )
-    assert ("mirror_status.json.tmp", "mirror_status.json") in calls
+    # staging name is per-writer (pid-suffixed) so overlapping attempts
+    # cannot corrupt each other's publish
+    assert any(
+        src.startswith("mirror_status.json.") and src.endswith(".tmp")
+        and dst == "mirror_status.json"
+        for src, dst in calls
+    )
 
 
 def test_mirror_after_cycle_failure_keeps_success_clock(monkeypatch, tmp_path):
@@ -839,6 +845,30 @@ def test_cmd_db_mirror_failure_updates_status(monkeypatch, tmp_path):
 
     status = _read_status(journal_dir / "mirror_status.json")
     assert "RuntimeError: db down" in status["last_error"]
+
+
+def test_cmd_db_mirror_config_error_updates_status(monkeypatch, tmp_path):
+    # A broken config (not an unconfigured mirror) must reach /metrics
+    # from the manual command too.
+    import argparse
+
+    from trade_lab.cli import cmd_db_mirror
+
+    _mirror_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_CA", "   ")  # empty CA → MirrorConfigError
+    journal_dir = tmp_path / "data" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "cycles.jsonl").write_text("")
+
+    args = argparse.Namespace(
+        data_dir=str(tmp_path / "data"),
+        vintage_root=str(tmp_path / "vintages"),
+    )
+    with pytest.raises(SystemExit):
+        cmd_db_mirror(args)
+
+    status = _read_status(journal_dir / "mirror_status.json")
+    assert "MirrorConfigError" in status["last_error"]
 
 
 def test_mirror_after_cycle_state_under_root_is_success(

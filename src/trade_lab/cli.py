@@ -1347,16 +1347,22 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
         reconcile, update_mirror_statuses,
     )
 
+    journal_dir = Path(args.data_dir) / "journal"
     try:
         config = mirror_config_from_env()
     except MirrorConfigError as exc:
+        # Broken config (bad port, empty TLS CA, …) must reach /metrics
+        # like any other failed attempt — unconfigured (None) stays
+        # silent, matching the hook.
+        update_mirror_statuses(
+            journal_dir, error=f"MirrorConfigError: {exc}"
+        )
         raise SystemExit(f"Config error: {exc}")
     if config is None:
         raise SystemExit(
             "MYSQL_HOST is not set in the selected env file — "
             "the MySQL mirror is unconfigured."
         )
-    journal_dir = Path(args.data_dir) / "journal"
     try:
         conn = connect(config)
         try:
