@@ -11,6 +11,8 @@ is pure and tested directly. What must hold:
 * restore refuses to overwrite existing non-empty files without force;
 * the post-cycle hook NEVER raises — a mirror failure must not take a
   completed trading cycle down with it;
+* the hook drops a per-environment mirror_status*.json (success AND
+  failure) so /metrics can see mirror health; the drop is best-effort;
 * credentials never leak through repr.
 """
 from __future__ import annotations
@@ -19,6 +21,8 @@ import gzip
 import hashlib
 import json
 import logging
+import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -26,6 +30,7 @@ import pytest
 from trade_lab.execution.db_mirror import (
     MirrorConfigError,
     MirrorIntegrityError,
+    MirrorReport,
     collect_journal_lines,
     mirror_after_cycle,
     mirror_config_from_env,
@@ -534,26 +539,390 @@ def test_restore_refusal_leaves_mirror_numbering_untouched(tmp_path):
 
 # ── the post-cycle hook must never raise ─────────────────────────────
 
-def test_mirror_after_cycle_swallows_connection_failure(monkeypatch, caplog):
+def _mirror_env(monkeypatch):
     monkeypatch.setenv("MYSQL_HOST", "h")
     monkeypatch.setenv("MYSQL_USER", "u")
     monkeypatch.setenv("MYSQL_DB", "db")
+
+
+def test_mirror_after_cycle_swallows_connection_failure(
+    monkeypatch, caplog, tmp_path
+):
+    _mirror_env(monkeypatch)
 
     def boom(config):
         raise RuntimeError("db down")
 
     monkeypatch.setattr("trade_lab.execution.db_mirror.connect", boom)
-    mirror_after_cycle()  # must not raise
+    mirror_after_cycle(
+        tmp_path / "data" / "journal" / "cycles.jsonl",
+        tmp_path / "vintages", sandbox=True,
+    )  # must not raise
     assert any("db mirror failed" in r.message for r in caplog.records)
 
 
-def test_mirror_after_cycle_disabled_without_url(monkeypatch, caplog):
+def test_mirror_after_cycle_disabled_without_url(monkeypatch, caplog, tmp_path):
     import logging
 
     monkeypatch.delenv("MYSQL_HOST", raising=False)
     with caplog.at_level(logging.INFO):
-        mirror_after_cycle()  # must not raise, must say it's disabled
+        mirror_after_cycle(
+            tmp_path / "data" / "journal" / "cycles.jsonl",
+            tmp_path / "vintages", sandbox=True,
+        )  # must not raise, must say it's disabled
     assert any("disabled" in r.message for r in caplog.records)
+    # disabled is neither success nor failure — no status file at all
+    assert not (tmp_path / "data" / "journal").exists()
+
+
+# ── mirror status file (visibility for /metrics) ─────────────────────
+
+def _read_status(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_mirror_after_cycle_success_writes_status(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert status["last_error"] is None
+    assert status["last_success_at"] == status["last_attempt_at"]
+    ts = datetime.fromisoformat(status["last_success_at"])
+    assert ts.tzinfo is not None and ts.utcoffset().total_seconds() == 0
+    # staged tmp file must be published, not littered
+    assert list((data / "journal").glob("*.tmp")) == []
+
+
+def test_mirror_status_published_via_atomic_replace(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    calls = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append((Path(src).name, Path(dst).name))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("trade_lab.execution.db_mirror.os.replace", spy)
+    mirror_after_cycle(
+        tmp_path / "data" / "journal" / "cycles.jsonl",
+        tmp_path / "vintages", sandbox=True,
+    )
+    # staging name is per-writer (pid-suffixed) so overlapping attempts
+    # cannot corrupt each other's publish
+    assert any(
+        src.startswith("mirror_status.json.") and src.endswith(".tmp")
+        and dst == "mirror_status.json"
+        for src, dst in calls
+    )
+
+
+def test_mirror_after_cycle_failure_keeps_success_clock(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+
+    def boom(config):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("trade_lab.execution.db_mirror.connect", boom)
+    data = tmp_path / "data"
+    path = data / "journal" / "mirror_status.json"
+    path.parent.mkdir(parents=True)
+    old = "2026-08-20T00:00:00+00:00"
+    path.write_text(json.dumps({
+        "last_attempt_at": old, "last_success_at": old, "last_error": None,
+    }))
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )
+
+    status = _read_status(path)
+    assert "RuntimeError: db down" in status["last_error"]
+    assert status["last_success_at"] == old  # the age metric keeps growing
+    assert status["last_attempt_at"] != old
+
+
+def test_mirror_status_file_is_per_environment(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    mirror_after_cycle(
+        data / "journal" / "cycles_mainnet.jsonl",
+        tmp_path / "vintages", sandbox=False,
+    )
+
+    assert (data / "journal" / "mirror_status_mainnet.json").exists()
+    assert not (data / "journal" / "mirror_status.json").exists()
+
+
+def test_mirror_status_survives_corrupt_previous_file(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    path = data / "journal" / "mirror_status.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )
+    assert _read_status(path)["last_error"] is None
+
+
+def test_mirror_status_write_failure_never_raises(
+    monkeypatch, tmp_path, caplog
+):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "journal").write_text("a file where the dir should be")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )  # no raise
+    assert any(
+        "status file write failed" in r.message for r in caplog.records
+    )
+
+
+def test_connect_missing_ca_bundle_names_the_path(tmp_path):
+    from trade_lab.execution.db_mirror import MirrorConfig, connect
+
+    cfg = MirrorConfig(
+        host="h", port=3306, user="u", password="p", database="d",
+        ssl_ca=str(tmp_path / "no-such-ca.pem"),
+    )
+    with pytest.raises(MirrorConfigError, match="no-such-ca.pem"):
+        connect(cfg)
+
+
+def test_mirror_after_cycle_paths_ignore_cwd(monkeypatch, tmp_path):
+    # Cron invokes the hook with an absolute --journal from its own CWD;
+    # the reconcile root and the status file must derive from the
+    # journal path, never from the working directory.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    elsewhere = tmp_path / "cron-home"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    journal = tmp_path / "data" / "journal" / "cycles.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("")
+
+    mirror_after_cycle(journal, sandbox=True)  # default vintage root too
+
+    assert (journal.parent / "mirror_status.json").exists()
+    assert not (elsewhere / "data").exists()
+    assert not (elsewhere / "paper_trading").exists()
+
+
+def test_mirror_after_cycle_drift_is_failure(monkeypatch, tmp_path):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    report = MirrorReport()
+    report.drift.append("journal/cycles.jsonl: local shorter than mirror")
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.reconcile",
+        lambda conn, data_dir, vintage_root: report,
+    )
+    data = tmp_path / "data"
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert status["last_error"].startswith("DRIFT:")
+    assert status["last_success_at"] is None  # drift never advances the clock
+
+
+def test_mirror_after_cycle_updates_all_present_environments(
+    monkeypatch, tmp_path
+):
+    # One reconcile scans every journal under data/, so a testnet-
+    # triggered success must refresh the mainnet status file too.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    journal_dir = tmp_path / "data" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "cycles.jsonl").write_text("")
+    (journal_dir / "cycles_mainnet.jsonl").write_text("")
+
+    mirror_after_cycle(
+        journal_dir / "cycles.jsonl", tmp_path / "vintages", sandbox=True
+    )
+
+    assert _read_status(
+        journal_dir / "mirror_status.json"
+    )["last_error"] is None
+    assert _read_status(
+        journal_dir / "mirror_status_mainnet.json"
+    )["last_error"] is None
+
+
+def test_mirror_after_cycle_state_outside_root_is_failure(
+    monkeypatch, tmp_path
+):
+    # The cycle's real order-state file must lie under the scanned
+    # <data_dir>/state/ — otherwise the reconcile silently skips the
+    # duplicate-order suppressor and a green status would lie.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    stray = tmp_path / "cron-home" / "data" / "state" / "orders.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=stray,
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert "state file not under mirror root" in status["last_error"]
+
+
+def test_mirror_after_cycle_state_glob_mismatch_is_failure(
+    monkeypatch, tmp_path
+):
+    # Right directory, wrong suffix: reconcile scans state/*.json only,
+    # so orders.state would be silently skipped — that is a failure too.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    state = data / "state" / "orders.state"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=state,
+    )
+
+    status = _read_status(data / "journal" / "mirror_status.json")
+    assert "state file not under mirror root" in status["last_error"]
+
+
+def test_cmd_db_mirror_failure_updates_status(monkeypatch, tmp_path):
+    # A failed MANUAL reconcile must reach /metrics too, not stay green
+    # until the next post-cycle hook.
+    import argparse
+
+    from trade_lab.cli import cmd_db_mirror
+
+    _mirror_env(monkeypatch)
+
+    def boom(config):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("trade_lab.execution.db_mirror.connect", boom)
+    journal_dir = tmp_path / "data" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "cycles.jsonl").write_text("")
+
+    args = argparse.Namespace(
+        data_dir=str(tmp_path / "data"),
+        vintage_root=str(tmp_path / "vintages"),
+    )
+    with pytest.raises(RuntimeError, match="db down"):
+        cmd_db_mirror(args)
+
+    status = _read_status(journal_dir / "mirror_status.json")
+    assert "RuntimeError: db down" in status["last_error"]
+
+
+def test_cmd_db_mirror_config_error_updates_status(monkeypatch, tmp_path):
+    # A broken config (not an unconfigured mirror) must reach /metrics
+    # from the manual command too.
+    import argparse
+
+    from trade_lab.cli import cmd_db_mirror
+
+    _mirror_env(monkeypatch)
+    monkeypatch.setenv("MYSQL_SSL_CA", "   ")  # empty CA → MirrorConfigError
+    journal_dir = tmp_path / "data" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "cycles.jsonl").write_text("")
+
+    args = argparse.Namespace(
+        data_dir=str(tmp_path / "data"),
+        vintage_root=str(tmp_path / "vintages"),
+    )
+    with pytest.raises(SystemExit):
+        cmd_db_mirror(args)
+
+    status = _read_status(journal_dir / "mirror_status.json")
+    assert "MirrorConfigError" in status["last_error"]
+
+
+def test_mirror_after_cycle_state_under_root_is_success(
+    monkeypatch, tmp_path
+):
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    data = tmp_path / "data"
+    (data / "journal").mkdir(parents=True)
+    state = data / "state" / "orders.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}")
+
+    mirror_after_cycle(
+        data / "journal" / "cycles.jsonl", tmp_path / "vintages",
+        sandbox=True, state_path=state,
+    )
+
+    assert _read_status(
+        data / "journal" / "mirror_status.json"
+    )["last_error"] is None
+
+
+def test_mirror_after_cycle_noncanonical_journal_fails_loud(
+    monkeypatch, tmp_path
+):
+    # A journal outside <data_dir>/journal/ cannot locate a mirror root:
+    # no raise (hook contract), but the status next to the journal must
+    # carry the config error so the alarm fires.
+    _mirror_env(monkeypatch)
+    monkeypatch.setattr(
+        "trade_lab.execution.db_mirror.connect", lambda config: FakeConn()
+    )
+    journal = tmp_path / "elsewhere" / "cycles.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("")
+
+    mirror_after_cycle(journal, tmp_path / "vintages", sandbox=True)
+
+    status = _read_status(journal.parent / "mirror_status.json")
+    assert "MirrorConfigError" in status["last_error"]
 
 
 # ── vintages ─────────────────────────────────────────────────────────

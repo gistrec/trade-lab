@@ -170,6 +170,101 @@ def test_exchange_latency_absent_when_no_stats(tmp_path):
     assert "tradelab_exchange_requests" not in m
 
 
+def _status(*, success_at=None, error=None):
+    return {
+        "last_attempt_at": NOW.isoformat(),
+        "last_success_at": success_at,
+        "last_error": error,
+    }
+
+
+def test_mirror_metrics_healthy(tmp_path):
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    status = _status(success_at=(NOW - timedelta(hours=2)).isoformat())
+    m = _parse(metrics.render_metrics(reader, NOW, mirror_status=status))
+    assert abs(m["tradelab_mirror_last_success_age_seconds"] - 7200) < 2
+    assert m["tradelab_mirror_failed"] == 0
+
+
+def test_mirror_metrics_failed_keeps_age_growing(tmp_path):
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    status = _status(success_at=(NOW - timedelta(hours=20)).isoformat(),
+                     error="RuntimeError: db down")
+    m = _parse(metrics.render_metrics(reader, NOW, mirror_status=status))
+    assert m["tradelab_mirror_failed"] == 1
+    assert abs(m["tradelab_mirror_last_success_age_seconds"] - 72000) < 2
+
+
+def test_mirror_metrics_never_succeeded(tmp_path):
+    """No last_success_at → the age gauge is absent, not zero (a zero would
+    read as 'just succeeded' and mask a mirror that never worked)."""
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(
+        reader, NOW, mirror_status=_status(error="MirrorConfigError: bad")))
+    assert "tradelab_mirror_last_success_age_seconds" not in m
+    assert m["tradelab_mirror_failed"] == 1
+
+
+def test_mirror_metrics_absent_without_status(tmp_path):
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(reader, NOW))
+    assert "tradelab_mirror_last_success_age_seconds" not in m
+    assert "tradelab_mirror_failed" not in m
+
+
+def test_mirror_metrics_corrupt_status_is_failure(tmp_path):
+    """An unreadable status file means the write path is broken — that
+    must raise the failure gauge, not silently drop the series."""
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(
+        reader, NOW, mirror_status={"corrupt": True}))
+    assert m["tradelab_mirror_failed"] == 1
+    assert "tradelab_mirror_last_success_age_seconds" not in m
+
+
+def test_mirror_metrics_tolerate_corrupt_status(tmp_path):
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(
+        reader, NOW,
+        mirror_status={"last_success_at": 12345, "last_error": None}))
+    # an unparseable timestamp degrades the age gauge, never the scrape
+    assert "tradelab_mirror_last_success_age_seconds" not in m
+    assert m["tradelab_mirror_failed"] == 0
+
+
+def test_metrics_endpoint_includes_mirror_status(tmp_path):
+    """/metrics wiring: the server reads mirror_status.json next to the
+    journal (no execution import) and hands it to render_metrics."""
+    now = datetime.now(timezone.utc)
+    p = tmp_path / "cycles.jsonl"
+    p.write_text(json.dumps(_entry(
+        ended_at=now - timedelta(minutes=15),
+        outcome="success", live=True)) + "\n")
+    (tmp_path / "mirror_status.json").write_text(json.dumps({
+        "last_attempt_at": now.isoformat(),
+        "last_success_at": now.isoformat(),
+        "last_error": None,
+    }))
+    cfg = hs.Config(journal_path=str(p), host="127.0.0.1", port=0)
+    httpd = hs.build_server(cfg)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/metrics")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        assert resp.status == 200
+        assert "tradelab_mirror_last_success_age_seconds" in body
+        assert "tradelab_mirror_failed 0" in body
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
 def test_metrics_endpoint_end_to_end(tmp_path):
     p = tmp_path / "cycles.jsonl"
     p.write_text(json.dumps(_entry(

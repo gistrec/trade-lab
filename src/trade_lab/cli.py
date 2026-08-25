@@ -872,7 +872,7 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         # never touching the cycle's own exit code.
         if journal is not None:
             from .execution.db_mirror import mirror_after_cycle
-            mirror_after_cycle()
+            mirror_after_cycle(args.journal, sandbox=config.sandbox)
     print_dry_run(result, quote=config.quote_currency)
 
 
@@ -1265,7 +1265,9 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # every path, including the journaled failure above — mirror it
         # off-host without touching the cycle's own exit code.
         from .execution.db_mirror import mirror_after_cycle
-        mirror_after_cycle()
+        mirror_after_cycle(
+            args.journal, sandbox=config.sandbox, state_path=state_path
+        )
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")
@@ -1341,25 +1343,44 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
     best-effort post-cycle hook.
     """
     from .execution.db_mirror import (
-        MirrorConfigError, connect, mirror_config_from_env, reconcile,
+        MirrorConfigError, connect, drift_error, mirror_config_from_env,
+        reconcile, update_mirror_statuses,
     )
 
+    journal_dir = Path(args.data_dir) / "journal"
     try:
         config = mirror_config_from_env()
     except MirrorConfigError as exc:
+        # Broken config (bad port, empty TLS CA, …) must reach /metrics
+        # like any other failed attempt — unconfigured (None) stays
+        # silent, matching the hook.
+        update_mirror_statuses(
+            journal_dir, error=f"MirrorConfigError: {exc}"
+        )
         raise SystemExit(f"Config error: {exc}")
     if config is None:
         raise SystemExit(
             "MYSQL_HOST is not set in the selected env file — "
             "the MySQL mirror is unconfigured."
         )
-    conn = connect(config)
     try:
-        report = reconcile(conn, Path(args.data_dir),
-                           Path(args.vintage_root))
-    finally:
-        conn.close()
+        conn = connect(config)
+        try:
+            report = reconcile(conn, Path(args.data_dir),
+                               Path(args.vintage_root))
+        finally:
+            conn.close()
+    except Exception as exc:
+        # A failed manual recovery attempt must reach /metrics too —
+        # not stay green until the next post-cycle hook.
+        update_mirror_statuses(
+            journal_dir, error=f"{type(exc).__name__}: {exc}"
+        )
+        raise
     print(report.summary())
+    # The manual reconcile covers the same files as the hook — keep the
+    # /metrics status in step with it (drift stays a failure there too).
+    update_mirror_statuses(journal_dir, error=drift_error(report))
     if report.drift:
         raise SystemExit(2)
 

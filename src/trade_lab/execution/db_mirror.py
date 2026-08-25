@@ -212,6 +212,15 @@ def _ssl_ca_from_env() -> Optional[str]:
 
 
 def connect(config: MirrorConfig) -> pymysql.connections.Connection:
+    if config.ssl_ca and not os.path.isfile(config.ssl_ca):
+        # ssl.create_default_context raises a bare FileNotFoundError with
+        # no filename — name the path and the knob instead. The default
+        # bundle path is Linux-specific (absent on e.g. macOS).
+        raise MirrorConfigError(
+            f"MYSQL_SSL_CA bundle not found: {config.ssl_ca!r} — set "
+            "MYSQL_SSL_CA to an existing CA file (the default is the "
+            "Linux system bundle)"
+        )
     conn = pymysql.connect(
         host=config.host,
         port=config.port,
@@ -658,9 +667,94 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
     return written
 
 
+def mirror_status_path(journal_dir: Path, sandbox: bool) -> Path:
+    # Same suffix rule as cycles.jsonl / cycles_mainnet.jsonl — testnet
+    # and mainnet never share this file.
+    suffix = "" if sandbox else "_mainnet"
+    return journal_dir / f"mirror_status{suffix}.json"
+
+
+def data_dir_for_journal(journal_path: "Path | str") -> Path:
+    """Mirror root for the journal the cycle actually wrote.
+
+    Canonical layout is <data_dir>/journal/<cycles*.jsonl>. Deriving
+    from the journal path (never CWD) keeps the hook correct when cron
+    passes an absolute --journal from its own working directory.
+    """
+    p = Path(journal_path).expanduser().resolve()
+    if p.parent.name != "journal":
+        raise MirrorConfigError(
+            f"{p} is not under a <data_dir>/journal/ layout — "
+            "cannot locate the mirror data dir"
+        )
+    return p.parent.parent
+
+
+def drift_error(report: "MirrorReport") -> Optional[str]:
+    # Unreconciled drift is a durability failure, not a success with a
+    # footnote — the status file must keep the alarm raised.
+    return f"DRIFT: {'; '.join(report.drift)}" if report.drift else None
+
+
+def update_mirror_statuses(
+    journal_dir: Path, *, error: Optional[str], always: Optional[bool] = None
+) -> None:
+    """Status drop for every environment the reconcile covered.
+
+    A reconcile scans all journals under the data dir, so its outcome
+    applies to each environment that has one — not only the triggering
+    cycle's. ``always`` forces the triggering env even before its first
+    journal line exists. Files stay strictly per-environment.
+    """
+    for sandbox in (True, False):
+        name = "cycles.jsonl" if sandbox else "cycles_mainnet.jsonl"
+        if sandbox == always or (journal_dir / name).exists():
+            _write_mirror_status(journal_dir, sandbox, error=error)
+
+
+def _write_mirror_status(
+    journal_dir: Path, sandbox: bool, error: Optional[str]
+) -> None:
+    """Best-effort status drop for /metrics — never raises."""
+    try:
+        path = mirror_status_path(journal_dir, sandbox)
+        prev: dict = {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prev = loaded
+        except (OSError, ValueError):
+            pass  # first run or corrupt file — start fresh
+        now_iso = datetime.now(timezone.utc).isoformat()
+        status = {
+            "last_attempt_at": now_iso,
+            # A failure must not reset the success clock: the age metric
+            # keeps growing until a mirror actually completes.
+            "last_success_at": (
+                now_iso if error is None else prev.get("last_success_at")
+            ),
+            "last_error": error,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Per-writer staging: overlapping attempts are an expected path
+        # (advisory-lock refusal on one side, success on the other), and
+        # a shared .tmp would let them corrupt each other's publish.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(status) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except Exception:
+        logger.warning("db mirror: status file write failed", exc_info=True)
+
+
 def mirror_after_cycle(
-    data_dir: Path = DEFAULT_DATA_DIR,
-    vintage_root: Path = DEFAULT_VINTAGE_ROOT,
+    journal_path: "Path | str",
+    vintage_root: Optional[Path] = None,
+    *,
+    sandbox: bool,
+    state_path: "Path | str | None" = None,
 ) -> None:
     """Best-effort post-cycle mirror — never raises.
 
@@ -668,20 +762,50 @@ def mirror_after_cycle(
     mirror must not change the cycle's exit code. Every failure mode
     lands as a structured warning, and the next cycle's full-scan
     reconcile (or a manual ``trade-lab db-mirror``) self-heals.
+
+    Every path derives from ``journal_path``, never CWD — cron invokes
+    this with an absolute --journal from its own working directory.
+    Success and failure both drop per-environment status files next to
+    the journal (``mirror_status[_mainnet].json``) for each env the
+    reconcile covered; unreconciled DRIFT counts as failure.
     """
+    journal_dir = Path(journal_path).expanduser().resolve().parent
     try:
         config = mirror_config_from_env()
         if config is None:
             logger.info("db mirror disabled (MYSQL_HOST unset)")
             return
+        data_dir = data_dir_for_journal(journal_path)
+        if vintage_root is None:
+            # data/ and paper_trading/ share the repo root when deployed.
+            vintage_root = data_dir.parent / DEFAULT_VINTAGE_ROOT
         conn = connect(config)
         try:
             report = reconcile(conn, data_dir, vintage_root)
         finally:
             conn.close()
         logger.info("db mirror: %s", report.summary())
-    except Exception:
+        state_gap = None
+        if state_path is not None:
+            sp = Path(state_path).expanduser().resolve()
+            # Must match the reconcile collection rule (state/*.json)
+            # exactly — the parent alone passes for orders.state, which
+            # the glob skips. A green status must never cover an
+            # unmirrored duplicate-order suppressor.
+            if (
+                sp.parent != (data_dir / "state").resolve()
+                or sp.suffix != ".json"
+            ):
+                state_gap = f"state file not under mirror root: {sp}"
+        error = "; ".join(
+            e for e in (drift_error(report), state_gap) if e
+        ) or None
+        update_mirror_statuses(journal_dir, error=error, always=sandbox)
+    except Exception as exc:
         logger.warning(
             "db mirror failed (trading unaffected; the next cycle or "
             "`trade-lab db-mirror` reconciles)", exc_info=True,
+        )
+        update_mirror_statuses(
+            journal_dir, error=f"{type(exc).__name__}: {exc}", always=sandbox
         )

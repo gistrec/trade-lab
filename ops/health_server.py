@@ -42,6 +42,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Optional
 
 from trade_lab.monitoring.data_source import (
@@ -249,6 +250,33 @@ def evaluate_daily(
     return HealthResult(True, "ok", detail)
 
 
+def mirror_status_path(journal_path: str) -> Path:
+    """Per-environment db-mirror status file next to the journal.
+
+    Same ``_mainnet`` suffix rule as cycles.jsonl / cycles_mainnet.jsonl.
+    Read as plain JSON — this server never imports execution modules.
+    """
+    p = Path(journal_path)
+    suffix = "_mainnet" if p.stem.endswith("_mainnet") else ""
+    return p.parent / f"mirror_status{suffix}.json"
+
+
+def read_mirror_status(journal_path: str) -> Optional[dict]:
+    """Missing file → None (the mirror may be legitimately disabled).
+
+    Present-but-unreadable → ``{"corrupt": True}`` so /metrics raises
+    ``tradelab_mirror_failed`` instead of silently dropping the series.
+    """
+    path = mirror_status_path(journal_path)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"corrupt": True}
+    return raw if isinstance(raw, dict) else {"corrupt": True}
+
+
 @dataclass
 class Config:
     """Runtime configuration, all overridable by environment."""
@@ -321,8 +349,14 @@ class _HealthHandler(BaseHTTPRequestHandler):
                           {"ok": r.ok, "check": "daily_live",
                            "reason": r.reason, **r.detail})
         elif path == "/metrics":
-            self._respond_raw(200, metrics.render_metrics(reader, now),
-                              metrics.CONTENT_TYPE)
+            self._respond_raw(
+                200,
+                metrics.render_metrics(
+                    reader, now,
+                    mirror_status=read_mirror_status(cfg.journal_path),
+                ),
+                metrics.CONTENT_TYPE,
+            )
         elif path == "/":
             hb = evaluate_heartbeat(reader, now, cfg.heartbeat_max_age_s)
             if cfg.daily_disabled:

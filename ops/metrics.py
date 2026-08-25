@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime
+from typing import Optional
 
 from trade_lab.monitoring.data_source import (
     duration_stats,
@@ -49,8 +50,16 @@ def _esc(s) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def render_metrics(reader, now: datetime) -> str:
-    """Render the journal's current state as Prometheus text exposition."""
+def render_metrics(
+    reader, now: datetime, mirror_status: Optional[dict] = None,
+) -> str:
+    """Render the journal's current state as Prometheus text exposition.
+
+    ``mirror_status`` is the parsed per-environment ``mirror_status*.json``
+    (see ``health_server.read_mirror_status``): None when absent (metrics
+    not emitted — the mirror may be disabled), ``{"corrupt": True}`` when
+    unreadable (renders as ``tradelab_mirror_failed 1``).
+    """
     out: list[str] = []
 
     def fam(name: str, typ: str, help_text: str, samples: list) -> None:
@@ -148,6 +157,24 @@ def render_metrics(reader, now: datetime) -> str:
     fam("tradelab_cumulative_skipped_drift_usd", "gauge",
         "cumulative quote drift skipped across all cycles",
         [(None, reader.cumulative_skipped_drift())])
+
+    # --- db-mirror durability (per-environment mirror_status*.json) ------
+    if isinstance(mirror_status, dict):
+        if mirror_status.get("corrupt"):
+            # Present-but-unreadable status: the write path is broken —
+            # surface failure rather than dropping the series.
+            fam("tradelab_mirror_failed", "gauge",
+                "1 if the last db-mirror attempt failed",
+                [(None, 1)])
+        else:
+            succ = parse_iso(mirror_status.get("last_success_at"))
+            if succ is not None:  # absent if the mirror never succeeded
+                fam("tradelab_mirror_last_success_age_seconds", "gauge",
+                    "seconds since the db mirror last completed a reconcile",
+                    [(None, (now - succ).total_seconds())])
+            fam("tradelab_mirror_failed", "gauge",
+                "1 if the last db-mirror attempt failed",
+                [(None, 1 if mirror_status.get("last_error") else 0)])
 
     eq = equity_series(cycles)
     if eq:
