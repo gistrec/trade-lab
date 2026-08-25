@@ -212,6 +212,16 @@ def test_mirror_metrics_absent_without_status(tmp_path):
     assert "tradelab_mirror_failed" not in m
 
 
+def test_mirror_metrics_corrupt_status_is_failure(tmp_path):
+    """An unreadable status file means the write path is broken — that
+    must raise the failure gauge, not silently drop the series."""
+    reader = JournalReader(tmp_path / "missing.jsonl")
+    m = _parse(metrics.render_metrics(
+        reader, NOW, mirror_status={"corrupt": True}))
+    assert m["tradelab_mirror_failed"] == 1
+    assert "tradelab_mirror_last_success_age_seconds" not in m
+
+
 def test_mirror_metrics_tolerate_corrupt_status(tmp_path):
     reader = JournalReader(tmp_path / "missing.jsonl")
     m = _parse(metrics.render_metrics(

@@ -385,7 +385,8 @@ def test_read_mirror_status_ok(tmp_path):
 def test_read_mirror_status_missing_or_corrupt(tmp_path):
     journal = tmp_path / "cycles.jsonl"
     assert hs.read_mirror_status(str(journal)) is None  # missing file
+    # present-but-unreadable is a failure signal, not silence
     (tmp_path / "mirror_status.json").write_text("{broken json")
-    assert hs.read_mirror_status(str(journal)) is None  # corrupt
+    assert hs.read_mirror_status(str(journal)) == {"corrupt": True}
     (tmp_path / "mirror_status.json").write_text("[1, 2]")
-    assert hs.read_mirror_status(str(journal)) is None  # non-dict
+    assert hs.read_mirror_status(str(journal)) == {"corrupt": True}

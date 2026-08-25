@@ -658,19 +658,57 @@ def _restore_locked(conn, data_dir: Path, force: bool) -> list[str]:
     return written
 
 
-def mirror_status_path(data_dir: Path, sandbox: bool) -> Path:
+def mirror_status_path(journal_dir: Path, sandbox: bool) -> Path:
     # Same suffix rule as cycles.jsonl / cycles_mainnet.jsonl — testnet
     # and mainnet never share this file.
     suffix = "" if sandbox else "_mainnet"
-    return data_dir / "journal" / f"mirror_status{suffix}.json"
+    return journal_dir / f"mirror_status{suffix}.json"
+
+
+def data_dir_for_journal(journal_path: "Path | str") -> Path:
+    """Mirror root for the journal the cycle actually wrote.
+
+    Canonical layout is <data_dir>/journal/<cycles*.jsonl>. Deriving
+    from the journal path (never CWD) keeps the hook correct when cron
+    passes an absolute --journal from its own working directory.
+    """
+    p = Path(journal_path).expanduser().resolve()
+    if p.parent.name != "journal":
+        raise MirrorConfigError(
+            f"{p} is not under a <data_dir>/journal/ layout — "
+            "cannot locate the mirror data dir"
+        )
+    return p.parent.parent
+
+
+def drift_error(report: "MirrorReport") -> Optional[str]:
+    # Unreconciled drift is a durability failure, not a success with a
+    # footnote — the status file must keep the alarm raised.
+    return f"DRIFT: {'; '.join(report.drift)}" if report.drift else None
+
+
+def update_mirror_statuses(
+    journal_dir: Path, *, error: Optional[str], always: Optional[bool] = None
+) -> None:
+    """Status drop for every environment the reconcile covered.
+
+    A reconcile scans all journals under the data dir, so its outcome
+    applies to each environment that has one — not only the triggering
+    cycle's. ``always`` forces the triggering env even before its first
+    journal line exists. Files stay strictly per-environment.
+    """
+    for sandbox in (True, False):
+        name = "cycles.jsonl" if sandbox else "cycles_mainnet.jsonl"
+        if sandbox == always or (journal_dir / name).exists():
+            _write_mirror_status(journal_dir, sandbox, error=error)
 
 
 def _write_mirror_status(
-    data_dir: Path, sandbox: bool, error: Optional[str]
+    journal_dir: Path, sandbox: bool, error: Optional[str]
 ) -> None:
     """Best-effort status drop for /metrics — never raises."""
     try:
-        path = mirror_status_path(data_dir, sandbox)
+        path = mirror_status_path(journal_dir, sandbox)
         prev: dict = {}
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -697,8 +735,8 @@ def _write_mirror_status(
 
 
 def mirror_after_cycle(
-    data_dir: Path = DEFAULT_DATA_DIR,
-    vintage_root: Path = DEFAULT_VINTAGE_ROOT,
+    journal_path: "Path | str",
+    vintage_root: Optional[Path] = None,
     *,
     sandbox: bool,
 ) -> None:
@@ -709,27 +747,36 @@ def mirror_after_cycle(
     lands as a structured warning, and the next cycle's full-scan
     reconcile (or a manual ``trade-lab db-mirror``) self-heals.
 
-    Success and failure both drop a per-environment status file next to
-    the journal (``mirror_status[_mainnet].json``) so /metrics and the
-    netdata alarms can see mirror health; the drop itself is best-effort.
+    Every path derives from ``journal_path``, never CWD — cron invokes
+    this with an absolute --journal from its own working directory.
+    Success and failure both drop per-environment status files next to
+    the journal (``mirror_status[_mainnet].json``) for each env the
+    reconcile covered; unreconciled DRIFT counts as failure.
     """
+    journal_dir = Path(journal_path).expanduser().resolve().parent
     try:
         config = mirror_config_from_env()
         if config is None:
             logger.info("db mirror disabled (MYSQL_HOST unset)")
             return
+        data_dir = data_dir_for_journal(journal_path)
+        if vintage_root is None:
+            # data/ and paper_trading/ share the repo root when deployed.
+            vintage_root = data_dir.parent / DEFAULT_VINTAGE_ROOT
         conn = connect(config)
         try:
             report = reconcile(conn, data_dir, vintage_root)
         finally:
             conn.close()
         logger.info("db mirror: %s", report.summary())
-        _write_mirror_status(data_dir, sandbox, error=None)
+        update_mirror_statuses(
+            journal_dir, error=drift_error(report), always=sandbox
+        )
     except Exception as exc:
         logger.warning(
             "db mirror failed (trading unaffected; the next cycle or "
             "`trade-lab db-mirror` reconciles)", exc_info=True,
         )
-        _write_mirror_status(
-            data_dir, sandbox, error=f"{type(exc).__name__}: {exc}"
+        update_mirror_statuses(
+            journal_dir, error=f"{type(exc).__name__}: {exc}", always=sandbox
         )

@@ -872,7 +872,7 @@ def cmd_paper_dry_run(args: argparse.Namespace) -> None:
         # never touching the cycle's own exit code.
         if journal is not None:
             from .execution.db_mirror import mirror_after_cycle
-            mirror_after_cycle(sandbox=config.sandbox)
+            mirror_after_cycle(args.journal, sandbox=config.sandbox)
     print_dry_run(result, quote=config.quote_currency)
 
 
@@ -1265,7 +1265,7 @@ def cmd_paper_place_orders(args: argparse.Namespace) -> None:
         # every path, including the journaled failure above — mirror it
         # off-host without touching the cycle's own exit code.
         from .execution.db_mirror import mirror_after_cycle
-        mirror_after_cycle(sandbox=config.sandbox)
+        mirror_after_cycle(args.journal, sandbox=config.sandbox)
 
     print(f"Cycle {result.cycle_id[:8]}: outcome={result.outcome}")
     print(f"  reconstructed:    {result.reconstructed_count}")
@@ -1341,7 +1341,8 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
     best-effort post-cycle hook.
     """
     from .execution.db_mirror import (
-        MirrorConfigError, connect, mirror_config_from_env, reconcile,
+        MirrorConfigError, connect, drift_error, mirror_config_from_env,
+        reconcile, update_mirror_statuses,
     )
 
     try:
@@ -1360,6 +1361,11 @@ def cmd_db_mirror(args: argparse.Namespace) -> None:
     finally:
         conn.close()
     print(report.summary())
+    # The manual reconcile covers the same files as the hook — keep the
+    # /metrics status in step with it (drift stays a failure there too).
+    update_mirror_statuses(
+        Path(args.data_dir) / "journal", error=drift_error(report)
+    )
     if report.drift:
         raise SystemExit(2)
 

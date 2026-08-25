@@ -262,14 +262,19 @@ def mirror_status_path(journal_path: str) -> Path:
 
 
 def read_mirror_status(journal_path: str) -> Optional[dict]:
-    """Missing/corrupt status file → None (mirror metrics stay absent)."""
-    try:
-        raw = json.loads(
-            mirror_status_path(journal_path).read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
+    """Missing file → None (the mirror may be legitimately disabled).
+
+    Present-but-unreadable → ``{"corrupt": True}`` so /metrics raises
+    ``tradelab_mirror_failed`` instead of silently dropping the series.
+    """
+    path = mirror_status_path(journal_path)
+    if not path.exists():
         return None
-    return raw if isinstance(raw, dict) else None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"corrupt": True}
+    return raw if isinstance(raw, dict) else {"corrupt": True}
 
 
 @dataclass
