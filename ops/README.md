@@ -133,7 +133,8 @@ scraper turns every series into a time-series chart:
 | `tradelab_last_live_cycle_age_seconds` / `_timestamp_seconds` | gauge | freshness of the most recent live order cycle |
 | `tradelab_cycles_total{outcome=...}` | counter | cycles by outcome over the whole journal |
 | `tradelab_cycle_duration_ms{quantile="0.5"\|"0.95"}` / `_max` | gauge | recent cycle duration (last 200) |
-| `tradelab_open_order_incidents` | gauge | executed orders not in a resolved terminal state |
+| `tradelab_last_cycle_duration_ms` | gauge | duration of the newest cycle only (latency alarm input) |
+| `tradelab_open_order_incidents` | gauge | unresolved executed orders after cross-cycle resolution by `client_order_id` |
 | `tradelab_cumulative_skipped_drift_usd` | gauge | cumulative quote drift skipped |
 | `tradelab_equity_usd` | gauge | latest paper equity from a successful cycle |
 | `tradelab_last_signal_ladder_value` / `tradelab_sma_gate_open` | gauge | latest signal state |
@@ -152,9 +153,10 @@ rather than failing the scrape.
 
 **Value-based alarms** (`ops/netdata/health.d/trade_lab_metrics.conf`, →
 `botcrit`) complement the httpcheck dead-man's-switch, per environment:
-`*_open_orders` (any executed order stuck in a non-terminal state — the
-`lost_track == 0` SLO), `*_cycle_latency` (max cycle duration > 60s/120s —
-slow exchange round-trips), and `*_journal_read_error` (journal unreadable)
+`*_open_orders` (any executed order still unresolved after cross-cycle
+resolution — the `lost_track == 0` SLO), `*_cycle_latency` (latest cycle
+duration > 60s/120s — slow exchange round-trips; clears on the next fast
+cycle), and `*_journal_read_error` (journal unreadable)
 exist for both jobs (`trade_lab_*` on `prometheus.trade_lab.<metric>`
 contexts, `trade_lab_mainnet_*` on `prometheus.trade_lab_mainnet.<metric>`).
 Mainnet additionally gets two warn alarms on the real-money book:
