@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Iterable, Mapping, Optional
 
 import pandas as pd
 
@@ -42,6 +42,54 @@ from .coinmetrics import CoinMetricsError, fetch_asset_metrics_cached
 # ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+
+
+class PITMcapGapError(ValueError):
+    """Tradable candidate with no observed market cap on a strict date.
+
+    ``gaps`` is a list of ``(symbol, timestamp)``; ``symbol=None`` means
+    the panel has no row at all for that date.
+    """
+
+    def __init__(self, gaps: list[tuple[Optional[str], pd.Timestamp]]) -> None:
+        self.gaps = list(gaps)
+        detail = "; ".join(
+            f"{sym if sym is not None else '<no panel row>'} @ {ts.date()}"
+            for sym, ts in self.gaps
+        )
+        super().__init__(
+            "NaN market cap for tradable candidate(s) on strict date(s) — "
+            "refusing to rank a silently shrunken universe: " + detail
+        )
+
+
+def _panel_ts(date, index: pd.DatetimeIndex) -> pd.Timestamp:
+    ts = pd.Timestamp(date)
+    if ts.tzinfo is None and index.tz is not None:
+        ts = ts.tz_localize(index.tz)
+    return ts
+
+
+def _assert_mcap_observed(
+    market_caps: pd.DataFrame,
+    tradable: pd.DataFrame,
+    strict_dates: Iterable,
+    absent_gaps: Iterable[tuple[Optional[str], pd.Timestamp]] = (),
+) -> None:
+    """Owner-sanctioned fail-loud (issue #14): a NaN mcap on a rebalance
+    date would silently change basket composition via ``na_option="bottom"``."""
+    gaps: list[tuple[Optional[str], pd.Timestamp]] = list(absent_gaps)
+    for date in strict_dates:
+        ts = _panel_ts(date, market_caps.index)
+        if ts not in market_caps.index:
+            gaps.append((None, ts))
+            continue
+        row_tradable = tradable.loc[ts].astype(bool)
+        row_mc = market_caps.loc[ts]
+        for symbol in market_caps.columns[row_tradable & row_mc.isna()]:
+            gaps.append((symbol, ts))
+    if gaps:
+        raise PITMcapGapError(gaps)
 
 
 
@@ -120,15 +168,24 @@ def build_pit_universe(
     exclude_stablecoins: bool = True,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    strict_mcap_dates: Optional[Iterable] = None,
 ) -> pd.DataFrame:
     """Compute the eligibility mask.
 
     ``market_caps`` and ``volumes`` come from :func:`load_panel`. The
     function aligns them on a common index and returns one boolean
     column per coin.
+
+    ``strict_mcap_dates`` (typically the rebalance schedule): on these
+    dates a tradable candidate with NaN market cap raises
+    :class:`PITMcapGapError` instead of silently dropping out of the
+    ranking (issue #14).
     """
     pool = candidates or COIN_REGISTRY
+    strict_dates = list(strict_mcap_dates) if strict_mcap_dates is not None else []
     if market_caps.empty:
+        if strict_dates:
+            raise PITMcapGapError([(None, pd.Timestamp(d)) for d in strict_dates])
         return pd.DataFrame()
 
     # Restrict to the panel coins.
@@ -156,6 +213,22 @@ def build_pit_universe(
             base = pool[symbol].base
             if base in stables:
                 tradable[symbol] = False
+
+    if strict_dates:
+        # A pool candidate with no panel column at all is an all-NaN column
+        # in disguise: the column restriction above would drop it before
+        # validation, silently shrinking the universe.
+        stables = stablecoins() if exclude_stablecoins else set()
+        absent_gaps: list[tuple[Optional[str], pd.Timestamp]] = []
+        for symbol in sorted(set(pool) - set(columns)):
+            meta = pool[symbol]
+            if meta.base in stables:
+                continue
+            for date in strict_dates:
+                ts = _panel_ts(date, market_caps.index)
+                if tradable_at(ts.strftime("%Y-%m-%d"), meta):
+                    absent_gaps.append((symbol, ts))
+        _assert_mcap_observed(market_caps, tradable, strict_dates, absent_gaps)
 
     # Zero-out market cap / volume for non-tradable cells so the rank
     # can never pick them. This is the *correctness* step — we must
