@@ -89,12 +89,14 @@ def test_stub_end_to_end_report_structure(tmp_path):
         "2020-01-01", "2020-02-01", "2020-03-01",
     ]
     r1, r2, r3 = js["rebalances"]
-    assert r1["members"] == ["A", "B"] and r1["deviates_from_static"] is False
+    assert r1["members"] == ["A", "B"] and r1["deviates_from_control"] is False
+    assert r1["control_members"] == ["A", "B"]
     assert r2["members"] == ["A", "B"] and r2["removed"] == []
     assert r3["members"] == ["A", "C"]
     assert r3["added"] == ["C"] and r3["removed"] == ["B"]
-    assert r3["missing_vs_static"] == ["B"] and r3["extra_vs_static"] == ["C"]
-    assert r3["deviates_from_static"] is True
+    assert r3["control_members"] == ["A", "B"]
+    assert r3["missing_vs_control"] == ["B"] and r3["extra_vs_control"] == ["C"]
+    assert r3["deviates_from_control"] is True
 
     # Both runs carry the frozen walk-forward summary structure even when
     # the stub window is too short for a single 24m+6m fold.
@@ -387,10 +389,37 @@ def test_static_control_rebalances_on_mid_month_listing(tmp_path):
     assert "off-schedule rebalances" in md and "2020-01-15" in md
 
 
+def test_late_listing_is_not_reported_as_a_composition_deviation(tmp_path):
+    """B lists mid-month, so NEITHER arm holds it on 2020-01-01. Scoring the
+    PIT basket against the frozen names would flag "≠ −B" on a bar where the
+    control holds exactly the same member — an entry-timing artefact, not a
+    composition delta."""
+    prices, market_caps, volumes, pool = _late_listing_panel()
+    volumes["C"] = np.nan  # keep C out of the ranking: PIT == control pre-listing
+    payload = diag.run_diagnostic(
+        prices, market_caps, volumes, pool,
+        out_dir=tmp_path, static_basket=("A", "B"),
+    )
+    pit = {r["date"]: r for r in payload["rebalances"]}
+    ctl = {r["date"]: r for r in payload["control_rebalances"]}
+    assert pit["2020-01-01"]["members"] == ctl["2020-01-01"]["members"] == ["A"]
+    # The frozen names include B; the control does not hold it yet — scoring
+    # against the frozen set is exactly what produced the phantom "−B".
+    assert payload["static_basket"] == ["A", "B"]
+    assert pit["2020-01-01"]["control_members"] == ["A"]
+    assert pit["2020-01-01"]["missing_vs_control"] == []
+    assert pit["2020-01-01"]["deviates_from_control"] is False
+    # The listing bar itself is shared too — still no composition delta.
+    assert pit["2020-01-15"]["members"] == ctl["2020-01-15"]["members"] == ["A", "B"]
+    assert pit["2020-01-15"]["deviates_from_control"] is False
+    md = (tmp_path / "pit_survivorship_diagnostic.md").read_text()
+    assert "**≠**" not in md
+
+
 def test_missing_coverage_requires_explicit_acknowledgement(tmp_path):
     """Empty cache + fetch=False: every registry coin lacks coverage and
     the loader must abort instead of silently shrinking the pool."""
-    with pytest.raises(SystemExit, match="no Coin Metrics coverage"):
+    with pytest.raises(SystemExit, match="no usable Coin Metrics series at all"):
         diag.load_diagnostic_panel(
             tmp_path, allow_missing=[], static_basket=("BTC",), fetch=False
         )
@@ -412,12 +441,21 @@ def test_unknown_allow_missing_symbol_rejected(tmp_path):
         )
 
 
-def _write_cm_cache(cache_dir: Path, cm_id: str, *, empty: bool = False) -> None:
+_CM_COLUMNS = ("price", "market_cap", "volume_usd")
+
+
+def _write_cm_cache(
+    cache_dir: Path,
+    cm_id: str,
+    *,
+    empty: bool = False,
+    columns: tuple[str, ...] = _CM_COLUMNS,
+) -> None:
     idx = pd.date_range("2020-01-01", periods=5, freq="1D", tz="UTC", name="time")
     val = np.nan if empty else 1.0
-    pd.DataFrame(
-        {"price": val, "market_cap": val, "volume_usd": val}, index=idx
-    ).to_parquet(cache_dir / f"coinmetrics_{cm_id}.parquet")
+    pd.DataFrame({col: val for col in columns}, index=idx).to_parquet(
+        cache_dir / f"coinmetrics_{cm_id}.parquet"
+    )
 
 
 def test_allow_missing_with_usable_coverage_fails_loud(tmp_path):
@@ -442,5 +480,36 @@ def test_allow_missing_exclusion_is_verified_against_the_panel(tmp_path):
     )
     assert set(excluded) == {"WAVES", "OMG"}
     assert all("verified" in reason for reason in excluded.values())
+    # The recorded reason distinguishes the two waivable shapes.
+    assert "no cached Coin Metrics file" in excluded["WAVES"]
+    assert "all empty" in excluded["OMG"]
     assert "WAVES" not in pool and "OMG" not in pool
     assert "BTC" in pool and "BTC" in market_caps.columns
+
+
+def test_missing_mcap_alone_is_not_waivable(tmp_path):
+    """A coin with a full price+volume series but no market_cap column is a
+    DATA gap, not an absent asset: --allow-missing must refuse it (it would
+    otherwise drop a live top-N candidate under a false "no coverage"
+    reason) and the PITMcapGapError must stay reachable."""
+    for sym, meta in COIN_REGISTRY.items():
+        _write_cm_cache(
+            tmp_path, meta.cm_id,
+            columns=("price", "volume_usd") if sym == "LTC" else _CM_COLUMNS,
+        )
+    with pytest.raises(SystemExit, match=r"LTC.*market_cap 0 bars"):
+        diag.load_diagnostic_panel(
+            tmp_path, allow_missing=["LTC"], static_basket=("BTC",), fetch=False
+        )
+
+    # Without the flag it is NOT quietly dropped either — it stays in the
+    # pool and the strict mcap check aborts the run.
+    prices, market_caps, volumes, pool, excluded = diag.load_diagnostic_panel(
+        tmp_path, allow_missing=[], static_basket=("BTC",), fetch=False
+    )
+    assert excluded == {} and "LTC" in pool
+    assert market_caps["LTC"].isna().all()
+    assert prices["LTC"].notna().any() and volumes["LTC"].notna().any()
+    with pytest.raises(PITMcapGapError, match="LTC @ 2020-01-01"):
+        diag.run_diagnostic(prices, market_caps, volumes, pool, out_dir=tmp_path)
+    assert not (tmp_path / "pit_survivorship_diagnostic.md").exists()

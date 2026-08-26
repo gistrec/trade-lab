@@ -35,16 +35,22 @@ community API).
 
 Known first failure modes — deliberate, fail loud, never shrink silently:
 
-* A registry coin with no Coin Metrics coverage at all aborts the run;
-  each such gap must be acknowledged explicitly with ``--allow-missing``
-  and is recorded in the report as a first-class exclusion. The flag is
-  verified against the loaded panel, never trusted: naming an asset
-  whose coverage has since been repaired is itself a hard error, so a
-  stale flag cannot keep it out under a false reason.
+* A registry coin with no usable Coin Metrics series AT ALL — no cached
+  file, or price *and* market cap *and* volume entirely empty — aborts
+  the run; each such gap must be acknowledged explicitly with
+  ``--allow-missing`` and is recorded in the report as a first-class
+  exclusion naming which of the two cases it is. The flag is verified
+  against the loaded panel, never trusted, and covers nothing else:
+  naming an asset that has any usable series (coverage since repaired,
+  or a partial panel) is itself a hard error, so a stale or overreaching
+  flag cannot keep an asset out under a false reason.
 * A tradable candidate with NaN market cap on any rebalance date aborts
   via ``PITMcapGapError`` (e.g. BNB's community-tier cap gap,
-  ``findings/validation_universe_bias.md``). Static-basket members cannot
-  be excluded — fix the data instead.
+  ``findings/validation_universe_bias.md``) — including a coin whose
+  ``market_cap`` column is absent from the cached parquet entirely while
+  its price/volume series are fine. That is a data gap, not an absent
+  asset: ``--allow-missing`` deliberately cannot waive it, and
+  static-basket members cannot be excluded either. Fix the data instead.
 
 The DEPLOYED strategy's basket does not change based on this
 diagnostic's outcome without a new owner decision; the results feed a
@@ -150,9 +156,12 @@ def merge_rebalance_bars(
     """Adopted rebalance bars: every scheduled bar, plus a forced bar only
     when the availability change it carries actually moves the basket.
 
-    The deployed builder rebalances on the listing bar itself; rank churn
-    that merely shares that bar is not a trigger, so an off-schedule bar
-    counts only if the membership delta touches a symbol that flipped.
+    The deployed builder rebalances on the listing bar itself, so an
+    off-schedule bar is a *trigger* only if the membership delta touches a
+    symbol that flipped availability — rank churn alone never opens a bar.
+    Once such a bar IS adopted the whole new basket is written, exactly as
+    the deployed builder does: any rank churn sharing that bar rides along
+    into the adopted membership. This mirrors deployment, not filters it.
     """
     scheduled_set = set(scheduled)
     adopted: dict[pd.Timestamp, tuple[str, ...]] = {}
@@ -418,9 +427,10 @@ def load_diagnostic_panel(
 
     ``allow_missing`` is checked against the loaded panel, never trusted:
     every acknowledged asset is loaded like any other and only dropped if
-    it genuinely has no usable series. A stale flag naming an asset whose
-    coverage has since been repaired is a hard error — otherwise it would
-    keep changing the diagnostic's result under a false reason.
+    the panel confirms it has no usable series at all. The flag names an
+    ABSENT ASSET, never a data gap — an asset that has any usable series
+    is a hard error, whether its coverage was since repaired or its only
+    hole is the market cap (that one must reach ``PITMcapGapError``).
     """
     pool = dict(COIN_REGISTRY)
     for sym in allow_missing:
@@ -433,32 +443,58 @@ def load_diagnostic_panel(
             )
 
     prices, market_caps, volumes = load_panel(pool, cache_dir=cache_dir, fetch=fetch)
-    # An all-NaN column is "no coverage" wearing a column: load_panel
-    # synthesizes NA columns for metrics the parquet lacks.
-    covered = {
-        col for col in market_caps.columns
-        if col in pool and market_caps[col].notna().any()
+    panels = {"price": prices, "market_cap": market_caps, "volume": volumes}
+    # Two — and only two — waivable shapes: load_panel never emitted a
+    # column (no cached file), or it emitted columns that are empty in
+    # every metric. A coin with a usable price/volume series and an empty
+    # market_cap is a DATA gap: waiving it would silently drop a live
+    # top-N candidate under a false "no coverage" reason, so it is left in
+    # the pool for build_pit_universe to abort on.
+    loaded = {col for col in market_caps.columns if col in pool}
+    absent = set(pool) - loaded
+    blank = {
+        col for col in loaded
+        if not any(panel[col].notna().any() for panel in panels.values())
     }
-    repaired = sorted(set(allow_missing) & covered)
-    if repaired:
-        raise SystemExit(
-            f"--allow-missing {', '.join(repaired)}: usable Coin Metrics "
-            "coverage IS present in the loaded panel — the flag is stale and "
-            "would drop a usable asset under a false reason; remove it"
+    waivable = absent | blank
+
+    overreaching = sorted(set(allow_missing) - waivable)
+    if overreaching:
+        detail = "; ".join(
+            f"{sym} has "
+            + ", ".join(
+                f"{name} {int(panel[sym].notna().sum())} bars"
+                for name, panel in panels.items()
+            )
+            for sym in overreaching
         )
-    missing = sorted(set(pool) - covered)
-    unacknowledged = [sym for sym in missing if sym not in set(allow_missing)]
+        raise SystemExit(
+            f"--allow-missing {', '.join(overreaching)}: usable Coin Metrics "
+            f"coverage IS present in the loaded panel ({detail}). The flag "
+            "only covers an asset with no usable series at all; an empty "
+            "market_cap next to a usable price/volume series is a data gap "
+            "that must abort via PITMcapGapError, not be waived. Fix the "
+            "cache or drop the flag"
+        )
+    unacknowledged = sorted(waivable - set(allow_missing))
     if unacknowledged:
         raise SystemExit(
-            f"no Coin Metrics coverage for {unacknowledged} — acknowledge each "
-            "gap explicitly with --allow-missing SYMBOL (recorded in the "
-            "report) or fix the cache; the universe is never shrunk silently"
+            f"no usable Coin Metrics series at all for {unacknowledged} — "
+            "acknowledge each gap explicitly with --allow-missing SYMBOL "
+            "(recorded in the report) or fix the cache; the universe is "
+            "never shrunk silently"
         )
     excluded: dict[str, str] = {}
-    for sym in missing:
+    for sym in sorted(waivable):
         excluded[sym] = (
-            "verified against the loaded panel: no usable Coin Metrics "
-            "series (operator-acknowledged via --allow-missing)"
+            "verified against the loaded panel: "
+            + (
+                "no cached Coin Metrics file — no price, market cap or "
+                "volume series at all"
+                if sym in absent
+                else "price, market cap and volume series are all empty"
+            )
+            + " (operator-acknowledged via --allow-missing)"
         )
         del pool[sym]
     return prices, market_caps, volumes, pool, excluded
@@ -601,11 +637,25 @@ def _build_payload(
     start: str | None,
     end: str | None,
 ) -> dict:
-    static_set = set(static_basket)
     scheduled_set = set(scheduled)
+    # Score each PIT rebalance against the CONTROL basket in effect on that
+    # bar, not against the frozen seven: the control enters names on the
+    # deployed n_active rule, so a name it does not hold yet is an
+    # entry-timing artefact, not a composition delta.
+    ctl_bars = sorted(static_baskets)
     rebalances = []
     prev: set[str] = set()
+    ctl_i = -1
+    control: set[str] = set()
     for ts in sorted(pit_baskets):
+        while ctl_i + 1 < len(ctl_bars) and ctl_bars[ctl_i + 1] <= ts:
+            ctl_i += 1
+            control = set(static_baskets[ctl_bars[ctl_i]])
+        if ctl_i < 0:
+            raise SystemExit(
+                f"no control basket in effect at {ts.date()} — the two arms "
+                "do not share the first rebalance bar"
+            )
         members = set(pit_baskets[ts])
         rebalances.append(
             {
@@ -615,9 +665,10 @@ def _build_payload(
                 "n_members": len(members),
                 "added": sorted(members - prev),
                 "removed": sorted(prev - members),
-                "missing_vs_static": sorted(static_set - members),
-                "extra_vs_static": sorted(members - static_set),
-                "deviates_from_static": members != static_set,
+                "control_members": sorted(control),
+                "missing_vs_control": sorted(control - members),
+                "extra_vs_control": sorted(members - control),
+                "deviates_from_control": members != control,
             }
         )
         prev = members
@@ -764,24 +815,28 @@ def _write_report(out_dir: Path, payload: dict) -> None:
     lines.append("## Basket composition per rebalance")
     lines.append("")
     lines.append(
-        f"Static reference basket: {', '.join(payload['static_basket'])}. "
-        "Rows marked ≠ deviate from it."
+        f"Frozen deploy basket: {', '.join(payload['static_basket'])}. Each "
+        "row is scored against the CONTROL basket in effect on that bar (the "
+        "same names under the deployed entry rule), so ≠ marks a composition "
+        "delta and never an entry-timing one."
     )
     lines.append("")
     lines.append(
-        "| Rebalance | Trigger | N | Members | Added | Removed | vs static |"
+        "| Rebalance | Trigger | N | Members | Added | Removed | Control "
+        "| vs control |"
     )
-    lines.append("|---|---|---:|---|---|---|---|")
+    lines.append("|---|---|---:|---|---|---|---|---|")
     for r in payload["rebalances"]:
         dev = ""
-        if r["deviates_from_static"]:
-            miss = "−" + ",".join(r["missing_vs_static"]) if r["missing_vs_static"] else ""
-            extra = "+" + ",".join(r["extra_vs_static"]) if r["extra_vs_static"] else ""
+        if r["deviates_from_control"]:
+            miss = "−" + ",".join(r["missing_vs_control"]) if r["missing_vs_control"] else ""
+            extra = "+" + ",".join(r["extra_vs_control"]) if r["extra_vs_control"] else ""
             dev = f"**≠** {extra} {miss}".strip()
         lines.append(
             f"| {r['date']} | {r['trigger']} | {r['n_members']} "
             f"| {', '.join(r['members'])} "
             f"| {', '.join(r['added']) or '—'} | {', '.join(r['removed']) or '—'} "
+            f"| {', '.join(r['control_members'])} "
             f"| {dev or '='} |"
         )
     lines.append("")
@@ -830,9 +885,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--allow-missing", action="append", default=[], metavar="SYMBOL",
-        help="Explicitly acknowledge a registry coin with no Coin Metrics "
-        "coverage; recorded in the report. The coin is still loaded and the "
-        "gap re-verified — if coverage exists the run aborts. Repeatable.",
+        help="Explicitly acknowledge a registry coin with NO usable Coin "
+        "Metrics series at all (no cached file, or price/market cap/volume "
+        "all empty); recorded in the report. The coin is still loaded and "
+        "the gap re-verified — if any series exists the run aborts, "
+        "including the market-cap-only gap. Repeatable.",
     )
     args = parser.parse_args(argv)
 
