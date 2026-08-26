@@ -383,11 +383,11 @@ def test_zero_free_quote_records_true_gap_as_funding_cap():
     assert total_funding_cap_quote(plan) == pytest.approx(70_000.0, rel=1e-6)
 
 
-def test_funded_symbol_is_excluded_from_cap_spend_and_scaling():
-    """A buy the exchange already holds quote against (same coid still
-    open) is funded outside quote_free and gets resolved, not resized —
-    it must neither consume the cap nor be scaled. Only the buy the free
-    quote actually has to fund is shaved."""
+def test_no_spend_symbol_is_excluded_from_cap_spend_and_scaling():
+    """A buy that draws nothing from quote_free (caller's call: the same
+    coid is still open on the exchange, or already terminal so nothing
+    gets placed) must neither consume the cap nor be scaled. Only the buy
+    the free quote actually has to fund is shaved."""
     orders = [
         OrderIntent(symbol="BTC/USDT", side="buy", base_amount=0.1,
                     notional_quote=5_000.0, price_used=50_000.0,
@@ -398,7 +398,7 @@ def test_funded_symbol_is_excluded_from_cap_spend_and_scaling():
     ]
     capped, skips = apply_reserve_cap(
         orders, quote_free=3_000.0, constraints={}, fee_rate=0.001,
-        funded_symbols={"BTC/USDT"},
+        no_spend_symbols={"BTC/USDT"},
     )
     by_sym = {o.symbol: o for o in capped}
     assert by_sym["BTC/USDT"] == orders[0]

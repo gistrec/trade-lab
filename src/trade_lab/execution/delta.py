@@ -205,7 +205,7 @@ def apply_reserve_cap(
     quote_free: float,
     constraints: Mapping[str, MarketConstraints],
     fee_rate: float,
-    funded_symbols: Collection[str] = (),
+    no_spend_symbols: Collection[str] = (),
 ) -> tuple[list[OrderIntent], list[SkippedDelta]]:
     """Cap total buy spend at ``RESERVE_BPS`` under the available quote.
 
@@ -221,13 +221,12 @@ def apply_reserve_cap(
     cancels; above 10 bp the plan is underfunded even at unchanged
     prices).
 
-    ``funded_symbols`` names buys whose quote the exchange already holds
-    — a same-clientOrderId order still open from an earlier run of the
-    same day. ``quote_free`` excludes that locked quote and the caller
-    resolves the existing order instead of sending a scaled replacement,
-    so scaling such a buy only deletes the reduction while shaving the
-    buys that really do need funding. They pass through untouched and
-    stay out of the spend total.
+    ``no_spend_symbols`` names buys that draw nothing from
+    ``quote_free`` this cycle — the caller establishes which, this
+    module stays out of clientOrderId/state semantics. Scaling one only
+    deletes the reduction (the caller sends it unchanged, or not at all)
+    while shaving the buys that really do need funding, so they pass
+    through untouched and stay out of the spend total.
 
     Every capped-away buy portion comes back as a ``funding_cap``
     :class:`SkippedDelta` carrying the UNSCALED gap — the cap is a real
@@ -235,8 +234,8 @@ def apply_reserve_cap(
     into zero-valued lot-step skips. It is reported apart from the sub-min
     drift metric (:func:`total_funding_cap_quote`).
     """
-    funded = frozenset(funded_symbols)
-    scalable = [o for o in orders if o.side == "buy" and o.symbol not in funded]
+    no_spend = frozenset(no_spend_symbols)
+    scalable = [o for o in orders if o.side == "buy" and o.symbol not in no_spend]
     buy_spend = sum(o.notional_quote for o in scalable)
     if buy_spend <= 0.0:
         return list(orders), []
@@ -282,7 +281,7 @@ def apply_reserve_cap(
     capped: list[OrderIntent] = []
     skips: list[SkippedDelta] = []
     for o in orders:
-        if o.side != "buy" or o.symbol in funded:
+        if o.side != "buy" or o.symbol in no_spend:
             capped.append(o)
             continue
         a = amounts[o.symbol]
