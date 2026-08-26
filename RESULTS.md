@@ -10,7 +10,7 @@ otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 
 A strategy that reaches PAPER status has cleared **one** gate, not all of them. Specifically:
 
-* **DSR > 0.5 at N=500, cluster-stable** means: after correcting for the project's effective multiple-testing budget (500 trials), the strategy's Sharpe is unlikely to be pure selection noise — under the minimal 1/sqrt(T) deflator convention; the conservative empirical-sd convention gives DSR ≈ 0 (computed 0.037; see "Pinned constants" and `findings/dsr_convention_2026_08.md`). **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact.**
+* **DSR > 0.5 at N=500, cluster-stable** means: after correcting for the project's effective multiple-testing budget (500 trials), the strategy's Sharpe is unlikely to be pure selection noise — under the minimal 1/sqrt(T) deflator convention; the conservative convention (pinned assumption `sd_trial_sharpes ≈ 0.7`, not a measured trial panel) gives DSR ≈ 0 (computed 0.037; see "Pinned constants" and `findings/dsr_convention_2026_08.md`). **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact.**
 * The **next honest gate is paper trading itself** — ≥ 4–8 clean weeks on the target venue with the actual order-placement pipeline. Sources of failure that DSR cannot rule out and that only paper trading can catch: signal stability under live data feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw.
 * Real-money deployment requires the paper-trading gate to be passed first, AND (per CLAUDE.md hard rule "Live orders only on testnet") a manual mainnet-migration code-path change. Neither has happened.
 
@@ -50,7 +50,7 @@ Status legend:
 * **Universe:** equal-weight market-basket of 7 majors (BTC, ETH, BNB, SOL, ADA, XRP, DOGE). Monthly rebalance + on-`N_active`-change rebalance.
 * **Signal:** TSMOM ladder `{0, 0.5, 1.0}` = mean of binary `sign(28d return), sign(60d return)`. SMA(200) gate zeroes the ladder when basket close < SMA.
 * **Concatenated OOS Sharpe = +1.48** on the market-basket (venue-verified window: **+0.72**). Earlier revisions of this file quoted +1.81; the finding's own table says +1.48 — the finding is authoritative.
-* **DSR, two-layer convention (primary statement).** Under the project's own conservative deflator (empirical `sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366` per-period; `deflated_sharpe_ratio` compares per-period quantities), DSR = **0.037** at Sharpe +1.48 (T = 2339) and **0.002** on the verified window (+0.72, T = 1588). **The deploy case rests on parameter stability stated convention-free — all 7 neighbor configs land in the raw concat-OOS Sharpe band +1.37…+1.49 (one shared return stream, correlation ≥ 0.97; no lone peak) — plus the forward test**, not on a DSR headline. The "median DSR 0.736, 7/7 > 0.5" form of that stability holds only under the secondary 1/sqrt(T) convention.
+* **DSR, two-layer convention (primary statement).** Under the project's own conservative deflator (pinned conservative assumption `sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366` per-period; an a-priori pool dispersion, no committed trial panel; `deflated_sharpe_ratio` compares per-period quantities), DSR = **0.037** on the concat-OOS series (Sharpe +1.48, T = 2339) and **0.0016 ≈ 0.002** on the venue-verified window — the latter recomputed from the frozen-config backtest of `findings/validation_multiexchange.md` (+0.72, 2022-01-21 → 2026-05-27, 1588 bars), not from a slice of the stitched series. **The deploy case rests on parameter stability stated convention-free — all 7 neighbor configs land in the raw concat-OOS Sharpe band +1.37…+1.49 (one shared return stream, correlation ≥ 0.97; no lone peak) — plus the forward test**, not on a DSR headline. The "median DSR 0.736, 7/7 > 0.5" form of that stability holds only under the secondary 1/sqrt(T) convention.
 * **Secondary figure:** DSR = 0.770 at N=500 under the minimal 1/sqrt(T) deflator (estimation noise only, no trial-pool dispersion); neighborhood median 0.736 under the same convention. Both figures are reproducible from the same code; see `findings/dsr_convention_2026_08.md` for the convention decision.
 * **Survivorship caveat:** the basket is seven majors known ex post — the composition axis (which 7 coins) is untested pending the PIT diagnostic run, and the project's own cross-sectional-momentum measurement showed Sharpe 1.40 → 0.93 when moving to a PIT universe (deep review 2026-08-24).
 
@@ -144,7 +144,7 @@ Implemented in `backtest/cross_sectional.py` (`run_cross_sectional_momentum`). U
 ## Pinned constants
 
 * `PROJECT_NUM_TRIALS = 500` (CLAUDE.md hard rule)
-* Conservative pooled `sd_trial_sharpes ≈ 0.7`; `E[max Sharpe over 500 trials] ≈ 2.14` (both annualized; `deflated_sharpe_ratio` works per-period, so de-annualize by `sqrt(365)` before passing — see `findings/dsr_convention_2026_08.md`)
+* Conservative pooled `sd_trial_sharpes ≈ 0.7` — a **pinned a-priori assumption** about cross-project trial dispersion, never estimated from a committed trial-Sharpe panel; `E[max Sharpe over 500 trials] ≈ 2.14` (both annualized; `deflated_sharpe_ratio` works per-period, so de-annualize by `sqrt(365)` before passing — see `findings/dsr_convention_2026_08.md`)
 * Single-config DSR threshold for deployment: 0.5 cluster-median.
 
 ## DSR reporting convention (owner decision 2026-08-25)
@@ -153,11 +153,13 @@ Two deflator conventions coexist; the two-layer statement is primary
 everywhere alive, the 1/sqrt(T) figure is secondary and must be
 labeled as such:
 
-* **Primary (conservative):** empirical `sd_trial_sharpes ≈ 0.7`
-  annualized, de-annualized to `0.7/sqrt(365) ≈ 0.0366` per-period
+* **Primary (conservative):** pinned conservative assumption
+  `sd_trial_sharpes ≈ 0.7` annualized (not an empirical estimate),
+  de-annualized to `0.7/sqrt(365) ≈ 0.0366` per-period
   for `deflated_sharpe_ratio` → DSR ≈ 0 for the deployed config
-  (computed 0.037 at concat-OOS Sharpe +1.48, T = 2339; 0.002 on
-  the verified window at +0.72, T = 1588). The deploy case rests on
+  (computed 0.037 on the concat-OOS series at Sharpe +1.48,
+  T = 2339; 0.0016 on the venue-verified frozen-config backtest at
+  +0.72, 1588 bars). The deploy case rests on
   parameter stability stated convention-free (7 neighbor configs in
   the raw concat-OOS Sharpe band +1.37…+1.49, one shared return
   stream — no lone peak) plus the forward test.
@@ -168,7 +170,11 @@ labeled as such:
   dispersion.
 
 Both stay reproducible from `walk_forward_v2.py` (computation
-unchanged). Full rationale: `findings/dsr_convention_2026_08.md`.
+unchanged) on the concat-OOS series; the venue-verified figure is
+reproduced from the frozen-config backtest path of
+`scripts/validation_test1_multiexchange.py` instead — the two are
+different statistical objects and are never mixed. Full rationale:
+`findings/dsr_convention_2026_08.md`.
 
 Last updated: 2026-08-25 (DSR two-layer convention + survivorship
 caveat; strategy table content otherwise as of 2026-05-29).

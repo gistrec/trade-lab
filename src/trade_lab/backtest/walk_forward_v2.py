@@ -470,10 +470,11 @@ def aggregate_walk_forward(
     # 1/sqrt(T) is the MINIMAL deflator: the null sampling std of a
     # single per-period Sharpe estimate. It corrects for estimation
     # noise only, not for the dispersion of the actual trial pool —
-    # the project's empirical trial sd ≈ 0.7 annualized (the DSR
-    # call below compares per-period quantities: pass 0.7/sqrt(365),
-    # never the raw 0.7) yields DSR ≈ 0.04 for the deployed config,
-    # and RESULTS.md cites that as the primary
+    # the project's pinned conservative assumption for that pool is
+    # sd ≈ 0.7 annualized (a-priori, no trial panel; the DSR call
+    # below compares per-period quantities: pass 0.7/sqrt(365),
+    # never the raw 0.7) and yields DSR ≈ 0.04 for the deployed
+    # config, which RESULTS.md cites as the primary
     # (conservative) layer with this figure as secondary (see
     # findings/dsr_convention_2026_08.md). Keep the computation as-is
     # so both numbers stay reproducible. Do not swap in the std of
