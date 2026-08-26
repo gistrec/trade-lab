@@ -557,12 +557,20 @@ implement `generate_signals(candles)`, register the class in
 
 ### DSR convention
 
-Every DSR figure above and in the linked `docs/results/` writeups is a
-**minimal 1/sqrt(T)-convention** number at `PROJECT_NUM_TRIALS = 500`:
-the trial-pool dispersion is set to the sampling noise of a single
-Sharpe estimate. That is the convention this project's deploy gate
-("DSR > 0.5, cluster-stable") is defined on, and the one those
-commit-pinned writeups were computed under.
+Every DSR figure **on this page** is a **minimal 1/sqrt(T)-convention**
+number at `PROJECT_NUM_TRIALS = 500`: the trial-pool dispersion is set
+to the sampling noise of a single Sharpe estimate. That is the
+convention this project's deploy gate ("DSR > 0.5, cluster-stable") is
+defined on.
+
+The linked `docs/results/` writeups are NOT uniformly that convention —
+each states its own. In particular the per-fold *train* DSR of
+`dsr_in_walk_forward.md` is a third one: `num_trials = len(grid)` with
+`sharpe_std_dev` = the observed spread of that fold's own grid, which
+answers "is this fold's winner robust among its siblings?" rather than
+"does it survive the project's whole search budget?". Check the
+convention in the writeup before comparing its numbers with anything
+here.
 
 Since the 2026-08-25 owner decision the project *reports* the deployed
 config on a **conservative** deflator instead — the pinned assumption

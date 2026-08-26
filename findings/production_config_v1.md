@@ -399,7 +399,8 @@ Notes on reading that table against the historical one above:
   row, one bar shorter: the table above says 1589 bars / +0.721
   through 2026-05-28, the committed artifact is 1588 bars / +0.7217
   through 2026-05-27 because the local BTC parquet vintage ends a bar
-  earlier. Sharpe moves by 0.0003, DSR by < 0.001.
+  earlier. Sharpe moves by < 0.001 at the precision the two
+  sources quote (+0.721 vs +0.7217), DSR by < 0.001.
 * The **full-sample row (3070 bars, +1.377) has not been recomputed**
   — no derived series for that window is committed. Its literal
   "≈ 0.000" came from the same raw-0.7 call, so treat it as
