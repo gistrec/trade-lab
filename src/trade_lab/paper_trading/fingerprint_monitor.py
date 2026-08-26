@@ -26,8 +26,12 @@ For each rolling 90d metric:
 * A day is "breached" if the live value is outside ``[p05, p95]``.
 * A breach is "sustained" if the metric is breached for
   ``sustained_days_threshold`` consecutive days (default 7).
-* A "multi-metric day" is a day where 3+ of the tracked metrics are
+* A "multi-metric day" is a day where 2+ of the tracked metrics are
   simultaneously breached.
+
+Limitation: the M1/M3 flip-frequency reference bands have p05 = 0.00,
+so a strategy going dormant (flips stop entirely) sits inside the band
+forever — dormancy is undetectable by construction.
 
 For drawdown:
 * The breach criterion is ``live_drawdown < max_historical_dd``.
@@ -49,7 +53,10 @@ from .journal import HarnessLogRow, read_log
 
 
 DEFAULT_SUSTAINED_DAYS = 7
-DEFAULT_MULTI_METRIC_THRESHOLD = 3
+# 2, not 3: only three daily metrics exist (M1 flip, M3 gate flip, M4
+# drawdown), so 3 demanded unanimity and the tier could never fire on a
+# partial cluster.
+DEFAULT_MULTI_METRIC_THRESHOLD = 2
 
 
 @dataclass(frozen=True)
@@ -93,7 +100,7 @@ class BreachReport:
     rebalance_turnover_per_event: dict   # event-level summary
     drawdown: DrawdownLiveStatus
 
-    multi_metric_days: int               # days with >=3 metrics simultaneously breached
+    multi_metric_days: int               # days with >=threshold metrics simultaneously breached
     overall_sustained_breach: bool       # any single metric breached for >=N days
     overall_multi_metric_breach: bool    # any day with multi-metric breach
     advisory: str                        # short human-readable summary

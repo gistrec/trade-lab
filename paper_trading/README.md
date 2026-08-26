@@ -179,13 +179,100 @@ The monitor's advisory levels (in increasing seriousness):
 * `Single-day single-metric breach` — noise.
 * `Bootstrap` — fewer than the rolling-window-length of journal
   rows; rolling metrics not yet evaluable.
-* `Multi-metric breach` — ≥ 3 metrics outside band simultaneously on
-  the same day. Operator review.
+* `Multi-metric breach` — ≥ 2 of the three daily metrics outside band
+  simultaneously on the same day (3 would demand unanimity). Operator
+  review.
 * `Sustained breach on a behavioral metric` — same metric breached
   for ≥ 7 consecutive days. Operator review.
 * `DRAWDOWN BREACH` — live drawdown deeper than the worst observed in
   the reference window (2022 bear). Forward to Step-4 look-ahead
   detector + operator review.
+
+Known limitation: the flip-frequency bands (M1/M3) have `p05 = 0.00`,
+so a strategy that goes dormant (flips stop entirely) never breaches
+the lower band — dormancy is undetectable by construction.
+
+## Execution tracking (real vs simulation)
+
+Third verification layer (issue #11), next to the fingerprint monitor
+and the look-ahead detector: reconciles **real mainnet execution**
+with the **simulated forward test**.
+
+```bash
+.venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli
+```
+
+Reads the mainnet execution journal (default
+`data/journal/cycles_mainnet.jsonl`, override `--real-journal`) and
+the harness journal (default `paper_trading/logs/journal.jsonl`,
+override `--sim-journal`), aligns by signal date, and reports:
+
+* **Equity tracking** — cumulative `sum |Δdaily-return|` plus the
+  current level gap in % (both curves normalized to the first aligned
+  date). Per date one consistent real cycle is sampled: the daily
+  live cycle, falling back to the first dry-run of the date only when
+  no live cycle exists (a later 6-hourly dry-run never overwrites the
+  live observation). `--gap-threshold-pct` (default 5% — an
+  owner-adjustable starting point, not a calibrated bound) sets the
+  breach level.
+
+  **Trade-phase alignment.** Both curves are compared PRE-trade for
+  the signal date. Real `equity_usd` is the cycle's read-phase value,
+  taken before that date's orders go out; the harness journals
+  `portfolio_equity` AFTER deducting the date's simulated turnover
+  cost. Comparing them raw charges the cost one observation early on
+  the sim side and opens a false gap on every transition date, so the
+  harness value is backed out to the pre-trade phase using committed
+  fields only: `cost_fraction = gross_position_return −
+  net_position_return`, `equity_pre = portfolio_equity /
+  (1 − cost_fraction)`. A `cost_fraction` outside `[0, 1)` is schema
+  drift → exit 2.
+* **Per-symbol trades** — expectations come from the HARNESS rows
+  (`intended_trades`), never from the mainnet journal itself (an
+  erroneous production signal and its own orders would match each
+  other); mainnet supplies only the actual side. Mismatches are
+  per-symbol: missing, wrong-direction, partial fill, mis-sized,
+  unexpected. Only LIVE-cycle skips with a sub-minimum reason
+  (min-notional / lot-step class from `delta.py`; not `pending_*`)
+  may cover a missing trade — counted separately, never alerted on.
+* **Size, not just presence** — the aggregate fill is normalized by
+  the book and compared with the sim's intended weight delta, so a
+  fully filled dust order where the simulation wanted a real weight
+  change surfaces as `SIZE MISMATCH` instead of reading as clean.
+  The band (0.5x–2x, intents under 0.5% of book unjudged) is wide on
+  purpose: lot steps, the 10 bp funding reserve and snapshot-to-fill
+  drift move a leg by percent, so only sizing errors of a different
+  order of magnitude trip it.
+* **Simulation coverage** — a fill counts as *unexpected* only on a
+  date that HAS a harness row (there the "no trade" expectation is
+  real). Fills on dates the harness never logged (mainnet started
+  first, harness rows rotated away) are listed separately as
+  `OUTSIDE SIM COVERAGE` plus a `COVERAGE NOTE` in the advisory, not
+  as mismatches — otherwise a staggered deployment produces permanent
+  false alerts.
+
+Exit codes — same contract as the fingerprint monitor:
+
+* `0` — report produced. Default even on breach; an empty overlap
+  window (both journals exist but share no dates yet) is a
+  descriptive note, not an error. Unknown-schema-version lines in
+  the mainnet journal degrade to an explicit incomplete-data warning.
+  A malformed FINAL line of the harness journal is the documented
+  crash-truncated append and is skipped.
+* `1` — tracking threshold breached AND `--fail-on-breach` passed.
+* `2` — tool error (missing journal file, unreadable path, corrupt
+  mainnet journal lines — a malformed line can hold the very cycle
+  under reconciliation — a malformed harness row anywhere BEFORE the
+  last line (it could hide an intended transition), or a harness row
+  that no longer matches the `HarnessLogRow` schema).
+
+Daily cron, after the 00:05 UTC live order cycle and the harness run
+(one line — crontab has no backslash line continuation; cron does not
+`cd`, so pass absolute journal paths):
+
+```cron
+50 0 * * * cd /home/user/trade-lab && .venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli --real-journal /home/user/trade-lab/data/journal/cycles_mainnet.jsonl --sim-journal /home/user/trade-lab/paper_trading/logs/journal.jsonl --fail-on-breach >> paper_trading/logs/tracking-cron.out 2>&1
+```
 
 ## Anti-patterns — DO NOT do these
 

@@ -21,7 +21,10 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .fingerprint_monitor import check_journal_against_reference
+from .fingerprint_monitor import (
+    DEFAULT_MULTI_METRIC_THRESHOLD,
+    check_journal_against_reference,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -60,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--multi-metric-threshold",
         type=_positive_int,
-        default=3,
+        default=DEFAULT_MULTI_METRIC_THRESHOLD,
         help="Minimum number of metrics breached on the same day to flag as 'multi-metric'.",
     )
     parser.add_argument(
