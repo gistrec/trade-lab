@@ -121,7 +121,7 @@ def run_dry_cycle(
             extra={"decision_age_s": round(decision_age_s, 1)},
         )
 
-        read = run_read_phase(broker, snap, log=logger)
+        read = run_read_phase(broker, snap, log=logger, fee_rate=fee_rate)
         balance = read.balance
         equity = read.equity
 

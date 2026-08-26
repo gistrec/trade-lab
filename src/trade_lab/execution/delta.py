@@ -4,11 +4,14 @@ Two outputs:
 
 1. **Sendable orders** — ``OrderIntent`` records that meet the per-pair
    minimum notional / amount constraints reported by CCXT.
-2. **Skipped sub-min divergences** — sub-minimum order requests
-   silently absorbed. These are logged separately because **accumulating
-   skipped tiny rebalances is the main mechanism through which the
-   live portfolio drifts from the backtest**. The operator needs to
-   see them.
+2. **Skipped divergences** — order requests absorbed rather than sent.
+   These are logged separately because **accumulating skipped tiny
+   rebalances is the main mechanism through which the live portfolio
+   drifts from the backtest**. The operator needs to see them.
+   Sub-minimum gaps and ``funding_cap`` shaves share the list but are
+   metered apart (:func:`total_skipped_quote_drift` vs
+   :func:`total_funding_cap_quote`): one is work the exchange refuses,
+   the other a deliberate reserve on valid orders.
 
 This module never sends an order. It produces a plan; the executor
 module (step #2b) wires the plan into real CCXT calls.
@@ -16,14 +19,29 @@ module (step #2b) wires the plan into real CCXT calls.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Collection, Mapping, Optional, Sequence
 
 from .allocator import TargetAllocation
 from .broker import MarketConstraints
 
 
 logger = logging.getLogger(__name__)
+
+# Owner-sanctioned microstructure deviation from the backtest (#28): hold
+# back 10 bp of the quote available to buys. Sizes come from a ticker
+# snapshot but market BUYs fill at the ask, so a plan spending 100% of the
+# available quote loses its tail order to InsufficientFunds when prices
+# tick up between snapshot and send. The backtest models neither fees nor
+# lot steps; this buffer is the same class of gap.
+RESERVE_BPS = 10
+
+# Reason string for the portion of a buy the reserve cap shaved off. It is
+# an intentional buffer, not work that failed an exchange minimum, so it is
+# reported apart from the sub-min drift metric (see
+# :func:`total_funding_cap_quote`).
+FUNDING_CAP_REASON = "funding_cap"
 
 
 @dataclass(frozen=True)
@@ -65,6 +83,8 @@ def compute_delta_plan(
     current_holdings: Mapping[str, float],
     constraints: Mapping[str, MarketConstraints],
     quote_currency: str,
+    quote_free: Optional[float] = None,
+    fee_rate: Optional[float] = None,
 ) -> DeltaPlan:
     """Build the order plan from a target allocation and live holdings.
 
@@ -73,6 +93,14 @@ def compute_delta_plan(
     ``"BTC/USDT"``) to a :class:`MarketConstraints` describing the
     exchange's minimum-size rules; pass an empty dict to disable
     filtering (useful in tests).
+
+    ``quote_free`` (the broker's free quote balance) enables the
+    :data:`RESERVE_BPS` buy-spend cap; ``None`` disables it — the live
+    cycle passes ``None`` and calls :func:`apply_reserve_cap` itself
+    AFTER pending-order filtering, so a filtered pair's share of the
+    free quote is not burned on intents that never go out. Capping needs
+    the cycle's ``fee_rate`` (sells fund the buys net of it); omitting it
+    raises rather than silently sizing against a zero-fee exchange.
 
     Sub-minimum deltas are recorded in ``skipped``. The total
     fractional drift carried by ``skipped`` should be reported in a
@@ -142,8 +170,8 @@ def compute_delta_plan(
                 desired_side=side,
                 desired_amount=desired_qty,
                 desired_notional=desired_notional,
-                constraint_min_amount=c.min_amount if c else None,
-                constraint_min_cost=c.min_cost if c else None,
+                constraint_min_amount=c.min_amount,
+                constraint_min_cost=c.min_cost,
                 reason="; ".join(reason_parts),
             ))
             continue
@@ -157,15 +185,278 @@ def compute_delta_plan(
             reason="delta from target",
         ))
 
-    return DeltaPlan(orders=orders, skipped=skipped)
+    if quote_free is None:
+        return DeltaPlan(orders=orders, skipped=skipped)
+    if fee_rate is None:
+        raise ValueError(
+            "quote_free enables the reserve cap, which needs the cycle's "
+            "fee_rate: sell proceeds fund the buys NET of the taker fee."
+        )
+    capped, cap_skips = apply_reserve_cap(
+        orders, quote_free=quote_free, constraints=constraints,
+        fee_rate=fee_rate,
+    )
+    return DeltaPlan(orders=capped, skipped=skipped + cap_skips)
+
+
+def apply_reserve_cap(
+    orders: Sequence[OrderIntent],
+    *,
+    quote_free: float,
+    constraints: Mapping[str, MarketConstraints],
+    fee_rate: float,
+    funded_symbols: Collection[str] = (),
+) -> tuple[list[OrderIntent], list[SkippedDelta]]:
+    """Cap total buy spend at ``RESERVE_BPS`` under the available quote.
+
+    Sells place first (sort_orders_for_placement) and their proceeds fund
+    the buys, so the quote available to buys is the free balance plus the
+    sendable sell notional — capping at bare quote_free would zero out the
+    month-start cross-rebalance. On the full-entry path (no sells) this
+    reduces to exactly quote_free.
+
+    Sell proceeds count NET of ``fee_rate``: the exchange credits a sell
+    minus the taker fee, so sizing buys off the gross ticker notional
+    hands the whole reserve to the fee (at the default 10 bp it exactly
+    cancels; above 10 bp the plan is underfunded even at unchanged
+    prices).
+
+    ``funded_symbols`` names buys whose quote the exchange already holds
+    — a same-clientOrderId order still open from an earlier run of the
+    same day. ``quote_free`` excludes that locked quote and the caller
+    resolves the existing order instead of sending a scaled replacement,
+    so scaling such a buy only deletes the reduction while shaving the
+    buys that really do need funding. They pass through untouched and
+    stay out of the spend total.
+
+    Every capped-away buy portion comes back as a ``funding_cap``
+    :class:`SkippedDelta` carrying the UNSCALED gap — the cap is a real
+    divergence from the backtest and must stay first-class, not vanish
+    into zero-valued lot-step skips. It is reported apart from the sub-min
+    drift metric (:func:`total_funding_cap_quote`).
+    """
+    funded = frozenset(funded_symbols)
+    scalable = [o for o in orders if o.side == "buy" and o.symbol not in funded]
+    buy_spend = sum(o.notional_quote for o in scalable)
+    if buy_spend <= 0.0:
+        return list(orders), []
+    gross_sells = sum(o.notional_quote for o in orders if o.side == "sell")
+    available = float(quote_free) + gross_sells * (1.0 - float(fee_rate))
+    cap = max(available, 0.0) * (1.0 - RESERVE_BPS / 10_000)
+    if buy_spend <= cap:
+        return list(orders), []   # slack exists — orders unchanged
+
+    scale = cap / buy_spend
+    buys = {o.symbol: o for o in scalable}
+    amounts: dict[str, float] = {}
+    for sym, o in buys.items():
+        c = constraints.get(sym)
+        a = o.base_amount * scale
+        amounts[sym] = c.quantize_amount(a) if c is not None else a
+
+    # Re-check the POST-quantization total: scaling already-quantized
+    # amounts and truncating keeps the sum ≤ cap in exact arithmetic,
+    # but float dust can leak over. Shave the largest buy until the cap
+    # holds — an on-grid amount minus any positive quantity re-truncates
+    # at least one full lot step lower, so every pass strictly shrinks
+    # the total and the loop terminates.
+    def _spend() -> float:
+        return sum(amounts[s] * buys[s].price_used for s in amounts)
+
+    while _spend() - cap > 1e-9:
+        sym = max(
+            (s for s in amounts if amounts[s] > 0.0),
+            key=lambda s: amounts[s] * buys[s].price_used,
+            default=None,
+        )
+        if sym is None:
+            break
+        c = constraints.get(sym)
+        reduced = max(
+            amounts[sym] - (_spend() - cap) / buys[sym].price_used, 0.0,
+        )
+        amounts[sym] = c.quantize_amount(reduced) if c is not None else reduced
+
+    _restore_min_sized_buys(amounts, buys, constraints)
+
+    capped: list[OrderIntent] = []
+    skips: list[SkippedDelta] = []
+    for o in orders:
+        if o.side != "buy" or o.symbol in funded:
+            capped.append(o)
+            continue
+        a = amounts[o.symbol]
+        c = constraints.get(o.symbol)
+        if a <= 0.0 or _below_min(a, o.price_used, c):
+            # Whole buy suppressed by the cap — record the full gap.
+            skips.append(SkippedDelta(
+                symbol=o.symbol,
+                desired_side="buy",
+                desired_amount=o.base_amount,
+                desired_notional=o.notional_quote,
+                constraint_min_amount=c.min_amount if c else None,
+                constraint_min_cost=c.min_cost if c else None,
+                reason=FUNDING_CAP_REASON,
+            ))
+            continue
+        capped.append(OrderIntent(
+            symbol=o.symbol,
+            side="buy",
+            base_amount=a,
+            notional_quote=a * o.price_used,
+            price_used=o.price_used,
+            reason=o.reason,
+        ))
+        if a < o.base_amount:
+            skips.append(SkippedDelta(
+                symbol=o.symbol,
+                desired_side="buy",
+                desired_amount=o.base_amount - a,
+                desired_notional=(o.base_amount - a) * o.price_used,
+                constraint_min_amount=c.min_amount if c else None,
+                constraint_min_cost=c.min_cost if c else None,
+                reason=FUNDING_CAP_REASON,
+            ))
+    return capped, skips
+
+
+def _below_min(
+    amount: float, price: float, c: Optional[MarketConstraints],
+) -> bool:
+    """True when ``amount`` violates either exchange minimum."""
+    if c is None:
+        return False
+    return bool(
+        (c.min_amount is not None and amount < c.min_amount)
+        or (c.min_cost is not None and amount * price < c.min_cost)
+    )
+
+
+def _quantize_up(c: MarketConstraints, amount: float) -> Optional[float]:
+    """Smallest on-grid amount >= ``amount`` (quantize_amount truncates).
+
+    The grid may be a tick size rather than a decimal place, so the step
+    is probed by doubling instead of assumed. ``None`` when no grid point
+    above ``amount`` shows up within the probe range.
+    """
+    down = c.quantize_amount(amount)
+    if down >= amount:
+        return down
+    probe = max(abs(amount), 1e-12) * 1e-9
+    for _ in range(100):
+        up = c.quantize_amount(down + probe)
+        if up >= amount:
+            return up
+        probe *= 2.0
+    return None
+
+
+def _smallest_valid_amount(
+    o: OrderIntent, c: Optional[MarketConstraints],
+) -> Optional[float]:
+    """Smallest on-grid amount for ``o`` that clears both minima.
+
+    ``None`` when it cannot be reached without exceeding the intent
+    itself (or when the pair has no constraints — nothing was below a
+    minimum then).
+    """
+    if c is None or o.price_used <= 0.0:
+        return None
+    need = max(c.min_amount or 0.0, (c.min_cost or 0.0) / o.price_used)
+    a = _quantize_up(c, need)
+    # Up to two bumps: min_cost / price is float-dusty, so the first grid
+    # point above it can still price a hair under the minimum notional.
+    for _ in range(3):
+        if a is None or a > o.base_amount:
+            return None
+        if not _below_min(a, o.price_used, c):
+            return a
+        a = _quantize_up(c, math.nextafter(a, math.inf))
+    return None
+
+
+def _restore_min_sized_buys(
+    amounts: dict[str, float],
+    buys: Mapping[str, OrderIntent],
+    constraints: Mapping[str, MarketConstraints],
+) -> None:
+    """Shift the cap's reduction off buys it pushed under a minimum.
+
+    Proportional scaling can drop a buy that was sendable below
+    min_amount/min_cost; suppressing it strands its quote and can leave a
+    basket asset out of the entry entirely — far more tracking error than
+    the reserve. Restore such a buy to its smallest valid size and take
+    the difference from the largest buy that stays valid after donating.
+    The donor is quantized DOWN, so it gives up at least what the
+    recipient gains and the total never climbs back over the cap. One
+    pass in symbol order: deterministic and terminating.
+    """
+    for sym in sorted(amounts):
+        o = buys[sym]
+        c = constraints.get(sym)
+        if amounts[sym] > 0.0 and not _below_min(amounts[sym], o.price_used, c):
+            continue
+        if _below_min(o.base_amount, o.price_used, c):
+            continue                 # not sendable before the cap either
+        restored = _smallest_valid_amount(o, c)
+        if restored is None or restored <= amounts[sym]:
+            continue
+        donor = _pick_donor(
+            sym, (restored - amounts[sym]) * o.price_used,
+            amounts, buys, constraints,
+        )
+        if donor is None:
+            continue                 # nobody can absorb it — stays suppressed
+        amounts[sym] = restored
+        amounts[donor[0]] = donor[1]
+
+
+def _pick_donor(
+    recipient: str,
+    need_quote: float,
+    amounts: Mapping[str, float],
+    buys: Mapping[str, OrderIntent],
+    constraints: Mapping[str, MarketConstraints],
+) -> Optional[tuple[str, float]]:
+    """Largest buy that can hand over ``need_quote`` and stay valid."""
+    candidates = sorted(
+        (s for s in amounts if s != recipient and amounts[s] > 0.0),
+        key=lambda s: (-amounts[s] * buys[s].price_used, s),
+    )
+    for sym in candidates:
+        o = buys[sym]
+        c = constraints.get(sym)
+        reduced = amounts[sym] - need_quote / o.price_used
+        if reduced <= 0.0:
+            continue
+        reduced = c.quantize_amount(reduced) if c is not None else reduced
+        if reduced > 0.0 and not _below_min(reduced, o.price_used, c):
+            return sym, reduced
+    return None
 
 
 def total_skipped_quote_drift(plan: DeltaPlan) -> float:
-    """Sum the quote-currency notional of all skipped sub-min deltas.
+    """Sum the quote-currency notional of skipped sub-min deltas.
 
     Reported in the dry-run log as the cumulative tracking error this
     cycle. Persistent non-zero values across cycles indicate the
     portfolio is drifting from the backtest by more than the order
     minimums allow.
+
+    Funding-cap shaves are NOT here: this metric's contract (monitoring's
+    "unfillable rebalance drift") is work that failed an exchange
+    minimum, while the reserve is a deliberate buffer on valid orders.
+    They live in :func:`total_funding_cap_quote`.
     """
-    return float(sum(s.desired_notional for s in plan.skipped))
+    return float(sum(
+        s.desired_notional for s in plan.skipped
+        if s.reason != FUNDING_CAP_REASON
+    ))
+
+
+def total_funding_cap_quote(plan: DeltaPlan) -> float:
+    """Sum the quote the :data:`RESERVE_BPS` cap held back this cycle."""
+    return float(sum(
+        s.desired_notional for s in plan.skipped
+        if s.reason == FUNDING_CAP_REASON
+    ))

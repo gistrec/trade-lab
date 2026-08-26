@@ -81,11 +81,13 @@ def test_dry_run_emits_buys_when_fully_long_signal_and_no_holdings():
     assert result.signal == 1.0
     assert result.sma_gate_open is True
 
-    # 2-asset basket × $10k equity → $5k target each.
+    # 2-asset basket × $10k equity → $5k target each, shaved 10 bp by the
+    # full-entry quote reserve (#28): the buys would otherwise sum to
+    # exactly quote_free.
     sides = {o["symbol"]: o["side"] for o in result.orders_planned}
     assert sides == {"BTC/USDT": "buy", "ETH/USDT": "buy"}
     btc_order = next(o for o in result.orders_planned if o["symbol"] == "BTC/USDT")
-    assert btc_order["notional_quote"] == pytest.approx(5_000.0, rel=0.001)
+    assert btc_order["notional_quote"] == pytest.approx(5_000.0 * 0.999)
 
 
 def test_dry_run_does_not_call_create_order():

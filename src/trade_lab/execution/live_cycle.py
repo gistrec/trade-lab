@@ -65,7 +65,10 @@ from .cycle_common import (
 from .cycle_common import (  # noqa: F401  (re-export: tests hit the ticker fallback through this name)
     gather_ticker_prices as _gather_ticker_prices,
 )
-from .delta import SkippedDelta, total_skipped_quote_drift
+from .delta import (
+    SkippedDelta, apply_reserve_cap, total_funding_cap_quote,
+    total_skipped_quote_drift,
+)
 from .journal import (
     Cycle,
     JournalWriter,
@@ -222,7 +225,10 @@ def run_live_cycle(
                 f"cron schedule / host UTC clock; for a deliberate late "
                 f"manual entry raise --max-signal-age-h."
             )
-        read = run_read_phase(broker, snap, log=logger)
+        # reserve_cap=False: the cap is applied below, AFTER pending
+        # filtering — capping the full plan would scale every buy down
+        # for quote that a filtered pending pair never releases.
+        read = run_read_phase(broker, snap, log=logger, reserve_cap=False)
         balance = read.balance
         equity = read.equity
         allocation = read.allocation
@@ -237,14 +243,21 @@ def run_live_cycle(
         # order and waits on it, which cannot duplicate.
         pending_skips: list[SkippedDelta] = []
         sendable: list = []
+        # Buys the exchange already holds quote against under THIS cycle's
+        # coid: they are funded outside balance.quote_free, and place_order
+        # resolves the existing order rather than sending a resized one, so
+        # the reserve cap must leave them alone (see apply_reserve_cap).
+        funded_symbols: set[str] = set()
         for intent in plan.orders:
             coid = make_client_order_id(rebal_date, intent.symbol, intent.side)
-            blockers = [
-                e for e in pending_by_pair.get(intent.symbol, [])
-                if e.client_order_id != coid
-            ]
+            pending = pending_by_pair.get(intent.symbol, [])
+            blockers = [e for e in pending if e.client_order_id != coid]
             if not blockers:
                 sendable.append(intent)
+                if intent.side == "buy" and any(
+                    e.client_order_id == coid for e in pending
+                ):
+                    funded_symbols.add(intent.symbol)
                 continue
             logger.warning(
                 "SKIP %s %s (%.2f %s): order %s from a prior cycle is "
@@ -301,6 +314,17 @@ def run_live_cycle(
             else:
                 submin_skips.append(s)
 
+        # RESERVE_BPS buy cap (#28) on the post-filter sendable set only:
+        # sizing against what actually goes out, not against intents the
+        # pending filter just removed.
+        sendable, funding_skips = apply_reserve_cap(
+            sendable,
+            quote_free=balance.quote_free,
+            constraints=read.constraints,
+            fee_rate=fee_rate,
+            funded_symbols=funded_symbols,
+        )
+
         sorted_intents = sort_orders_for_placement(sendable)
         for i, intent in enumerate(sorted_intents):
             if i > 0:
@@ -334,6 +358,7 @@ def run_live_cycle(
             plan=plan,
             submin_skips=submin_skips,
             pending_skips=pending_skips,
+            funding_skips=funding_skips,
             order_results=order_results,
             decision_age_s=decision_age_s,
             price_fallbacks=read.price_fallbacks or None,
@@ -717,6 +742,7 @@ def _write_main_cycle(
     plan,
     submin_skips: list[SkippedDelta],
     pending_skips: list[SkippedDelta],
+    funding_skips: list[SkippedDelta],
     order_results: list[OrderResult],
     decision_age_s: float,
     price_fallbacks: Optional[dict] = None,
@@ -742,12 +768,19 @@ def _write_main_cycle(
         current_holdings_quote=current_holdings_quote,
         orders_planned=[intent_dict(o) for o in plan.orders],
         orders_skipped=[
-            skipped_dict(s) for s in submin_skips + pending_skips
+            skipped_dict(s)
+            for s in submin_skips + pending_skips + funding_skips
         ],
-        # submin_skips only: a pending_order skip is transient (retried
-        # next cycle), while this metric tracks unfillable sub-min drift.
+        # No pending_skips here: a pending_order skip is transient
+        # (retried next cycle), while this metric tracks quote the
+        # exchange refused this cycle. Funding-cap shaves are metered
+        # apart — they are a deliberate reserve on valid orders, and the
+        # monitoring layer reads this field as "unfillable".
         total_skipped_quote_drift=total_skipped_quote_drift(
             replace(plan, skipped=submin_skips)
+        ),
+        total_funding_cap_quote=total_funding_cap_quote(
+            replace(plan, skipped=funding_skips)
         ),
         orders_executed=[r.to_dict() for r in order_results],
         price_fallbacks=price_fallbacks,

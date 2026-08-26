@@ -1095,12 +1095,16 @@ def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
     ))
 
     stub = _LiveStub(basket=("BTC", "ETH"))
+    # An open buy locks its quote: $10k equity, $5k of it held by BTC.
+    stub.balance["USDT"] = {"free": 5_000.0, "used": 5_000.0, "total": 10_000.0}
     stub.fetch_order_responses[today_coid] = [
         # reconstruction: still open → left in state
         _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
         # query-before-place inside place_order: found, then terminal
         _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),
-        # $10k / 2 assets / $50k = the 0.1 BTC the plan will intend
+        # $10k / 2 assets / $50k: the already-funded BTC intent keeps its
+        # full 0.1 — the reserve cap (#28) only shaves what quote_free
+        # still has to fund.
         _closed_order(today_coid, "BTC/USDT", filled=0.1),
     ]
     clock = _MockClock()
@@ -1114,6 +1118,110 @@ def test_same_day_retry_with_same_coid_is_not_blocked(tmp_path):
     cycle = _read_cycles(tmp_path)[-1]
     assert [s for s in cycle["orders_skipped"]
             if s["reason"] == "pending_order"] == []
+    assert state.get(today_coid).status == "closed"
+
+
+def test_reserve_cap_sized_after_pending_filter(tmp_path):
+    """Codex review worked example: $5k locked by a pending BTC buy +
+    $5k free; targets $5k BTC / $5k ETH. The BTC intent sits out as
+    pending, so the cap must size the ETH buy off the full free $5k —
+    capping the PRE-filter plan scales both buys to ~$2.5k and strands
+    the filtered pair's share of the quote."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    yesterday_dt = datetime.now(timezone.utc) - timedelta(days=1)
+    stale_coid = make_client_order_id(yesterday_dt.date(), "BTC/USDT", "buy")
+    state.put(OrderStateEntry(
+        client_order_id=stale_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.1, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=yesterday_dt.isoformat(),
+        last_seen_at=yesterday_dt.isoformat(),
+    ))
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    # The pending BTC buy holds $5k of the quote in `used`.
+    stub.balance["USDT"] = {"free": 5_000.0, "used": 5_000.0, "total": 10_000.0}
+    stub.fetch_order_responses[stale_coid] = [
+        _still_open_order(stale_coid, "BTC/USDT", "exch-live-1"),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    [call] = stub.create_order_calls
+    assert call["symbol"] == "ETH/USDT"
+    # $5k free × (1 − 10 bp) — NOT ≈$2.5k from a pre-filter cap.
+    assert call["amount"] * 50_000.0 == pytest.approx(5_000.0 * 0.999)
+    cycle = _read_cycles(tmp_path)[-1]
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons == {"BTC/USDT": "pending_order", "ETH/USDT": "funding_cap"}
+    # The pending skip carries the UNSCALED gap, not a capped remnant.
+    btc = next(s for s in cycle["orders_skipped"]
+               if s["symbol"] == "BTC/USDT")
+    assert btc["desired_notional"] == pytest.approx(5_000.0)
+    # The 10 bp shave is metered as funding cap, NOT as sub-min drift
+    # (monitoring reads that field as "unfillable"); the transient
+    # pending skip stays out of both.
+    assert cycle["total_skipped_quote_drift"] == 0.0
+    assert cycle["total_funding_cap_quote"] == pytest.approx(5_000.0 * 0.001)
+
+
+def test_reserve_cap_ignores_already_funded_same_coid_buy(tmp_path):
+    """Second-round Codex example: the same-coid BTC buy from an earlier
+    run today is still open and holds $5k of the quote, leaving $5k free.
+    That intent deliberately survives the pending filter (place_order
+    resolves the existing order), but its quote is NOT in quote_free —
+    capping it again scales BOTH buys to ~$2.5k while the untouched $5k
+    BTC order resolves anyway, so half the free quote never leaves. The
+    funded buy must stay out of the cap's spend total and its scaling."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    today_coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state.put(OrderStateEntry(
+        client_order_id=today_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.1, status="timeout",
+        exchange_order_id="exch-live-1",
+        placed_at=now_iso, last_seen_at=now_iso,
+    ))
+
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    # The open BTC buy locks its $5k: equity is still $10k, free is $5k.
+    stub.balance["USDT"] = {"free": 5_000.0, "used": 5_000.0, "total": 10_000.0}
+    stub.fetch_order_responses[today_coid] = [
+        _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),  # recon
+        _still_open_order(today_coid, "BTC/USDT", "exch-live-1"),  # pre-place
+        _closed_order(today_coid, "BTC/USDT", filled=0.1),
+    ]
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    assert result.outcome == "success"
+    [call] = stub.create_order_calls
+    assert call["symbol"] == "ETH/USDT"
+    # The whole free $5k less the 10 bp reserve — not ~$2.5k.
+    assert call["amount"] * 50_000.0 == pytest.approx(5_000.0 * 0.999)
+    cycle = _read_cycles(tmp_path)[-1]
+    btc = next(o for o in cycle["orders_executed"]
+               if o["symbol"] == "BTC/USDT")
+    assert btc["intended_amount"] == pytest.approx(0.1), (
+        "scaling a buy the exchange already funded is lost work: "
+        "place_order resolves the original order, not a smaller one"
+    )
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons == {"ETH/USDT": "funding_cap"}
+    assert cycle["total_skipped_quote_drift"] == 0.0
+    assert cycle["total_funding_cap_quote"] == pytest.approx(5_000.0 * 0.001)
     assert state.get(today_coid).status == "closed"
 
 
