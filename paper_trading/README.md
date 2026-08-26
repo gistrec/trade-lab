@@ -208,13 +208,21 @@ the harness journal (default `paper_trading/logs/journal.jsonl`,
 override `--sim-journal`), aligns by signal date, and reports:
 
 * **Equity tracking** — cumulative `sum |Δdaily-return|` plus the
-  current level gap in % (both curves normalized to the first aligned
-  date). Per date one consistent real cycle is sampled: the daily
-  live cycle, falling back to the first dry-run of the date only when
-  no live cycle exists (a later 6-hourly dry-run never overwrites the
-  live observation). `--gap-threshold-pct` (default 5% — an
+  current level gap in % (levels chained from the daily returns of the
+  compared span). Per date one consistent real cycle is sampled: the
+  daily live cycle, falling back to the first dry-run of the date only
+  when no live cycle exists (a later 6-hourly dry-run never overwrites
+  the live observation). `--gap-threshold-pct` (default 5% — an
   owner-adjustable starting point, not a calibrated bound) sets the
   breach level.
+
+  **Starts at live-execution coverage**, not at the first date any
+  cycle exists: the first date carrying a live attempt *or* a retained
+  fill. The read-only observation phase ran on an account holding
+  0.048 USDT that was funded to ~99 the day the live cron started —
+  anchoring the curve there turned the funding into a +285194% "level
+  gap". A journal with no live evidence at all tracks nothing and says
+  so; dry-run equity is not a book.
 
   **Trade-phase alignment.** Both curves are compared PRE-trade for
   the signal date. Real `equity_usd` is the cycle's read-phase value,
@@ -227,14 +235,62 @@ override `--sim-journal`), aligns by signal date, and reports:
   net_position_return`, `equity_pre = portfolio_equity /
   (1 − cost_fraction)`. A `cost_fraction` outside `[0, 1)` is schema
   drift → exit 2.
+* **Capital flows** — deposits and withdrawals are NOT returns, and
+  nothing in either journal distinguishes a transfer from performance.
+  They are declared, never inferred: `--capital-events PATH` reads a
+  JSON list
+
+  ```json
+  [
+    {"date": "2026-08-24", "amount_usd": 98.95, "note": "initial funding"},
+    {"date": "2026-08-31", "amount_usd": -25.0, "note": "withdrawal"}
+  ]
+  ```
+
+  where `date` is the **first signal date whose `equity_usd` reading
+  already includes the transfer** (that is the reading the daily-return
+  arithmetic subtracts it from) and `amount_usd` is signed: positive
+  deposit, negative withdrawal. The declared amount is removed from
+  that step's real return, so a transfer moves neither curve. Every
+  malformed entry (bad date, non-numeric / zero / non-finite amount,
+  duplicate date, missing file) is a tool error → exit 2: a silently
+  ignored declaration leaves the transfer inside the return series.
+
+  **Undeclared flows suppress the number.** When an aligned step shows
+  a real-vs-sim divergence wider than `max(25%, 3 × |the basket's own
+  daily return|)` — both books hold the same long-only basket at
+  ladder ≤ 1, so nothing that wide is execution noise, and the basket
+  multiple keeps a genuine crash (real book in cash while the sim is
+  fully invested) from reading as a transfer — the report prints
+  `UNEXPLAINED EQUITY MOVE`, reports **no** level gap and no cumulative
+  return difference for the span, and exits 1 under `--fail-on-breach`.
+  Declaring the transfer restores the number. The detector runs on the
+  flow-ADJUSTED return, so a mis-sized declaration still surfaces.
+  Known limit: a transfer smaller than the band stays undetected and
+  shows up as a tracking breach instead — the operator investigates
+  either way.
 * **Per-symbol trades** — expectations come from the HARNESS rows
   (`intended_trades`), never from the mainnet journal itself (an
   erroneous production signal and its own orders would match each
   other); mainnet supplies only the actual side. Mismatches are
   per-symbol: missing, wrong-direction, partial fill, mis-sized,
-  unexpected. Only LIVE-cycle skips with a sub-minimum reason
-  (min-notional / lot-step class from `delta.py`; not `pending_*`)
-  may cover a missing trade — counted separately, never alerted on.
+  extra opposite-side, unexpected. Only LIVE-cycle skips with a
+  sub-minimum reason (min-notional / lot-step class from `delta.py`;
+  not `pending_*`) may cover a missing trade — counted separately,
+  never alerted on.
+* **Extra opposite-side fills** — a sell that rode along with the
+  expected buy on the same date and asset is invisible to every other
+  check (the intent reads as satisfied, and the date+asset is not
+  "unexpected" either), so it is reported on its own as
+  `EXTRA OPPOSITE FILL`: the leg was round-tripped for two spreads and
+  the book is off target.
+* **Fill dating** — a fill is dated by the decision date embedded in
+  its `clientOrderId` (`tsmom_YYYYMMDD_…` minus one day, the bar it
+  acted on), not by the signal of the cycle that journaled it. A
+  reconstruction lands days later and carries a fresh signal of its
+  own; dating by that signal splits a late execution from the intent
+  it belongs to — missing on the decision date, unexpected on the
+  recovery date.
 * **Size, not just presence** — the aggregate fill is normalized by
   the book and compared with the sim's intended weight delta, so a
   fully filled dust order where the simulation wanted a real weight
@@ -250,29 +306,52 @@ override `--sim-journal`), aligns by signal date, and reports:
   `OUTSIDE SIM COVERAGE` plus a `COVERAGE NOTE` in the advisory, not
   as mismatches — otherwise a staggered deployment produces permanent
   false alerts.
+* **Bootstrap (catch-up of the standing position)** — the simulation
+  can step into the basket days before real execution starts trading;
+  the first cycle that fills anything then buys that whole standing
+  position at once. Those buys are reported as `BOOTSTRAP ORDER`
+  together with the sim date the intent originated on — the delayed
+  execution of a real intent, a category of its own, not seven
+  `UNEXPECTED ORDER`s. Anchored on the first date the mainnet journal
+  shows a fill (the live cron ran for a day without trading before the
+  real 2026-08-25 catch-up), one date wide, buys only: nothing was
+  bought earlier for a sell to unwind.
 
 Exit codes — same contract as the fingerprint monitor:
 
 * `0` — report produced. Default even on breach; an empty overlap
-  window (both journals exist but share no dates yet) is a
-  descriptive note, not an error. Unknown-schema-version lines in
-  the mainnet journal degrade to an explicit incomplete-data warning.
-  A malformed FINAL line of the harness journal is the documented
-  crash-truncated append and is skipped.
-* `1` — tracking threshold breached AND `--fail-on-breach` passed.
+  window (both journals exist but share no dates yet), and a journal
+  without live-execution coverage, are descriptive notes, not errors.
+  Unknown-schema-version lines in the mainnet journal degrade to an
+  explicit incomplete-data warning. A malformed FINAL line of the
+  harness journal is the documented crash-truncated append and is
+  skipped.
+* `1` — tracking threshold breached, or an unexplained equity move
+  suppressed the gap number, AND `--fail-on-breach` passed. A refusal
+  to report is not a pass.
 * `2` — tool error (missing journal file, unreadable path, corrupt
   mainnet journal lines — a malformed line can hold the very cycle
   under reconciliation — a malformed harness row anywhere BEFORE the
-  last line (it could hide an intended transition), or a harness row
-  that no longer matches the `HarnessLogRow` schema).
+  last line (it could hide an intended transition), a harness row that
+  no longer matches the `HarnessLogRow` schema, a non-numeric real
+  `equity_usd` or a non-finite `intended_trades` value — both would
+  silently drop the observation they carry — or a malformed
+  `--capital-events` file).
 
 Daily cron, after the 00:05 UTC live order cycle and the harness run
 (one line — crontab has no backslash line continuation; cron does not
-`cd`, so pass absolute journal paths):
+`cd`, so pass absolute paths):
 
 ```cron
-50 0 * * * cd /home/user/trade-lab && .venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli --real-journal /home/user/trade-lab/data/journal/cycles_mainnet.jsonl --sim-journal /home/user/trade-lab/paper_trading/logs/journal.jsonl --fail-on-breach >> paper_trading/logs/tracking-cron.out 2>&1
+50 0 * * * cd /home/user/trade-lab && .venv/bin/python -m trade_lab.paper_trading.execution_tracking_cli --real-journal /home/user/trade-lab/data/journal/cycles_mainnet.jsonl --sim-journal /home/user/trade-lab/paper_trading/logs/journal.jsonl --capital-events /home/user/trade-lab/data/journal/capital_events_mainnet.json --fail-on-breach >> paper_trading/logs/tracking-cron.out 2>&1
 ```
+
+The capital-events file is operator-maintained: create it as `[]`
+before enabling the flag (a missing path is a hard error — a typo must
+not read as "no transfers ever happened"), append an entry the same day
+money moves in or out of the mainnet account, then re-run the command
+to confirm the gap number came back. It lives next to the mainnet
+journal and, like it, never mixes with testnet.
 
 ## Anti-patterns — DO NOT do these
 
