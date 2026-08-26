@@ -215,6 +215,18 @@ override `--sim-journal`), aligns by signal date, and reports:
   live observation). `--gap-threshold-pct` (default 5% — an
   owner-adjustable starting point, not a calibrated bound) sets the
   breach level.
+
+  **Trade-phase alignment.** Both curves are compared PRE-trade for
+  the signal date. Real `equity_usd` is the cycle's read-phase value,
+  taken before that date's orders go out; the harness journals
+  `portfolio_equity` AFTER deducting the date's simulated turnover
+  cost. Comparing them raw charges the cost one observation early on
+  the sim side and opens a false gap on every transition date, so the
+  harness value is backed out to the pre-trade phase using committed
+  fields only: `cost_fraction = gross_position_return −
+  net_position_return`, `equity_pre = portfolio_equity /
+  (1 − cost_fraction)`. A `cost_fraction` outside `[0, 1)` is schema
+  drift → exit 2.
 * **Per-symbol trades** — expectations come from the HARNESS rows
   (`intended_trades`), never from the mainnet journal itself (an
   erroneous production signal and its own orders would match each
@@ -223,6 +235,13 @@ override `--sim-journal`), aligns by signal date, and reports:
   Only LIVE-cycle skips with a sub-minimum reason (min-notional /
   lot-step class from `delta.py`; not `pending_*`) may cover a
   missing trade — counted separately, never alerted on.
+* **Simulation coverage** — a fill counts as *unexpected* only on a
+  date that HAS a harness row (there the "no trade" expectation is
+  real). Fills on dates the harness never logged (mainnet started
+  first, harness rows rotated away) are listed separately as
+  `OUTSIDE SIM COVERAGE` plus a `COVERAGE NOTE` in the advisory, not
+  as mismatches — otherwise a staggered deployment produces permanent
+  false alerts.
 
 Exit codes — same contract as the fingerprint monitor:
 
@@ -230,11 +249,14 @@ Exit codes — same contract as the fingerprint monitor:
   window (both journals exist but share no dates yet) is a
   descriptive note, not an error. Unknown-schema-version lines in
   the mainnet journal degrade to an explicit incomplete-data warning.
+  A malformed FINAL line of the harness journal is the documented
+  crash-truncated append and is skipped.
 * `1` — tracking threshold breached AND `--fail-on-breach` passed.
 * `2` — tool error (missing journal file, unreadable path, corrupt
   mainnet journal lines — a malformed line can hold the very cycle
-  under reconciliation — or a harness row that no longer matches the
-  `HarnessLogRow` schema).
+  under reconciliation — a malformed harness row anywhere BEFORE the
+  last line (it could hide an intended transition), or a harness row
+  that no longer matches the `HarnessLogRow` schema).
 
 Daily cron, after the 00:05 UTC live order cycle and the harness run
 (one line — crontab has no backslash line continuation; cron does not

@@ -7,9 +7,9 @@ Typical operator invocation (manual or cron)::
 Exit codes — same contract as ``fingerprint_cli``: 0 — report produced
 (default even on breach: descriptive, not normative); 1 — tracking
 threshold breached AND ``--fail-on-breach`` was passed; 2 — tool error
-(missing journal, filesystem failure, corrupt mainnet journal lines,
-harness-row schema drift; argparse exits 2 natively on invalid flag
-values).
+(missing journal, filesystem failure, corrupt mainnet journal lines, a
+malformed harness row before the end of its journal, harness-row schema
+drift; argparse exits 2 natively on invalid flag values).
 """
 from __future__ import annotations
 
@@ -98,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (ValueError, TypeError) as exc:
         # ValueError: non-positive equity, corrupt mainnet journal lines,
-        # harness-row schema drift. TypeError: a HarnessLogRow construction
+        # a malformed mid-journal harness row, harness-row schema drift
+        # (incl. an unrecoverable equity phase). TypeError: a HarnessLogRow
         # that slipped past the per-row wrap — still a tool error, never
         # exit 1 (the breach code).
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
@@ -115,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Sim journal:  {report.sim_journal}  ({eq.n_sim_days} equity days)")
     print(f"Aligned days: {eq.n_aligned_days}  overlap={eq.overlap}\n")
 
-    print("  equity tracking:")
+    # Phase, not just date: real equity_usd is read before the date's
+    # orders, so the harness value is used before its turnover cost too.
+    print("  equity tracking (both curves PRE-trade: real read-phase")
+    print("  equity_usd vs harness equity before its simulated cost):")
     if eq.cum_abs_return_diff is not None:
         print(f"    cum |Δdaily-return| = {eq.cum_abs_return_diff:.4f}")
     if eq.level_gap_pct is not None:
@@ -126,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
 
     tr = report.transitions
     print("  per-symbol trades (sim-expected vs real):")
+    print(f"    sim coverage = {tr.coverage}")
     print(f"    real fill events = {tr.n_real_fill_events}")
     print(
         f"    sim trade dates = {tr.n_sim_trade_dates} "
@@ -154,6 +159,14 @@ def main(argv: list[str] | None = None) -> int:
             f"    UNEXPECTED ORDER: {e['date']} {e['symbol']} "
             f"{e['side']} {e['filled_notional_quote']:.2f} quote "
             f"(cycle {e['cycle_id']}) — no sim-intended trade"
+        )
+    for e in tr.out_of_coverage_fills:
+        # Not a mismatch: the harness never logged this date, so it holds
+        # no expectation at all (staggered start / partial retention).
+        print(
+            f"    OUTSIDE SIM COVERAGE: {e['date']} {e['symbol']} "
+            f"{e['side']} {e['filled_notional_quote']:.2f} quote "
+            f"(cycle {e['cycle_id']}) — no harness row for this date"
         )
     if report.real_unknown_version_lines:
         print(

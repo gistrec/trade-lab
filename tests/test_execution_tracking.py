@@ -1,6 +1,7 @@
 """Execution-tracking layer (issue #11): real mainnet vs simulation."""
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 
@@ -12,6 +13,7 @@ from trade_lab.paper_trading.execution_tracking import (
     live_min_notional_skips,
     real_equity_by_date,
     real_order_events,
+    sim_pre_trade_equity_by_date,
 )
 from trade_lab.paper_trading.execution_tracking_cli import main as tracking_cli_main
 from trade_lab.paper_trading.journal import HarnessLogRow, append_row
@@ -124,9 +126,46 @@ def _write_real(path, cycles: list[dict]) -> None:
             f.write(json.dumps(c) + "\n")
 
 
+_SIM_COST_RATE = 0.001  # harness fee + slippage, charged on turnover
+
+
+def _sim_row_phased(
+    date_iso: str,
+    pre_trade_equity: float,
+    *,
+    gross: float,
+    ladder: float = 0.5,
+    prior: float | None = None,
+    intended: dict | None = None,
+) -> HarnessLogRow:
+    """A row shaped exactly as ``harness.py`` writes it: the journaled
+    ``portfolio_equity`` is POST-trade and gross/net straddle the same
+    turnover cost, so the pre-trade phase is recoverable from the row."""
+    intended = {} if intended is None else intended
+    cost_fraction = sum(abs(v) for v in intended.values()) * _SIM_COST_RATE
+    row = _sim_row(
+        date_iso, pre_trade_equity * (1.0 - cost_fraction),
+        ladder=ladder, prior=prior, intended=intended,
+    )
+    return dataclasses.replace(
+        row,
+        gross_position_return=gross,
+        net_position_return=gross - cost_fraction,
+    )
+
+
 def _write_sim(path, rows: list[HarnessLogRow]) -> None:
     for r in rows:
         append_row(r, path)
+
+
+def _write_sim_raw(path, lines: list[str]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("".join(lines))
+
+
+def _sim_line(row: HarnessLogRow) -> str:
+    return json.dumps(dataclasses.asdict(row)) + "\n"
 
 
 def _cli(real_p, sim_p, *extra) -> list[str]:
@@ -135,9 +174,13 @@ def _cli(real_p, sim_p, *extra) -> list[str]:
 
 DATES = ["2026-08-01", "2026-08-02", "2026-08-03"]
 
+BASKET = ["BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE"]
+
 # Sim intent for a 0.5 -> 1.0 ladder step on one asset.
 BTC_BUY = {"BTC": 0.5 / 7}
 BTC_SELL = {"BTC": -0.5 / 7}
+# ...and the same step across the whole basket: turnover 0.5.
+FULL_STEP_BUY = {a: 0.5 / 7 for a in BASKET}
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +257,73 @@ def test_custom_threshold_widens_the_band(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Trade-phase alignment of the two equity curves (Codex 3858504494)
+# ---------------------------------------------------------------------------
+
+def test_transition_date_equity_compared_at_same_trade_phase(tmp_path):
+    """Execution replicates the simulation exactly and the transition
+    falls on the LAST aligned date. Real ``equity_usd`` is read pre-trade
+    while the harness journals equity post-cost, so comparing them raw
+    charges the sim's turnover cost one observation early — a false
+    level gap and a false return difference on the transition date."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    # +0.5% per day at ladder 0.5 on both curves, pre-trade phase.
+    real_pre = [100.0, 100.5, 101.0025]
+    sim_pre = [10_000.0, 10_050.0, 10_100.25]
+    _write_real(real_p, [
+        _cycle(DATES[0], real_pre[0], 0.5, orders_executed=[]),
+        _cycle(DATES[1], real_pre[1], 0.5, orders_executed=[]),
+        _cycle(DATES[2], real_pre[2], 1.0, orders_executed=[
+            _filled_order(f"{a}/USDT", "buy") for a in BASKET
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row_phased(DATES[0], sim_pre[0], gross=0.0),
+        _sim_row_phased(DATES[1], sim_pre[1], gross=0.005),
+        _sim_row_phased(DATES[2], sim_pre[2], gross=0.005,
+                        ladder=1.0, prior=0.5, intended=FULL_STEP_BUY),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.equity.n_aligned_days == 3
+    assert report.equity.cum_abs_return_diff == pytest.approx(0.0, abs=1e-12)
+    assert report.equity.level_gap_pct == pytest.approx(0.0, abs=1e-9)
+    assert not report.equity.breached
+    tr = report.transitions
+    assert tr.missing_trades == []
+    assert tr.unexpected_orders == []
+
+
+def test_sim_equity_series_is_the_pre_trade_phase():
+    """The series the comparison consumes backs the journaled turnover
+    cost out, using committed fields only (gross − net)."""
+    row = _sim_row_phased(
+        DATES[1], 10_000.0, gross=0.005,
+        ladder=1.0, prior=0.5, intended=FULL_STEP_BUY,
+    )
+    assert row.portfolio_equity == pytest.approx(10_000.0 * (1.0 - 0.0005))
+    series = sim_pre_trade_equity_by_date([row])
+    assert series[DATES[1]] == pytest.approx(10_000.0)
+
+
+@pytest.mark.parametrize("gross,net", [
+    (0.0, 0.5),   # net above gross → negative "cost"
+    (1.0, 0.0),   # cost fraction 1.0 → division by zero
+])
+def test_impossible_cost_fraction_is_tool_error(tmp_path, capsys, gross, net):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5)])
+    drifted = dataclasses.replace(
+        _sim_row(DATES[0], 10_000.0),
+        gross_position_return=gross, net_position_return=net,
+    )
+    _write_sim(sim_p, [drifted])
+    with pytest.raises(ValueError, match="pre-trade equity phase"):
+        check_execution_tracking(real_p, sim_p)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    assert "TRACKING ERROR" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Consistent per-date equity sampling (Codex 3858329138)
 # ---------------------------------------------------------------------------
 
@@ -277,6 +387,9 @@ def test_expected_trades_come_from_sim_not_mainnet(tmp_path):
     assert len(tr.unexpected_orders) == 1
     assert tr.unexpected_orders[0]["symbol"] == "BTC/USDT"
     assert tr.missing_trades == []
+    # The date HAS a harness row, so its "no trade" expectation is real:
+    # this is a mismatch, not a coverage gap.
+    assert tr.out_of_coverage_fills == []
 
 
 def test_sim_intended_trade_with_matching_fill_not_flagged(tmp_path):
@@ -702,7 +815,6 @@ def test_sim_schema_drift_exit_2_names_the_row(tmp_path, capsys):
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5)])
     _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
-    import dataclasses
     drifted = dataclasses.asdict(_sim_row(DATES[1], 10_000.0))
     drifted["surprise_field"] = 1
     with open(sim_p, "a", encoding="utf-8") as f:
@@ -714,3 +826,87 @@ def test_sim_schema_drift_exit_2_names_the_row(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "TRACKING ERROR" in err
     assert DATES[1] in err  # message names the offending row
+
+
+# ---------------------------------------------------------------------------
+# Harness journal: only a malformed FINAL line is tolerable (Codex 3858504483)
+# ---------------------------------------------------------------------------
+
+def test_corrupt_middle_harness_row_exit_2_names_the_line(tmp_path, capsys):
+    """A malformed mid-journal row can carry the intended transition; if
+    the matching real trade is missing too, skipping it would report
+    'no mismatch'. Tool error naming the line, like the mainnet path."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(d, 100.0, 0.5, orders_executed=[]) for d in DATES
+    ])
+    _write_sim_raw(sim_p, [
+        _sim_line(_sim_row(DATES[0], 10_000.0)),
+        "{corrupt json\n",  # held the DATES[1] transition
+        _sim_line(_sim_row(DATES[2], 10_000.0, ladder=1.0)),
+    ])
+    with pytest.raises(ValueError, match="line 2"):
+        check_execution_tracking(real_p, sim_p)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    err = capsys.readouterr().err
+    assert "TRACKING ERROR" in err
+    assert "line 2" in err
+
+
+@pytest.mark.parametrize("tail", ["{trunc", "{trunc\n", "{trunc\n\n"])
+def test_corrupt_tail_harness_row_tolerated(tmp_path, tail):
+    """The documented crash-truncated append: last row with content,
+    skipped, report still produced."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES[:2]])
+    _write_sim_raw(sim_p, [
+        _sim_line(_sim_row(DATES[0], 10_000.0)),
+        _sim_line(_sim_row(DATES[1], 10_000.0)),
+        tail,
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.equity.n_aligned_days == 2
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+
+
+# ---------------------------------------------------------------------------
+# Simulation coverage vs "unexpected" (Codex 3858504486)
+# ---------------------------------------------------------------------------
+
+def test_fill_before_sim_coverage_is_not_unexpected(tmp_path, capsys):
+    """Mainnet journal starts before the harness journal (staggered
+    deployment / partial retention): those dates hold no simulated
+    expectation at all, so their fills are a coverage note — labelling
+    them 'unexpected' would be a permanent false mismatch."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[_filled_order()]),
+        _cycle(DATES[1], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[2], 100.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[1:]])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert tr.unexpected_orders == []
+    assert [e["date"] for e in tr.out_of_coverage_fills] == [DATES[0]]
+    assert tr.coverage == (DATES[1], DATES[2])
+    assert "COVERAGE NOTE" in report.advisory
+    assert DATES[0] in report.advisory
+    assert "mismatch" not in report.advisory.lower().split("coverage note")[0]
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+    assert "OUTSIDE SIM COVERAGE" in capsys.readouterr().out
+
+
+def test_fill_after_sim_coverage_is_not_unexpected(tmp_path):
+    """Same on the other end: the harness cron stopped, mainnet kept
+    trading — later fills are outside coverage, not mismatches."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[2], 100.0, 0.5, orders_executed=[_filled_order()]),
+    ])
+    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.unexpected_orders == []
+    assert [e["date"] for e in tr.out_of_coverage_fills] == [DATES[2]]
+    assert tr.coverage == (DATES[0], DATES[0])

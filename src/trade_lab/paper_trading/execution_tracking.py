@@ -8,21 +8,27 @@ monitor and the look-ahead detector. Reads two journals:
 
 and answers two questions:
 
-1. Does real equity track the simulated equity, aligned by signal date?
-   Per date one CONSISTENT real cycle is sampled: the daily live cycle,
-   falling back to the first dry-run only when no live cycle exists.
+1. Does real equity track the simulated equity, aligned by signal date
+   AND by trade phase (both curves PRE-trade — see
+   :func:`sim_pre_trade_equity_by_date`)? Per date one CONSISTENT real
+   cycle is sampled: the daily live cycle, falling back to the first
+   dry-run only when no live cycle exists.
 2. Did real execution carry out the trades the SIMULATION intended?
    Expectations come from the harness rows (``intended_trades``), never
    from the mainnet journal itself — an erroneous production signal and
    its own orders would match each other. Mainnet supplies only the
    actual side: fills and journaled skips. Only LIVE-cycle skips with a
    verified sub-minimum (min-notional class) reason may cover a missing
-   trade; they are counted, never alerted on.
+   trade; they are counted, never alerted on. A fill is "unexpected"
+   only INSIDE simulation coverage (a date with a harness row); fills
+   on uncovered dates are a separate coverage note, not a mismatch.
 
 Data-quality contract: corrupt lines in the mainnet journal are a tool
 error (a malformed line can hold the very cycle under reconciliation);
-unknown-schema-version lines degrade to an explicit incomplete-data
-warning in the report.
+in the harness journal only a malformed FINAL line is tolerated (the
+crash-truncated append), a malformed row anywhere earlier is a tool
+error too; unknown-schema-version lines degrade to an explicit
+incomplete-data warning in the report.
 
 Descriptive, not normative — same contract as the fingerprint monitor.
 """
@@ -80,6 +86,8 @@ class TransitionCheck:
     wrong_direction_trades: list  # [{date, symbol, expected_side, actual_side}]
     partial_fills: list           # [{date, symbol, side, filled, intended, id}]
     unexpected_orders: list       # [{date, symbol, side, notional, cycle_id}]
+    out_of_coverage_fills: list   # fills on dates the harness never logged
+    coverage: Optional[tuple]     # (first, last) harness-covered ISO dates
 
 
 @dataclass(frozen=True)
@@ -122,26 +130,39 @@ def _read_sim_rows(path: Path) -> list[HarnessLogRow]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"harness journal not found: {path}")
-    rows: list[HarnessLogRow] = []
     with open(path, "r", encoding="utf-8") as f:
-        for lineno, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
+        lines = f.readlines()
+    # Only a crash-truncated append is tolerable, and it can only be the
+    # last row with content. A malformed row anywhere earlier drops an
+    # intended transition out of the expectations — and if the matching
+    # real trade is missing too, the report would read "no mismatch".
+    last_content = max(
+        (i for i, raw in enumerate(lines, start=1) if raw.strip()), default=0
+    )
+    rows: list[HarnessLogRow] = []
+    for lineno, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if lineno == last_content:
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                # Crash-truncated tail — same tolerance as journal.read_log.
-                continue
-            try:
-                rows.append(HarnessLogRow(**data))
-            except TypeError as exc:
-                # Schema drift is a tool error, not a breach; name the row.
-                date = data.get("date", "?") if isinstance(data, dict) else "?"
-                raise ValueError(
-                    f"harness journal {path} line {lineno} (date={date}) "
-                    f"does not match HarnessLogRow: {exc}"
-                ) from exc
+            raise ValueError(
+                f"harness journal {path} line {lineno}: malformed row "
+                "before the end of the journal — an intended trade may be "
+                "hidden there; repair the journal first"
+            ) from exc
+        try:
+            rows.append(HarnessLogRow(**data))
+        except TypeError as exc:
+            # Schema drift is a tool error, not a breach; name the row.
+            date = data.get("date", "?") if isinstance(data, dict) else "?"
+            raise ValueError(
+                f"harness journal {path} line {lineno} (date={date}) "
+                f"does not match HarnessLogRow: {exc}"
+            ) from exc
     return rows
 
 
@@ -182,6 +203,10 @@ def _base_asset(symbol) -> str:
 def real_equity_by_date(cycles: list[dict]) -> dict[str, float]:
     """Successful cycles' ``equity_usd`` keyed by signal date.
 
+    PRE-TRADE by construction: ``equity_usd`` comes from the cycle's read
+    phase, before that date's orders are placed. The sim side is brought
+    onto the same phase (see :func:`sim_pre_trade_equity_by_date`).
+
     One CONSISTENT cycle per date: the first live cycle wins; the first
     dry-run is a fallback only until a live cycle appears. Last-wins
     would let an 18:00 dry-run valuation retroactively replace the 00:05
@@ -209,8 +234,33 @@ def real_equity_by_date(cycles: list[dict]) -> dict[str, float]:
     return out
 
 
-def sim_equity_by_date(rows: list[HarnessLogRow]) -> dict[str, float]:
-    return {r.date: float(r.portfolio_equity) for r in rows}
+def sim_pre_trade_equity_by_date(rows: list[HarnessLogRow]) -> dict[str, float]:
+    """Harness equity per signal date, backed out to the PRE-trade phase.
+
+    ``portfolio_equity`` is journaled AFTER the row's simulated turnover
+    cost is deducted, while real ``equity_usd`` is read BEFORE that date's
+    orders go out. Comparing them raw charges the cost one observation
+    early on the sim curve — a false level gap and a false return
+    difference on exactly the transition dates that matter. The cost
+    fraction is recoverable from committed fields: the harness computes
+    ``net = gross - turnover x cost_rate`` and
+    ``equity_post = equity_pre x (1 - turnover x cost_rate)``.
+    """
+    out: dict[str, float] = {}
+    for r in rows:
+        cost_fraction = (
+            float(r.gross_position_return) - float(r.net_position_return)
+        )
+        # turnover and cost_rate are both non-negative, so anything
+        # outside [0, 1) (NaN included) is schema drift, not a cost.
+        if not 0.0 <= cost_fraction < 1.0:
+            raise ValueError(
+                f"harness row {r.date}: implied turnover cost fraction "
+                f"{cost_fraction} outside [0, 1) — cannot restore the "
+                "pre-trade equity phase"
+            )
+        out[r.date] = float(r.portfolio_equity) / (1.0 - cost_fraction)
+    return out
 
 
 def compare_equity(
@@ -411,18 +461,31 @@ def check_transitions(
             missing.append({"date": d, "symbol": asset, "expected_side": want})
 
     expected_keys = {(d, a) for d, m in expected.items() for a in m}
-    unexpected = [
-        {
+    # A date WITH a harness row carries a real "no trade" expectation; a
+    # date the harness never logged (staggered start, partial retention)
+    # carries none — calling those fills unexpected is a permanent false
+    # mismatch, so they are reported as coverage instead.
+    covered_dates = {r.date for r in sim_rows}
+    unexpected: list[dict] = []
+    out_of_coverage: list[dict] = []
+    for e in events:
+        if (e["date"], _base_asset(e["symbol"])) in expected_keys:
+            continue
+        record = {
             "date": e["date"],
             "symbol": e["symbol"],
             "side": e["side"],
             "filled_notional_quote": e["filled_notional_quote"],
             "cycle_id": e["cycle_id"],
         }
-        for e in events
-        if (e["date"], _base_asset(e["symbol"])) not in expected_keys
-    ]
+        if e["date"] in covered_dates:
+            unexpected.append(record)
+        else:
+            out_of_coverage.append(record)
 
+    coverage = (
+        (min(covered_dates), max(covered_dates)) if covered_dates else None
+    )
     return TransitionCheck(
         n_real_fill_events=len(events),
         n_sim_trade_dates=len(expected),
@@ -433,6 +496,8 @@ def check_transitions(
         wrong_direction_trades=wrong_direction,
         partial_fills=partials,
         unexpected_orders=unexpected,
+        out_of_coverage_fills=out_of_coverage,
+        coverage=coverage,
     )
 
 
@@ -449,7 +514,7 @@ def check_execution_tracking(
     cycles, real_stats = _read_real_cycles(real_journal)
     rows = _read_sim_rows(sim_journal)
     equity = compare_equity(
-        real_equity_by_date(cycles), sim_equity_by_date(rows),
+        real_equity_by_date(cycles), sim_pre_trade_equity_by_date(rows),
         gap_threshold_pct,
     )
     transitions = check_transitions(cycles, rows)
@@ -463,7 +528,8 @@ def check_execution_tracking(
         advisory = (
             f"TRACKING BREACH — real-vs-sim level gap "
             f"{equity.level_gap_pct:+.2f}% exceeds "
-            f"±{equity.threshold_pct:.2f}%. Operator review."
+            f"±{equity.threshold_pct:.2f}% (both curves pre-trade). "
+            "Operator review."
         )
     else:
         advisory = "Real execution tracks the simulation within threshold."
@@ -476,6 +542,19 @@ def check_execution_tracking(
             f" Trade mismatches: {n_missing} missing, {n_wrong} "
             f"wrong-direction, {n_partial} partial, {n_unexpected} "
             f"unexpected."
+        )
+    if transitions.out_of_coverage_fills:
+        dates = sorted({e["date"] for e in transitions.out_of_coverage_fills})
+        span = (
+            f"{transitions.coverage[0]}..{transitions.coverage[1]}"
+            if transitions.coverage else "empty"
+        )
+        listed = ", ".join(dates)
+        advisory += (
+            f" COVERAGE NOTE: {len(transitions.out_of_coverage_fills)} real "
+            f"fill(s) on date(s) outside harness coverage ({span}): "
+            f"{listed} — the simulation expected nothing there, so they are "
+            "not counted as mismatches."
         )
     if real_stats.unknown_version_lines:
         advisory += (
