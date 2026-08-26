@@ -167,6 +167,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{e['side']} {e['filled_notional_quote']:.2f} quote "
             f"(cycle {e['cycle_id']}) — no sim-intended trade"
         )
+    for e in tr.wrong_market_fills:
+        print(
+            f"    WRONG MARKET: {e['date']} {e['symbol']} {e['side']} "
+            f"{e['filled_notional_quote']:.2f} quote (cycle {e['cycle_id']}) "
+            f"— simulation trades only /{e['expected_quote']}"
+        )
     for m in tr.pre_live_sim_trades:
         # Not a mismatch: no live cycle existed on that date yet.
         print(

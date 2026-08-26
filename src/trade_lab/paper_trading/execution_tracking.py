@@ -98,6 +98,7 @@ class TransitionCheck:
     partial_fills: list           # [{date, symbol, side, filled, intended, id}]
     size_mismatches: list         # [{date, symbol, expected_dw, actual_dw, ratio}]
     unexpected_orders: list       # [{date, symbol, side, notional, cycle_id}]
+    wrong_market_fills: list      # fills on a non-USDT quote market
     out_of_coverage_fills: list   # fills on dates the harness never logged
     pre_live_sim_trades: list     # sim intents before the first live attempt
     coverage: Optional[tuple]     # (first, last) harness-covered ISO dates
@@ -207,6 +208,17 @@ def _coid_signal_date(coid: str) -> Optional[str]:
 
 def _base_asset(symbol) -> str:
     return str(symbol or "?").split("/")[0]
+
+
+# The harness trades {asset}/USDT. A real fill on another quote market is
+# config drift, not the intended trade — reducing it to its base asset
+# would let BTC/FDUSD (or a bare "BTC") satisfy a BTC/USDT expectation.
+SIM_QUOTE = "USDT"
+
+
+def _quote_asset(symbol) -> Optional[str]:
+    parts = str(symbol or "").split("/")
+    return parts[1] if len(parts) == 2 and parts[1] else None
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +451,15 @@ def _is_min_notional_reason(reason: str) -> bool:
     return any(marker in reason for marker in _MIN_NOTIONAL_MARKERS)
 
 
-def live_min_notional_skips(cycles: list[dict]) -> dict[tuple, set]:
-    """(signal date, base asset) -> desired sides. LIVE cycles only."""
-    out: dict[tuple, set] = {}
+def live_min_notional_skips(cycles: list[dict]) -> dict[tuple, dict]:
+    """(signal date, base asset) -> {side: largest skipped notional}.
+
+    The notional is retained, not just the side: a skip only legitimizes
+    a missed trade when the SIM's own intent was sub-minimum too. A
+    production sizing bug that computes a dust order and skips it as
+    ``< min_cost`` must not excuse a material intent.
+    """
+    out: dict[tuple, dict] = {}
     for c in cycles:
         if not is_live_attempt(c):
             continue
@@ -455,10 +473,29 @@ def live_min_notional_skips(cycles: list[dict]) -> dict[tuple, set]:
             if not _is_min_notional_reason(str(s.get("reason") or "")):
                 continue
             key = (d, _base_asset(s.get("symbol")))
-            out.setdefault(key, set()).add(
-                str(s.get("desired_side") or "").lower()
-            )
+            side = str(s.get("desired_side") or "").lower()
+            notional = as_float(s.get("desired_notional"))
+            sides = out.setdefault(key, {})
+            sides[side] = max(sides.get(side, 0.0), notional)
     return out
+
+
+def _skip_covers(
+    expected_dw: float, skipped_notional: float, equity: Optional[float],
+) -> bool:
+    """True when the skip plausibly IS the sim's intent, sub-minimum.
+
+    Without the book we cannot compare the two, so the side match alone
+    decides (the pre-existing posture). With it, the skipped notional
+    must be within the same size band as the intent — a dust skip beside
+    a material intent is a sizing bug wearing a legitimate reason.
+    """
+    if equity is None or not math.isfinite(equity) or equity <= 0.0:
+        return True
+    want = abs(float(expected_dw))
+    if want < _SIZE_MIN_INTENT_DW:
+        return True     # lot-step territory: not judgeable either way
+    return (skipped_notional / equity) / want >= _SIZE_RATIO_LO
 
 
 def _size_mismatch(
@@ -516,8 +553,21 @@ def check_transitions(
     real_eq = real_equity_by_date(cycles)
     first_live = first_live_attempt_date(cycles)
 
+    # A fill on a market the sim never trades can never satisfy an
+    # expectation — it is drift, surfaced on its own.
+    wrong_market: list[dict] = []
     by_key: dict[tuple, list[dict]] = {}
     for e in events:
+        if _quote_asset(e["symbol"]) != SIM_QUOTE:
+            wrong_market.append({
+                "date": e["date"],
+                "symbol": e["symbol"],
+                "side": e["side"],
+                "filled_notional_quote": e["filled_notional_quote"],
+                "expected_quote": SIM_QUOTE,
+                "cycle_id": e["cycle_id"],
+            })
+            continue
         by_key.setdefault((e["date"], _base_asset(e["symbol"])), []).append(e)
 
     missing: list[dict] = []
@@ -565,9 +615,14 @@ def check_transitions(
                     "actual_side": evs[0]["side"],
                 })
                 continue
-            # Coverage requires the SAME side: a journaled sell-skip does
-            # not legitimize a missed buy.
-            if want in skips.get((d, asset), set()):
+            # Coverage requires the SAME side AND a comparable size: a
+            # journaled sell-skip does not legitimize a missed buy, and a
+            # dust skip does not legitimize a material intent (a sizing
+            # bug produces exactly that shape).
+            skipped_notional = skips.get((d, asset), {}).get(want)
+            if skipped_notional is not None and _skip_covers(
+                expected[d][asset], skipped_notional, real_eq.get(d),
+            ):
                 covered += 1
                 continue
             missing.append({"date": d, "symbol": asset, "expected_side": want})
@@ -581,6 +636,8 @@ def check_transitions(
     unexpected: list[dict] = []
     out_of_coverage: list[dict] = []
     for e in events:
+        if _quote_asset(e["symbol"]) != SIM_QUOTE:
+            continue      # already surfaced as wrong_market
         if (e["date"], _base_asset(e["symbol"])) in expected_keys:
             continue
         record = {
@@ -609,6 +666,7 @@ def check_transitions(
         partial_fills=partials,
         size_mismatches=size_mismatches,
         unexpected_orders=unexpected,
+        wrong_market_fills=wrong_market,
         out_of_coverage_fills=out_of_coverage,
         pre_live_sim_trades=pre_live,
         coverage=coverage,
@@ -657,6 +715,12 @@ def check_execution_tracking(
             f" Trade mismatches: {n_missing} missing, {n_wrong} "
             f"wrong-direction, {n_partial} partial, {n_size} mis-sized, "
             f"{n_unexpected} unexpected."
+        )
+    if transitions.wrong_market_fills:
+        advisory += (
+            f" WRONG MARKET: {len(transitions.wrong_market_fills)} real "
+            f"fill(s) on a quote market the simulation never trades "
+            f"(expected {SIM_QUOTE}) — configuration drift, not a match."
         )
     if transitions.pre_live_sim_trades:
         dates = sorted({e["date"] for e in transitions.pre_live_sim_trades})

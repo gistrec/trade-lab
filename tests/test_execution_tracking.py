@@ -113,13 +113,18 @@ def _filled_order(
 def _min_notional_skip(
     symbol: str = "DOGE/USDT",
     side: str = "buy",
-    reason: str = "notional 3.0000 < min_cost 5",
+    reason: str = "notional 7.1429 < min_cost 10",
+    desired_notional: float = 100.0 * 0.5 / 7,
 ) -> dict:
+    # Size-consistent with the default fixtures: the sim intends 0.5/7 of
+    # a 100 book (~7.14 quote) and the venue minimum sits above it, so the
+    # skip legitimately IS that intent. A skip far under the intent is a
+    # sizing bug and must NOT grant coverage.
     return {
         "symbol": symbol,
         "desired_side": side,
         "desired_amount": 10.0,
-        "desired_notional": 3.0,
+        "desired_notional": desired_notional,
         "reason": reason,
     }
 
@@ -1078,3 +1083,67 @@ def test_non_finite_equity_is_a_tool_error(tmp_path, capsys, bad):
     assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
     err = capsys.readouterr().err
     assert "non-finite equity" in err
+
+
+def test_dust_skip_does_not_cover_a_material_intent(tmp_path):
+    """Codex 3859624351: a sizing bug computes a dust order, the venue
+    refuses it as sub-minimum, and the legitimate-looking reason would
+    excuse a materially larger simulated intent."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5),
+        # Sim intends ~7.14 quote of a 100 book; the real planner sized
+        # 0.30 and the venue refused it.
+        _cycle(DATES[1], 100.0, 1.0, orders_skipped=[
+            _min_notional_skip("BTC/USDT", "buy", desired_notional=0.30),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_trades_skip_covered == 0
+    assert [m["symbol"] for m in tr.missing_trades] == ["BTC"]
+
+
+def test_same_sized_skip_still_covers(tmp_path):
+    """The genuine case must keep working: the skip IS the sim's intent,
+    refused by the venue minimum."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5),
+        _cycle(DATES[1], 100.0, 1.0,
+               orders_skipped=[_min_notional_skip("BTC/USDT", "buy")]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.n_trades_skip_covered == 1
+    assert tr.missing_trades == []
+
+
+def test_fill_on_another_quote_market_is_not_a_match(tmp_path, capsys):
+    """Codex 3859624374: the sim trades {asset}/USDT. Reducing symbols to
+    the base asset would let BTC/FDUSD satisfy a BTC/USDT expectation."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[
+            _filled_order(symbol="BTC/FDUSD"),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert [e["symbol"] for e in tr.wrong_market_fills] == ["BTC/FDUSD"]
+    # ...and the USDT trade is still reported as never executed.
+    assert [m["symbol"] for m in tr.missing_trades] == ["BTC"]
+    assert "WRONG MARKET" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p)) == 0
+    assert "WRONG MARKET" in capsys.readouterr().out
