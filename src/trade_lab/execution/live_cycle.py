@@ -240,14 +240,21 @@ def run_live_cycle(
         # order and waits on it, which cannot duplicate.
         pending_skips: list[SkippedDelta] = []
         sendable: list = []
+        # Buys the exchange already holds quote against under THIS cycle's
+        # coid: they are funded outside balance.quote_free, and place_order
+        # resolves the existing order rather than sending a resized one, so
+        # the reserve cap must leave them alone (see apply_reserve_cap).
+        funded_symbols: set[str] = set()
         for intent in plan.orders:
             coid = make_client_order_id(rebal_date, intent.symbol, intent.side)
-            blockers = [
-                e for e in pending_by_pair.get(intent.symbol, [])
-                if e.client_order_id != coid
-            ]
+            pending = pending_by_pair.get(intent.symbol, [])
+            blockers = [e for e in pending if e.client_order_id != coid]
             if not blockers:
                 sendable.append(intent)
+                if intent.side == "buy" and any(
+                    e.client_order_id == coid for e in pending
+                ):
+                    funded_symbols.add(intent.symbol)
                 continue
             logger.warning(
                 "SKIP %s %s (%.2f %s): order %s from a prior cycle is "
@@ -311,6 +318,7 @@ def run_live_cycle(
             sendable,
             quote_free=balance.quote_free,
             constraints=read.constraints,
+            funded_symbols=funded_symbols,
         )
 
         sorted_intents = sort_orders_for_placement(sendable)

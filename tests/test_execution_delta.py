@@ -7,7 +7,8 @@ import pytest
 from trade_lab.execution.allocator import compute_target_allocation
 from trade_lab.execution.broker import MarketConstraints
 from trade_lab.execution.delta import (
-    RESERVE_BPS, compute_delta_plan, total_skipped_quote_drift,
+    RESERVE_BPS, OrderIntent, apply_reserve_cap, compute_delta_plan,
+    total_skipped_quote_drift,
 )
 
 
@@ -368,6 +369,29 @@ def test_zero_free_quote_records_true_gap_as_funding_cap():
     assert all(s.reason == "funding_cap" for s in plan.skipped)
     assert all(s.desired_notional > 0 for s in plan.skipped)
     assert total_skipped_quote_drift(plan) == pytest.approx(70_000.0, rel=1e-6)
+
+
+def test_funded_symbol_is_excluded_from_cap_spend_and_scaling():
+    """A buy the exchange already holds quote against (same coid still
+    open) is funded outside quote_free and gets resolved, not resized —
+    it must neither consume the cap nor be scaled. Only the buy the free
+    quote actually has to fund is shaved."""
+    orders = [
+        OrderIntent(symbol="BTC/USDT", side="buy", base_amount=0.1,
+                    notional_quote=5_000.0, price_used=50_000.0,
+                    reason="delta from target"),
+        OrderIntent(symbol="ETH/USDT", side="buy", base_amount=1.0,
+                    notional_quote=3_000.0, price_used=3_000.0,
+                    reason="delta from target"),
+    ]
+    capped, skips = apply_reserve_cap(
+        orders, quote_free=3_000.0, constraints={},
+        funded_symbols={"BTC/USDT"},
+    )
+    by_sym = {o.symbol: o for o in capped}
+    assert by_sym["BTC/USDT"] == orders[0]
+    assert by_sym["ETH/USDT"].notional_quote == pytest.approx(3_000.0 * 0.999)
+    assert [(s.symbol, s.reason) for s in skips] == [("ETH/USDT", "funding_cap")]
 
 
 # ---------------------------------------------------------------------------

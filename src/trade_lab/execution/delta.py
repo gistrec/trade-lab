@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence
+from typing import Collection, Mapping, Optional, Sequence
 
 from .allocator import TargetAllocation
 from .broker import MarketConstraints
@@ -185,6 +185,7 @@ def apply_reserve_cap(
     *,
     quote_free: float,
     constraints: Mapping[str, MarketConstraints],
+    funded_symbols: Collection[str] = (),
 ) -> tuple[list[OrderIntent], list[SkippedDelta]]:
     """Cap total buy spend at ``RESERVE_BPS`` under the available quote.
 
@@ -194,12 +195,22 @@ def apply_reserve_cap(
     month-start cross-rebalance. On the full-entry path (no sells) this
     reduces to exactly quote_free.
 
+    ``funded_symbols`` names buys whose quote the exchange already holds
+    — a same-clientOrderId order still open from an earlier run of the
+    same day. ``quote_free`` excludes that locked quote and the caller
+    resolves the existing order instead of sending a scaled replacement,
+    so scaling such a buy only deletes the reduction while shaving the
+    buys that really do need funding. They pass through untouched and
+    stay out of the spend total.
+
     Every capped-away buy portion comes back as a ``funding_cap``
     :class:`SkippedDelta` carrying the UNSCALED gap — the cap is a real
     divergence from the backtest and must stay first-class, not vanish
     into zero-valued lot-step skips.
     """
-    buy_spend = sum(o.notional_quote for o in orders if o.side == "buy")
+    funded = frozenset(funded_symbols)
+    scalable = [o for o in orders if o.side == "buy" and o.symbol not in funded]
+    buy_spend = sum(o.notional_quote for o in scalable)
     if buy_spend <= 0.0:
         return list(orders), []
     available = float(quote_free) + sum(
@@ -210,7 +221,7 @@ def apply_reserve_cap(
         return list(orders), []   # slack exists — orders unchanged
 
     scale = cap / buy_spend
-    buys = {o.symbol: o for o in orders if o.side == "buy"}
+    buys = {o.symbol: o for o in scalable}
     amounts: dict[str, float] = {}
     for sym, o in buys.items():
         c = constraints.get(sym)
@@ -243,7 +254,7 @@ def apply_reserve_cap(
     capped: list[OrderIntent] = []
     skips: list[SkippedDelta] = []
     for o in orders:
-        if o.side != "buy":
+        if o.side != "buy" or o.symbol in funded:
             capped.append(o)
             continue
         a = amounts[o.symbol]
