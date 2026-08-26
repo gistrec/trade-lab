@@ -311,6 +311,22 @@ fast-path.
    require `TRADE_LAB_PAPER_MAINNET_LIVE_ORDERS=true` in
    `.env.mainnet` — the cron does not open the gate by itself.
 
+### Capital floor (issue #12)
+
+The ladder half-step sizes each asset at 0.5/7 of equity ≈ 0.0714 ×
+equity. With the 5 USDT min-notional a half-step order needs equity
+≥ ~70 USDT nominal — closer to ~100 with drifted weights (w_i up to
+~0.10 between rebalances). Surviving a repeat of the validated max
+DD −32.17% (findings/production_config_v1.md) without crossing the
+~70 line needs ≈103 nominal → recommended book **≥ 110–125 USDT**
+(lot/fee rounding and drift buffer on top).
+
+Below the floor the executor's behavior is UNCHANGED: sub-min-notional
+deltas are skipped and journaled first-class (`delta.py`,
+`total_skipped_quote_drift`). The floor is an operating requirement —
+the netdata `trade_lab_mainnet_equity_floor` alarm warns under
+80 USDT and the top-up is a manual owner action — not a code path.
+
 ### Why testnet cannot validate order placement
 
 Binance Spot Testnet wipes kline history on a ~monthly reset, so the
