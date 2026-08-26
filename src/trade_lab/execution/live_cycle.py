@@ -65,7 +65,10 @@ from .cycle_common import (
 from .cycle_common import (  # noqa: F401  (re-export: tests hit the ticker fallback through this name)
     gather_ticker_prices as _gather_ticker_prices,
 )
-from .delta import SkippedDelta, apply_reserve_cap, total_skipped_quote_drift
+from .delta import (
+    SkippedDelta, apply_reserve_cap, total_funding_cap_quote,
+    total_skipped_quote_drift,
+)
 from .journal import (
     Cycle,
     JournalWriter,
@@ -318,6 +321,7 @@ def run_live_cycle(
             sendable,
             quote_free=balance.quote_free,
             constraints=read.constraints,
+            fee_rate=fee_rate,
             funded_symbols=funded_symbols,
         )
 
@@ -768,10 +772,15 @@ def _write_main_cycle(
             for s in submin_skips + pending_skips + funding_skips
         ],
         # No pending_skips here: a pending_order skip is transient
-        # (retried next cycle), while this metric tracks quote that was
-        # unfillable this cycle — sub-min gaps and funding-cap shaves.
+        # (retried next cycle), while this metric tracks quote the
+        # exchange refused this cycle. Funding-cap shaves are metered
+        # apart — they are a deliberate reserve on valid orders, and the
+        # monitoring layer reads this field as "unfillable".
         total_skipped_quote_drift=total_skipped_quote_drift(
-            replace(plan, skipped=submin_skips + funding_skips)
+            replace(plan, skipped=submin_skips)
+        ),
+        total_funding_cap_quote=total_funding_cap_quote(
+            replace(plan, skipped=funding_skips)
         ),
         orders_executed=[r.to_dict() for r in order_results],
         price_fallbacks=price_fallbacks,

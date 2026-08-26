@@ -116,6 +116,11 @@ class Cycle:
     # tickers that failed and were sized on the (stale) candle close.
     # None when every ticker succeeded — divergent pricing is a
     # first-class output, not just a cron-log warning.
+    total_funding_cap_quote: Optional[float] = None
+    # Quote the RESERVE_BPS buy cap held back. Kept OUT of
+    # total_skipped_quote_drift, whose contract (monitoring's "unfillable
+    # rebalance drift") is work the exchange refused — this is a
+    # deliberate buffer on otherwise valid orders.
     schema_version: int = JOURNAL_SCHEMA_VERSION
 
 

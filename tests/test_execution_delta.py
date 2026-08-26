@@ -8,7 +8,7 @@ from trade_lab.execution.allocator import compute_target_allocation
 from trade_lab.execution.broker import MarketConstraints
 from trade_lab.execution.delta import (
     RESERVE_BPS, OrderIntent, apply_reserve_cap, compute_delta_plan,
-    total_skipped_quote_drift,
+    total_funding_cap_quote, total_skipped_quote_drift,
 )
 
 
@@ -258,6 +258,7 @@ def test_full_cash_entry_reserves_10bp_of_free_quote():
     plan = compute_delta_plan(
         allocation=alloc, current_holdings={},
         constraints={}, quote_currency="USDT", quote_free=quote_free,
+        fee_rate=0.001,
     )
     total = sum(o.notional_quote for o in plan.orders)
     assert total <= quote_free * (1 - RESERVE_BPS / 10_000) + 1e-6
@@ -265,9 +266,12 @@ def test_full_cash_entry_reserves_10bp_of_free_quote():
     assert total == pytest.approx(quote_free * 0.999)
     by_sym = {o.symbol: o.notional_quote for o in plan.orders}
     assert by_sym["BTC/USDT"] / by_sym["ETH/USDT"] == pytest.approx(0.6 / 0.4)
-    # The shaved 10 bp is journaled as first-class funding_cap drift.
+    # The shaved 10 bp is journaled as first-class funding_cap drift —
+    # metered APART from sub-min drift, whose contract (monitoring's
+    # "unfillable rebalance drift") is work the exchange refused.
     assert [s.reason for s in plan.skipped] == ["funding_cap", "funding_cap"]
-    assert total_skipped_quote_drift(plan) == pytest.approx(quote_free * 0.001)
+    assert total_skipped_quote_drift(plan) == 0.0
+    assert total_funding_cap_quote(plan) == pytest.approx(quote_free * 0.001)
 
 
 def test_partial_rebalance_below_cap_unchanged_by_reserve():
@@ -280,7 +284,8 @@ def test_partial_rebalance_below_cap_unchanged_by_reserve():
         allocation=alloc, current_holdings=current,
         constraints=_binance_like_constraints(), quote_currency="USDT",
     )
-    with_reserve = compute_delta_plan(**kwargs, quote_free=60_000.0)
+    with_reserve = compute_delta_plan(
+        **kwargs, quote_free=60_000.0, fee_rate=0.001)
     assert with_reserve == compute_delta_plan(**kwargs)
     btc = next(o for o in with_reserve.orders if o.symbol == "BTC/USDT")
     assert btc.base_amount == 0.35              # exact, not 0.35 × 0.999
@@ -300,13 +305,17 @@ def test_cross_rebalance_cap_counts_sell_proceeds():
     plan = compute_delta_plan(
         allocation=alloc, current_holdings=current,
         constraints={}, quote_currency="USDT", quote_free=0.0,
+        fee_rate=0.001,
     )
     sides = {o.symbol: o.side for o in plan.orders}
     assert sides == {"BTC/USDT": "sell", "ETH/USDT": "buy"}
     btc = next(o for o in plan.orders if o.symbol == "BTC/USDT")
     eth = next(o for o in plan.orders if o.symbol == "ETH/USDT")
     assert btc.notional_quote == pytest.approx(10_000.0)   # sells unscaled
-    assert eth.notional_quote == pytest.approx(10_000.0 * 0.999)
+    # Buys are funded by the sell NET of the taker fee, then the 10 bp
+    # price reserve — sizing off the gross notional would hand the whole
+    # reserve to the fee.
+    assert eth.notional_quote == pytest.approx(10_000.0 * (1 - 0.001) * 0.999)
 
 
 def test_pure_sell_plan_unaffected_by_reserve():
@@ -317,7 +326,9 @@ def test_pure_sell_plan_unaffected_by_reserve():
         allocation=alloc, current_holdings=current,
         constraints=_binance_like_constraints(), quote_currency="USDT",
     )
-    assert compute_delta_plan(**kwargs, quote_free=3.0) == compute_delta_plan(**kwargs)
+    assert compute_delta_plan(
+        **kwargs, quote_free=3.0, fee_rate=0.001,
+    ) == compute_delta_plan(**kwargs)
 
 
 def test_cap_holds_after_lot_step_requantization():
@@ -338,7 +349,7 @@ def test_cap_holds_after_lot_step_requantization():
     }
     plan = compute_delta_plan(
         allocation=alloc, current_holdings={}, constraints=cons,
-        quote_currency="USDT", quote_free=100.0,
+        quote_currency="USDT", quote_free=100.0, fee_rate=0.001,
     )
     cap = 100.0 * (1 - RESERVE_BPS / 10_000)
     [order] = plan.orders
@@ -362,13 +373,14 @@ def test_zero_free_quote_records_true_gap_as_funding_cap():
     plan = compute_delta_plan(
         allocation=alloc, current_holdings={},
         constraints=_binance_like_constraints(), quote_currency="USDT",
-        quote_free=0.0,
+        quote_free=0.0, fee_rate=0.001,
     )
     assert plan.orders == []
     assert {s.symbol for s in plan.skipped} == {"BTC/USDT", "ETH/USDT"}
     assert all(s.reason == "funding_cap" for s in plan.skipped)
     assert all(s.desired_notional > 0 for s in plan.skipped)
-    assert total_skipped_quote_drift(plan) == pytest.approx(70_000.0, rel=1e-6)
+    assert total_skipped_quote_drift(plan) == 0.0   # not exchange-refused
+    assert total_funding_cap_quote(plan) == pytest.approx(70_000.0, rel=1e-6)
 
 
 def test_funded_symbol_is_excluded_from_cap_spend_and_scaling():
@@ -385,7 +397,7 @@ def test_funded_symbol_is_excluded_from_cap_spend_and_scaling():
                     reason="delta from target"),
     ]
     capped, skips = apply_reserve_cap(
-        orders, quote_free=3_000.0, constraints={},
+        orders, quote_free=3_000.0, constraints={}, fee_rate=0.001,
         funded_symbols={"BTC/USDT"},
     )
     by_sym = {o.symbol: o for o in capped}
@@ -477,3 +489,66 @@ def test_min_cost_gate_evaluates_truncated_notional():
     assert "min_cost" in s.reason
     # Drift metric keeps the raw desired gap, not the truncated one.
     assert s.desired_notional == pytest.approx(26.0)
+
+
+def test_sell_proceeds_are_netted_by_the_fee():
+    """Codex 3858750080: a sell credits its notional MINUS the taker fee.
+    Sizing buys off the gross ticker notional hands the whole 10 bp
+    reserve to the fee — at a fee above 10 bp the plan is underfunded
+    even at unchanged prices."""
+    alloc = _allocation()                       # $35k target per asset
+    current = {                                 # BTC $45k, ETH $25k held
+        "BTC": 45_000.0 / _PRICES["BTC"],
+        "ETH": 25_000.0 / _PRICES["ETH"],
+    }
+    fee = 0.005                                 # 50 bp: well above the reserve
+    plan = compute_delta_plan(
+        allocation=alloc, current_holdings=current,
+        constraints={}, quote_currency="USDT", quote_free=0.0, fee_rate=fee,
+    )
+    sell = next(o for o in plan.orders if o.side == "sell")
+    buy = next(o for o in plan.orders if o.side == "buy")
+    spendable = sell.notional_quote * (1.0 - fee)
+    assert buy.notional_quote == pytest.approx(spendable * 0.999)
+    # The invariant that matters: what we spend never exceeds what the
+    # exchange actually credits us.
+    assert buy.notional_quote < spendable
+
+
+def test_cap_restores_a_buy_it_pushed_below_the_minimum():
+    """Codex 3858750071: proportional scaling must not drop an order that
+    was sendable before the cap — suppressing it strands its quote and can
+    leave a basket asset out of the entry entirely."""
+    constraints = {
+        "BTC/USDT": MarketConstraints(
+            symbol="BTC/USDT", min_amount=0.0, min_cost=10.0,
+            amount_precision=8, raw={},
+        ),
+        "ETH/USDT": MarketConstraints(
+            symbol="ETH/USDT", min_amount=0.0, min_cost=10.0,
+            amount_precision=8, raw={},
+        ),
+    }
+    # BTC target sits a hair above the $10 minimum; ETH is large. The cap
+    # shaves ~0.1% off both, which alone would push BTC under the minimum.
+    orders = [
+        OrderIntent(
+            symbol="BTC/USDT", side="buy",
+            base_amount=10.005 / _PRICES["BTC"], notional_quote=10.005,
+            price_used=_PRICES["BTC"], reason="delta from target",
+        ),
+        OrderIntent(
+            symbol="ETH/USDT", side="buy",
+            base_amount=9_989.995 / _PRICES["ETH"], notional_quote=9_989.995,
+            price_used=_PRICES["ETH"], reason="delta from target",
+        ),
+    ]
+    capped, skips = apply_reserve_cap(
+        orders, quote_free=10_000.0, constraints=constraints, fee_rate=0.0,
+    )
+    by_sym = {o.symbol: o for o in capped}
+    assert "BTC/USDT" in by_sym, "the small buy must survive the cap"
+    assert by_sym["BTC/USDT"].notional_quote >= 10.0
+    total = sum(o.notional_quote for o in capped)
+    assert total <= 10_000.0 * 0.999 + 1e-6, "the cap still holds"
+    assert all(s.reason == "funding_cap" for s in skips)

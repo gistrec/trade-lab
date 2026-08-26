@@ -1163,9 +1163,11 @@ def test_reserve_cap_sized_after_pending_filter(tmp_path):
     btc = next(s for s in cycle["orders_skipped"]
                if s["symbol"] == "BTC/USDT")
     assert btc["desired_notional"] == pytest.approx(5_000.0)
-    # Drift counts the 10 bp funding-cap shave; the transient pending
-    # skip stays out.
-    assert cycle["total_skipped_quote_drift"] == pytest.approx(5_000.0 * 0.001)
+    # The 10 bp shave is metered as funding cap, NOT as sub-min drift
+    # (monitoring reads that field as "unfillable"); the transient
+    # pending skip stays out of both.
+    assert cycle["total_skipped_quote_drift"] == 0.0
+    assert cycle["total_funding_cap_quote"] == pytest.approx(5_000.0 * 0.001)
 
 
 def test_reserve_cap_ignores_already_funded_same_coid_buy(tmp_path):
@@ -1218,7 +1220,8 @@ def test_reserve_cap_ignores_already_funded_same_coid_buy(tmp_path):
     )
     reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
     assert reasons == {"ETH/USDT": "funding_cap"}
-    assert cycle["total_skipped_quote_drift"] == pytest.approx(5_000.0 * 0.001)
+    assert cycle["total_skipped_quote_drift"] == 0.0
+    assert cycle["total_funding_cap_quote"] == pytest.approx(5_000.0 * 0.001)
     assert state.get(today_coid).status == "closed"
 
 
