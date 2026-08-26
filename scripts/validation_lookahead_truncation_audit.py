@@ -19,8 +19,12 @@ Scope boundary
   TimeSeriesMomentumStrategy (SMA-200 gate, TSMOM lookbacks), and
   any per-bar fill/alignment that pulls future bytes into the past.
 * Does NOT catch: universe-selection bias (the choice of the 7
-  majors). That is a survivorship question, closed by Test 1 Check A
-  (CLEAN) and Test 5 (PASS).
+  majors). Corrected 2026-08-25: that survivorship question is NOT
+  closed. Test 1 Check A (CLEAN) and Test 5 (PASS) close the listing
+  and liquidity axes only; the composition axis — why these seven
+  coins, picked knowing ex post which majors endured — remains open
+  pending the PIT-universe diagnostic. See the 2026-08-25 addendum in
+  findings/validation_universe_bias.md.
 """
 from __future__ import annotations
 

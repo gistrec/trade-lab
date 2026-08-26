@@ -353,4 +353,31 @@ as historical-snapshot data). Writes
 `outputs/validation_test1_multiexchange.json` with the full metric
 bundle.
 
+## Addendum 2026-08-26 — two corrections to how this test is cited
+
+Original text stays as written per findings immutability.
+
+1. **"Committed to the repo as historical-snapshot data" is
+   inaccurate.** `data/` is gitignored; the parquets were never
+   committed. The verified-window figures are therefore not
+   reproducible from git history via this path. The derived return
+   series behind the DSR numbers that quote this window is now
+   committed instead, at
+   `docs/results/dsr_convention_2026_08_venue_replay_returns.csv`
+   (1588 bars, `#` header pins the frozen-config hash and the data
+   vintage). See `findings/dsr_convention_2026_08.md`.
+2. **"Venue-verified window" is a fixed-config historical replay,
+   not an out-of-sample result.** The +0.721 Sharpe on
+   2022-01-21 → 2026-05-28 comes from re-running the *already
+   selected* frozen config (`ac8919…`) over a window that overlaps
+   the walk-forward OOS sample. What it establishes is venue
+   agreement (Binance vs independently sourced Bybit prices) and
+   where the historical edge sits in time — the RISK FLAG section
+   above. It carries no selection-bias protection beyond the
+   concat-OOS number and it is not forward data. RESULTS.md and
+   CLAUDE.md now say "venue-verified **replay** window" and mark it
+   as such at every citation, because the project convention is
+   "every Sharpe quoted is OOS unless marked otherwise" and this one
+   is the standing exception.
+
 Last reviewed: 2026-05-29.

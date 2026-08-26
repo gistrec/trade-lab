@@ -302,3 +302,55 @@ the parquets is via `trade_lab.data.fetch_ohlcv` against Binance
 public REST.
 
 Last reviewed: 2026-05-29.
+
+## Addendum 2026-08-25 — universe bias did NOT survive as a whole
+
+Two lines above must be read narrower than they are written. Both
+stay as written per findings immutability; this addendum is the
+correction.
+
+* The validation table's **"Test 5 | Universe / availability bias |
+  PASS — listing CLEAN + liquidity moot"**, and
+* the "What PASS means here" bullet **"Universe bias (Test 5) —
+  survived for the deployable basket"**.
+
+Test 5 asked about two axes and closed both of them: **listing** (no
+pre-listing rows in the panel) and **liquidity** (deploy notional
+moot at $1.4k/asset). It did not ask about, and could not close, the
+third: **composition** — *why these seven coins*. BTC, ETH, BNB, SOL,
+ADA, XRP and DOGE were hand-picked in 2026 knowing ex post which
+majors survived the sample. That is a live survivorship channel, and
+it is untested pending the PIT-universe diagnostic run (deep review
+2026-08-24). Size gauge from this project's own numbers: the
+cross-sectional-momentum measurement dropped Sharpe 1.40 → 0.93 when
+moved to a PIT universe.
+
+So: read "Universe bias — survived" as **"the two tested axes of
+universe bias survived; the composition axis is open."** The frozen
+config, the hash, and every other test verdict in this document are
+unaffected — they were all conditional on the chosen basket to begin
+with. Details: the 2026-08-25 addendum in
+`findings/validation_universe_bias.md`, and the matching addendum in
+`findings/validation_lookahead_audit.md`.
+
+## Addendum 2026-08-26 — the "DSR ≈ 0" bullet, in current terms
+
+The "What we EXPLICITLY chose not to act on" bullet above — *"DSR ≈ 0
+at N=500 sd=0.7 on the verified window"* — is still correct and is
+now the project's **primary reported** DSR convention, not a footnote
+(owner decision 2026-08-25, `findings/dsr_convention_2026_08.md`).
+Two clarifications for anyone reading this document as the deploy
+record:
+
+* The deploy **gate** ("DSR > 0.5 at N=500, cluster-stable") is
+  defined on the *minimal* 1/sqrt(T) convention and was not re-run;
+  the config passed the gate as defined and would not pass a gate
+  restated on the conservative deflator. RESULTS.md § "What PAPER
+  status actually means" states this split explicitly.
+* "The verified window" is a **fixed-config historical replay**
+  (frozen config re-run over 2022-01-21 → 2026-05-27 to check venue
+  agreement), not an independent out-of-sample result.
+
+The derived return series behind both DSR figures are now committed
+under `docs/results/dsr_convention_2026_08_*.csv`, so the numbers in
+this document are reproducible without the gitignored parquets.
