@@ -16,7 +16,7 @@ import pandas as pd
 import pytest
 
 from trade_lab.backtest.market_index import build_crypto_market_index
-from trade_lab.data.coin_registry import CoinMeta
+from trade_lab.data.coin_registry import COIN_REGISTRY, CoinMeta
 from trade_lab.data.universe import PITMcapGapError
 
 _SCRIPT = (
@@ -310,10 +310,81 @@ def test_run_diagnostic_forces_exit_on_mid_month_delisting(tmp_path):
         prices, market_caps, volumes, pool,
         out_dir=tmp_path, static_basket=("A", "C"),
     )
-    r1, r2, r3 = payload["rebalances"]
+    # The delisting is an availability change -> its own rebalance bar,
+    # not a wait until 2020-03-01 (deployed n_active rule).
+    r1, r2, r3, r4 = payload["rebalances"]
     assert r1["members"] == ["A", "C"] and r2["members"] == ["A", "C"]
+    assert r3["date"] == "2020-02-20" and r3["trigger"] == "membership"
     assert r3["members"] == ["A", "B"] and r3["removed"] == ["C"]
+    assert r4["date"] == "2020-03-01" and r4["trigger"] == "schedule"
+    # The control drops C on the same bar, not at month end.
+    ctl = {r["date"]: r for r in payload["control_rebalances"]}
+    assert ctl["2020-02-20"]["members"] == ["A"]
+    assert ctl["2020-02-20"]["trigger"] == "membership"
     assert (tmp_path / "pit_survivorship_diagnostic.md").exists()
+
+
+def _late_listing_panel():
+    """3 assets over 2020-01-01..2020-02-19; B lists mid-month 2020-01-15."""
+    n = 50
+    idx = _idx(n)
+    steps = np.arange(n, dtype=float)
+    listing = pd.Timestamp("2020-01-15", tz="UTC")
+    prices = pd.DataFrame(
+        {
+            "A": 100.0 * (1.0 + 0.001) ** steps,
+            "B": 50.0 * (1.0 + 0.002) ** steps,
+            "C": 20.0 * (1.0 + 0.0005) ** steps,
+        },
+        index=idx,
+    )
+    prices.loc[idx < listing, "B"] = np.nan
+    market_caps = pd.DataFrame(
+        {"A": np.full(n, 1e11), "B": np.full(n, 5e10), "C": np.full(n, 1e10)},
+        index=idx,
+    )
+    market_caps.loc[idx < listing, "B"] = np.nan
+    volumes = pd.DataFrame(
+        {"A": np.full(n, 1e9), "B": np.full(n, 1e9), "C": np.full(n, 1e9)},
+        index=idx,
+    )
+    volumes.loc[idx < listing, "B"] = np.nan
+    pool = {
+        "A": CoinMeta("a-id", "A/USDT", "2020-01-01", None),
+        "B": CoinMeta("b-id", "B/USDT", "2020-01-15", None),
+        "C": CoinMeta("c-id", "C/USDT", "2020-01-01", None),
+    }
+    return prices, market_caps, volumes, pool
+
+
+def test_availability_change_bars_flags_the_listing_bar():
+    prices, _, _, pool = _late_listing_panel()
+    bars = diag.availability_change_bars(prices.index, ("A", "B"), prices, pool)
+    assert list(bars) == [pd.Timestamp("2020-01-15", tz="UTC")]
+    assert bars[pd.Timestamp("2020-01-15", tz="UTC")] == frozenset({"B"})
+
+
+def test_static_control_rebalances_on_mid_month_listing(tmp_path):
+    """Deployed rule (market_index.py: n_active.diff().ne(0)): a member
+    that becomes tradable mid-month enters on THAT bar, not at month end."""
+    prices, market_caps, volumes, pool = _late_listing_panel()
+    payload = diag.run_diagnostic(
+        prices, market_caps, volumes, pool,
+        out_dir=tmp_path, static_basket=("A", "B"),
+    )
+    ctl = {r["date"]: r for r in payload["control_rebalances"]}
+    assert list(ctl) == ["2020-01-01", "2020-01-15", "2020-02-01"]
+    assert ctl["2020-01-01"]["members"] == ["A"]
+    assert ctl["2020-01-15"]["members"] == ["A", "B"]
+    assert ctl["2020-01-15"]["trigger"] == "membership"
+    # ...and the PIT arm reads the same rule off the same bar, so the
+    # delta cannot absorb an entry-timing difference.
+    pit = {r["date"]: r for r in payload["rebalances"]}
+    assert pit["2020-01-15"]["trigger"] == "membership"
+    assert pit["2020-01-15"]["members"] == ["A", "B"]
+    assert "n_active.diff().ne(0)" in payload["rebalance_rule"]
+    md = (tmp_path / "pit_survivorship_diagnostic.md").read_text()
+    assert "off-schedule rebalances" in md and "2020-01-15" in md
 
 
 def test_missing_coverage_requires_explicit_acknowledgement(tmp_path):
@@ -339,3 +410,37 @@ def test_unknown_allow_missing_symbol_rejected(tmp_path):
             tmp_path, allow_missing=["ZZZZ"], static_basket=("BTC",),
             fetch=False,
         )
+
+
+def _write_cm_cache(cache_dir: Path, cm_id: str, *, empty: bool = False) -> None:
+    idx = pd.date_range("2020-01-01", periods=5, freq="1D", tz="UTC", name="time")
+    val = np.nan if empty else 1.0
+    pd.DataFrame(
+        {"price": val, "market_cap": val, "volume_usd": val}, index=idx
+    ).to_parquet(cache_dir / f"coinmetrics_{cm_id}.parquet")
+
+
+def test_allow_missing_with_usable_coverage_fails_loud(tmp_path):
+    """A stale flag must not keep a repaired asset out under a false reason."""
+    _write_cm_cache(tmp_path, COIN_REGISTRY["LTC"].cm_id)
+    with pytest.raises(SystemExit, match="LTC.*coverage IS present"):
+        diag.load_diagnostic_panel(
+            tmp_path, allow_missing=["LTC"], static_basket=("BTC",), fetch=False
+        )
+
+
+def test_allow_missing_exclusion_is_verified_against_the_panel(tmp_path):
+    """Genuine gaps still pass — a missing file and an all-NaN column both
+    count, and the recorded reason says the gap was re-checked."""
+    for sym, meta in COIN_REGISTRY.items():
+        if sym == "WAVES":
+            continue  # no cache file at all
+        _write_cm_cache(tmp_path, meta.cm_id, empty=(sym == "OMG"))
+    _, market_caps, _, pool, excluded = diag.load_diagnostic_panel(
+        tmp_path, allow_missing=["WAVES", "OMG"], static_basket=("BTC",),
+        fetch=False,
+    )
+    assert set(excluded) == {"WAVES", "OMG"}
+    assert all("verified" in reason for reason in excluded.values())
+    assert "WAVES" not in pool and "OMG" not in pool
+    assert "BTC" in pool and "BTC" in market_caps.columns

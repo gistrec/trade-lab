@@ -9,6 +9,15 @@ walk-forward as the deploy config (TSMOM(28, 60), SMA(200) gate, ladder,
 Coin Metrics price panel so the reported delta isolates basket
 *composition* from data-source effects.
 
+Both arms share ONE rebalance rule, the deployed one
+(``market_index.py``: monthly ``MS`` schedule ``|
+n_active.diff().ne(0)``): rebalance on the monthly bar, and immediately
+on any bar where the arm's investable membership changes. The control
+watches its seven fixed names (SOL listing on 2020-08-11 enters that
+bar, not on 2020-09-01); the PIT arm watches the whole candidate pool,
+since a new listing can enter its top-N. Without this the reported
+delta would mix composition effects with entry-timing artefacts.
+
 Diagnostic re-run of the frozen config — NOT a new parametric search:
 ``PROJECT_NUM_TRIALS`` stays 500; no new variant is evaluated, the single
 grid entry is the deployed configuration.
@@ -28,7 +37,10 @@ Known first failure modes — deliberate, fail loud, never shrink silently:
 
 * A registry coin with no Coin Metrics coverage at all aborts the run;
   each such gap must be acknowledged explicitly with ``--allow-missing``
-  and is recorded in the report as a first-class exclusion.
+  and is recorded in the report as a first-class exclusion. The flag is
+  verified against the loaded panel, never trusted: naming an asset
+  whose coverage has since been repaired is itself a hard error, so a
+  stale flag cannot keep it out under a false reason.
 * A tradable candidate with NaN market cap on any rebalance date aborts
   via ``PITMcapGapError`` (e.g. BNB's community-tier cap gap,
   ``findings/validation_universe_bias.md``). Static-basket members cannot
@@ -45,6 +57,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -99,6 +112,62 @@ def monthly_rebalance_bars(idx: pd.DatetimeIndex) -> list[pd.Timestamp]:
     return sorted(bars)
 
 
+def availability_change_bars(
+    idx: pd.DatetimeIndex,
+    members: Sequence[str],
+    closes: pd.DataFrame,
+    pool: dict,
+) -> dict[pd.Timestamp, frozenset[str]]:
+    """Bars where the investable subset of ``members`` changes, mapped to
+    the symbols that flipped.
+
+    Mirrors the deployed builder's forced rebalance (``market_index.py``:
+    ``rebalance_mask | n_active.diff().ne(0)``) — an asset coming online
+    enters on its own bar, never at month end. Compared as a set rather
+    than a count so a same-bar listing + delisting cannot cancel out.
+    """
+    cols = [m for m in members if m in closes.columns]
+    if not cols or len(idx) < 2:
+        return {}
+    iso = [ts.strftime("%Y-%m-%d") for ts in idx]
+    listed = np.column_stack(
+        [[tradable_at(d, pool[m]) for d in iso] for m in cols]
+    )
+    active = closes[cols].reindex(idx).notna().to_numpy() & listed
+    out: dict[pd.Timestamp, frozenset[str]] = {}
+    for i in range(1, len(idx)):
+        flipped = np.flatnonzero(active[i] != active[i - 1])
+        if flipped.size:
+            out[idx[i]] = frozenset(cols[j] for j in flipped)
+    return out
+
+
+def merge_rebalance_bars(
+    scheduled: list[pd.Timestamp],
+    forced: dict[pd.Timestamp, frozenset[str]],
+    baskets: dict[pd.Timestamp, tuple[str, ...]],
+) -> dict[pd.Timestamp, tuple[str, ...]]:
+    """Adopted rebalance bars: every scheduled bar, plus a forced bar only
+    when the availability change it carries actually moves the basket.
+
+    The deployed builder rebalances on the listing bar itself; rank churn
+    that merely shares that bar is not a trigger, so an off-schedule bar
+    counts only if the membership delta touches a symbol that flipped.
+    """
+    scheduled_set = set(scheduled)
+    adopted: dict[pd.Timestamp, tuple[str, ...]] = {}
+    held: tuple[str, ...] = ()
+    for ts in sorted(baskets):
+        members = baskets[ts]
+        if ts in scheduled_set:
+            adopted[ts] = members
+            held = members
+        elif set(members).symmetric_difference(held) & forced.get(ts, frozenset()):
+            adopted[ts] = members
+            held = members
+    return adopted
+
+
 def select_pit_baskets(
     eligibility: pd.DataFrame, bars: list[pd.Timestamp]
 ) -> dict[pd.Timestamp, tuple[str, ...]]:
@@ -117,8 +186,9 @@ def select_static_baskets(
     static_basket: tuple[str, ...],
     pool: dict,
 ) -> dict[pd.Timestamp, tuple[str, ...]]:
-    """Static members gated by Binance listing + an observed close, so the
-    control enters assets the way the deployed basket does (dynamic entry)."""
+    """Static members gated by Binance listing + an observed close — the
+    same ``n_active`` notion the deployed builder counts, so the control
+    enters assets the way the deployed basket does (dynamic entry)."""
     baskets: dict[pd.Timestamp, tuple[str, ...]] = {}
     for ts in bars:
         members = tuple(
@@ -176,15 +246,16 @@ def build_membership_basket_index(
     |weight change| on rebalance bars, initial deployment not charged)
     with three deliberate differences that time-varying membership forces:
 
-    * membership changes only on the given rebalance bars, never on
-      mid-month listings;
+    * membership changes only on the given rebalance bars (the caller
+      puts listing-forced bars in that set — see
+      :func:`availability_change_bars`);
     * later membership *entries* are charged in full — entering the
       basket is a real trade, unlike the deployed builder's
       new-listing credit;
     * ``forced_exits`` (symbol -> last tradable bar) sells a delisted
       holding at that bar regardless of the schedule: the return through
       the bar is realized, the sale is charged, the freed weight sits in
-      cash until the next scheduled rebalance.
+      cash until the next rebalance bar.
 
     With constant membership and all assets listed from bar 0 the output
     is identical to ``build_crypto_market_index`` (unit-tested).
@@ -343,9 +414,15 @@ def load_diagnostic_panel(
     static_basket: tuple[str, ...],
     fetch: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict[str, str]]:
-    """Returns ``(prices, market_caps, volumes, pool, excluded)``."""
+    """Returns ``(prices, market_caps, volumes, pool, excluded)``.
+
+    ``allow_missing`` is checked against the loaded panel, never trusted:
+    every acknowledged asset is loaded like any other and only dropped if
+    it genuinely has no usable series. A stale flag naming an asset whose
+    coverage has since been repaired is a hard error — otherwise it would
+    keep changing the diagnostic's result under a false reason.
+    """
     pool = dict(COIN_REGISTRY)
-    excluded: dict[str, str] = {}
     for sym in allow_missing:
         if sym not in pool:
             raise SystemExit(f"--allow-missing {sym}: not in COIN_REGISTRY")
@@ -354,17 +431,36 @@ def load_diagnostic_panel(
                 f"--allow-missing {sym}: static-basket member — excluding it "
                 "would distort both the PIT and the control run; fix the data"
             )
-        excluded[sym] = "operator-acknowledged missing Coin Metrics coverage"
-        del pool[sym]
 
     prices, market_caps, volumes = load_panel(pool, cache_dir=cache_dir, fetch=fetch)
-    missing = sorted(set(pool) - set(market_caps.columns))
-    if missing:
+    # An all-NaN column is "no coverage" wearing a column: load_panel
+    # synthesizes NA columns for metrics the parquet lacks.
+    covered = {
+        col for col in market_caps.columns
+        if col in pool and market_caps[col].notna().any()
+    }
+    repaired = sorted(set(allow_missing) & covered)
+    if repaired:
         raise SystemExit(
-            f"no Coin Metrics coverage for {missing} — acknowledge each gap "
-            "explicitly with --allow-missing SYMBOL (recorded in the report) "
-            "or fix the cache; the universe is never shrunk silently"
+            f"--allow-missing {', '.join(repaired)}: usable Coin Metrics "
+            "coverage IS present in the loaded panel — the flag is stale and "
+            "would drop a usable asset under a false reason; remove it"
         )
+    missing = sorted(set(pool) - covered)
+    unacknowledged = [sym for sym in missing if sym not in set(allow_missing)]
+    if unacknowledged:
+        raise SystemExit(
+            f"no Coin Metrics coverage for {unacknowledged} — acknowledge each "
+            "gap explicitly with --allow-missing SYMBOL (recorded in the "
+            "report) or fix the cache; the universe is never shrunk silently"
+        )
+    excluded: dict[str, str] = {}
+    for sym in missing:
+        excluded[sym] = (
+            "verified against the loaded panel: no usable Coin Metrics "
+            "series (operator-acknowledged via --allow-missing)"
+        )
+        del pool[sym]
     return prices, market_caps, volumes, pool, excluded
 
 
@@ -392,7 +488,23 @@ def run_diagnostic(
         idx = idx[idx >= pd.Timestamp(start, tz=idx.tz)]
     if end:
         idx = idx[idx <= pd.Timestamp(end, tz=idx.tz)]
-    bars = monthly_rebalance_bars(idx)
+    schedule = monthly_rebalance_bars(idx)
+
+    # Unmasked closes (with the documented mcap fallback for price-gated
+    # coins): membership persists between rebalances even if eligibility
+    # flips mid-month, so we must NOT mask closes to the eligibility grid.
+    columns = [c for c in market_caps.columns if c in pool]
+    all_true = pd.DataFrame(True, index=idx, columns=columns)
+    closes = closes_for_universe(prices, all_true, fallback=market_caps)
+
+    # One rebalance rule for both arms — the deployed one: monthly bar, or
+    # any bar where that arm's investable membership changes. The control
+    # watches its fixed names, the PIT arm the whole candidate pool
+    # (a new listing can walk straight into its top-N).
+    ctl_forced = availability_change_bars(idx, static_basket, closes, pool)
+    pit_forced = availability_change_bars(idx, columns, closes, pool)
+    ctl_bars = sorted(set(schedule) | set(ctl_forced))
+    pit_bars = sorted(set(schedule) | set(pit_forced))
 
     # Same recipe as the deployed basket size: top-7 = len(static basket).
     eligibility = build_pit_universe(
@@ -404,19 +516,17 @@ def run_diagnostic(
         exclude_stablecoins=True,
         start_date=start,
         end_date=end,
-        strict_mcap_dates=bars,  # fail loud on NaN mcap at any rebalance
+        strict_mcap_dates=pit_bars,  # fail loud on NaN mcap at any rebalance
     )
 
-    # Unmasked closes (with the documented mcap fallback for price-gated
-    # coins): membership persists between rebalances even if eligibility
-    # flips mid-month, so we must NOT mask closes to the eligibility grid.
-    all_true = pd.DataFrame(
-        True, index=eligibility.index, columns=eligibility.columns
+    pit_baskets = merge_rebalance_bars(
+        schedule, pit_forced, select_pit_baskets(eligibility, pit_bars)
     )
-    closes = closes_for_universe(prices, all_true, fallback=market_caps)
-
-    pit_baskets = select_pit_baskets(eligibility, bars)
-    static_baskets = select_static_baskets(closes, bars, static_basket, pool)
+    static_baskets = merge_rebalance_bars(
+        schedule,
+        ctl_forced,
+        select_static_baskets(closes, ctl_bars, static_basket, pool),
+    )
 
     cost_kwargs = dict(
         fee_rate=PRODUCTION_CONFIG.fee_rate,
@@ -433,8 +543,9 @@ def run_diagnostic(
     ctl_detail, ctl_summary = run_deploy_walk_forward(control_index)
 
     payload = _build_payload(
-        bars=bars,
+        scheduled=schedule,
         pit_baskets=pit_baskets,
+        static_baskets=static_baskets,
         static_basket=static_basket,
         pit_detail=pit_detail,
         pit_summary=pit_summary,
@@ -478,8 +589,9 @@ def _git_commit() -> str:
 
 def _build_payload(
     *,
-    bars: list[pd.Timestamp],
+    scheduled: list[pd.Timestamp],
     pit_baskets: dict[pd.Timestamp, tuple[str, ...]],
+    static_baskets: dict[pd.Timestamp, tuple[str, ...]],
     static_basket: tuple[str, ...],
     pit_detail: pd.DataFrame,
     pit_summary: dict,
@@ -490,13 +602,15 @@ def _build_payload(
     end: str | None,
 ) -> dict:
     static_set = set(static_basket)
+    scheduled_set = set(scheduled)
     rebalances = []
     prev: set[str] = set()
-    for ts in bars:
+    for ts in sorted(pit_baskets):
         members = set(pit_baskets[ts])
         rebalances.append(
             {
                 "date": str(ts.date()),
+                "trigger": "schedule" if ts in scheduled_set else "membership",
                 "members": sorted(members),
                 "n_members": len(members),
                 "added": sorted(members - prev),
@@ -507,6 +621,15 @@ def _build_payload(
             }
         )
         prev = members
+
+    control_rebalances = [
+        {
+            "date": str(ts.date()),
+            "trigger": "schedule" if ts in scheduled_set else "membership",
+            "members": sorted(static_baskets[ts]),
+        }
+        for ts in sorted(static_baskets)
+    ]
 
     delta_keys = (
         "concatenated_oos_sharpe",
@@ -532,7 +655,14 @@ def _build_payload(
         "window": {"start": start, "end": end},
         "static_basket": list(static_basket),
         "excluded_assets": excluded,
+        "rebalance_rule": (
+            "monthly MS schedule, plus any bar where the arm's investable "
+            "membership changes — the deployed rule "
+            "(market_index.py: rebalance_mask | n_active.diff().ne(0)); "
+            "identical for both arms"
+        ),
         "rebalances": rebalances,
+        "control_rebalances": control_rebalances,
         "runs": {
             "pit_top_n": {"folds": _fold_rows(pit_detail), "summary": pit_summary},
             "static_control": {
@@ -569,6 +699,7 @@ def _write_report(out_dir: Path, payload: dict) -> None:
         f"Diagnostic re-run of the frozen config — no new search; "
         f"`PROJECT_NUM_TRIALS` stays {payload['num_trials']}."
     )
+    lines.append(f"Rebalance rule (both arms): {payload['rebalance_rule']}.")
     lines.append("")
     lines.append(
         "**The DEPLOYED strategy's basket does not change based on this "
@@ -638,9 +769,9 @@ def _write_report(out_dir: Path, payload: dict) -> None:
     )
     lines.append("")
     lines.append(
-        "| Rebalance | N | Members | Added | Removed | vs static |"
+        "| Rebalance | Trigger | N | Members | Added | Removed | vs static |"
     )
-    lines.append("|---|---:|---|---|---|---|")
+    lines.append("|---|---|---:|---|---|---|---|")
     for r in payload["rebalances"]:
         dev = ""
         if r["deviates_from_static"]:
@@ -648,9 +779,32 @@ def _write_report(out_dir: Path, payload: dict) -> None:
             extra = "+" + ",".join(r["extra_vs_static"]) if r["extra_vs_static"] else ""
             dev = f"**≠** {extra} {miss}".strip()
         lines.append(
-            f"| {r['date']} | {r['n_members']} | {', '.join(r['members'])} "
+            f"| {r['date']} | {r['trigger']} | {r['n_members']} "
+            f"| {', '.join(r['members'])} "
             f"| {', '.join(r['added']) or '—'} | {', '.join(r['removed']) or '—'} "
             f"| {dev or '='} |"
+        )
+    lines.append("")
+
+    forced_ctl = [
+        r for r in payload["control_rebalances"] if r["trigger"] == "membership"
+    ]
+    lines.append("## Static control — off-schedule rebalances")
+    lines.append("")
+    if forced_ctl:
+        lines.append(
+            "Membership-forced bars (a static member listed or stopped "
+            "trading), entered on the bar itself as the deployed index does:"
+        )
+        lines.append("")
+        lines.append("| Bar | Members |")
+        lines.append("|---|---|")
+        for r in forced_ctl:
+            lines.append(f"| {r['date']} | {', '.join(r['members'])} |")
+    else:
+        lines.append(
+            "_None — every static member was already listed with an observed "
+            "close at the panel start._"
         )
     lines.append("")
     (out_dir / f"{REPORT_STEM}.md").write_text("\n".join(lines) + "\n")
@@ -677,7 +831,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--allow-missing", action="append", default=[], metavar="SYMBOL",
         help="Explicitly acknowledge a registry coin with no Coin Metrics "
-        "coverage; recorded in the report. Repeatable.",
+        "coverage; recorded in the report. The coin is still loaded and the "
+        "gap re-verified — if coverage exists the run aborts. Repeatable.",
     )
     args = parser.parse_args(argv)
 
