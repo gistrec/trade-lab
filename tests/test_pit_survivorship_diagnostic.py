@@ -136,6 +136,56 @@ def test_nan_mcap_on_rebalance_date_fails_loud(tmp_path):
     assert not (tmp_path / "pit_survivorship_diagnostic.md").exists()
 
 
+@pytest.mark.parametrize(
+    "start, end, expected",
+    [
+        # Starts before the first bar -> the old code clipped to 2020-01-01.
+        ("2019-06-01", None, r"2019-06-01.*starts before.*2020-01-01 \.\. 2020-03-20"),
+        # Ends after the last bar -> the old code clipped to 2020-03-20.
+        ("2020-01-01", "2020-12-31", r"2020-12-31.*ends after.*2020-01-01 \.\. 2020-03-20"),
+        # Wholly outside on either side.
+        ("2021-01-01", "2021-06-30", r"2021-06-30.*ends after.*2020-01-01 \.\. 2020-03-20"),
+        ("2021-01-01", None, r"2021-01-01.*no bars.*2020-01-01 \.\. 2020-03-20"),
+        (None, "2019-06-30", r"2019-06-30.*no bars.*2020-01-01 \.\. 2020-03-20"),
+    ],
+)
+def test_window_outside_panel_coverage_fails_loud(tmp_path, start, end, expected):
+    """A partly (or wholly) uncovered window must abort naming the request
+    AND the coverage — a clipped period would report something other than
+    the composition delta against the deployed walk-forward."""
+    prices, market_caps, volumes, pool = _stub_panel()
+    with pytest.raises(SystemExit, match=expected):
+        diag.run_diagnostic(
+            prices, market_caps, volumes, pool,
+            out_dir=tmp_path, start=start, end=end, static_basket=("A", "B"),
+        )
+    assert not (tmp_path / "pit_survivorship_diagnostic.md").exists()
+    assert not (tmp_path / "pit_survivorship_diagnostic.json").exists()
+
+
+def test_fully_covered_window_runs(tmp_path):
+    """Both edges inside the panel (here: exactly on it) still diagnose."""
+    prices, market_caps, volumes, pool = _stub_panel()
+    payload = diag.run_diagnostic(
+        prices, market_caps, volumes, pool,
+        out_dir=tmp_path, start="2020-01-01", end="2020-03-20",
+        static_basket=("A", "B"),
+    )
+    assert payload["window"] == {"start": "2020-01-01", "end": "2020-03-20"}
+    assert [r["date"] for r in payload["rebalances"]] == [
+        "2020-01-01", "2020-02-01", "2020-03-01",
+    ]
+    assert (tmp_path / "pit_survivorship_diagnostic.md").exists()
+
+    # An interior sub-window is a legitimate request too.
+    inner = diag.run_diagnostic(
+        prices, market_caps, volumes, pool,
+        out_dir=tmp_path, start="2020-02-01", end="2020-03-10",
+        static_basket=("A", "B"),
+    )
+    assert [r["date"] for r in inner["rebalances"]] == ["2020-02-01", "2020-03-01"]
+
+
 def test_membership_index_matches_deployed_builder_for_constant_membership():
     """With constant membership and all assets listed from bar 0 the
     script's builder must reproduce build_crypto_market_index exactly."""

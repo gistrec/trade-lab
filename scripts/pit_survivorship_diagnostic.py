@@ -51,6 +51,10 @@ Known first failure modes — deliberate, fail loud, never shrink silently:
   its price/volume series are fine. That is a data gap, not an absent
   asset: ``--allow-missing`` deliberately cannot waive it, and
   static-basket members cannot be excluded either. Fix the data instead.
+* A ``--start`` / ``--end`` window the loaded panel does not fully cover
+  aborts naming both the request and the coverage. Clipping it to the
+  panel would answer a different question than the deployed
+  walk-forward, so the delta would no longer be the composition effect.
 
 The DEPLOYED strategy's basket does not change based on this
 diagnostic's outcome without a new owner decision; the results feed a
@@ -505,6 +509,51 @@ def load_diagnostic_panel(
 # ---------------------------------------------------------------------------
 
 
+def _window_label(start: str | None, end: str | None) -> str:
+    return f"[{start or '<panel start>'} .. {end or '<panel end>'}]"
+
+
+def slice_to_window(
+    index: pd.DatetimeIndex, start: str | None, end: str | None
+) -> pd.DatetimeIndex:
+    """Panel bars inside the requested window — or a loud abort.
+
+    A partly covered window must never be clipped to the panel: the whole
+    point of the diagnostic is a like-for-like comparison against the
+    deployed walk-forward, so a silently shortened period would report a
+    delta that is not the composition effect.
+    """
+    requested = _window_label(start, end)
+    if len(index) == 0:
+        raise SystemExit(f"requested window {requested}: the loaded panel has no bars")
+    coverage = f"[{index[0].date()} .. {index[-1].date()}]"
+    bars = index
+    if start is not None:
+        ts = pd.Timestamp(start, tz=index.tz)
+        if ts < index[0]:
+            raise SystemExit(
+                f"requested window {requested} starts before the loaded panel "
+                f"coverage {coverage} — refusing to diagnose a silently "
+                "truncated period"
+            )
+        bars = bars[bars >= ts]
+    if end is not None:
+        ts = pd.Timestamp(end, tz=index.tz)
+        if ts > index[-1]:
+            raise SystemExit(
+                f"requested window {requested} ends after the loaded panel "
+                f"coverage {coverage} — refusing to diagnose a silently "
+                "truncated period"
+            )
+        bars = bars[bars <= ts]
+    if len(bars) == 0:
+        raise SystemExit(
+            f"requested window {requested} has no bars in the loaded panel "
+            f"coverage {coverage}"
+        )
+    return bars
+
+
 def run_diagnostic(
     prices: pd.DataFrame,
     market_caps: pd.DataFrame,
@@ -519,11 +568,7 @@ def run_diagnostic(
     static_basket: tuple[str, ...] = PRODUCTION_CONFIG.assets,
 ) -> dict:
     excluded = excluded or {}
-    idx = market_caps.index
-    if start:
-        idx = idx[idx >= pd.Timestamp(start, tz=idx.tz)]
-    if end:
-        idx = idx[idx <= pd.Timestamp(end, tz=idx.tz)]
+    idx = slice_to_window(market_caps.index, start or None, end or None)
     schedule = monthly_rebalance_bars(idx)
 
     # Unmasked closes (with the documented mcap fallback for price-gated
