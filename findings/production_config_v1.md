@@ -354,3 +354,70 @@ record:
 The derived return series behind both DSR figures are now committed
 under `docs/results/dsr_convention_2026_08_*.csv`, so the numbers in
 this document are reproducible without the gitignored parquets.
+
+## Addendum 2026-08-26 (second) — units of the ratified DSR figures
+
+The ratified DSR numbers in § "DSR — diagnostic on the venue-verified
+sample" are quoted in the wrong unit. The historical lines stay as
+written (findings are immutable); this addendum is the correction.
+Two lines are affected:
+
+* the table header **"DSR @ N=500, sd=0.7"** with both rows at
+  **"≈ 0.000"**, and
+* **"`E[max SR over 500 trials | sd=0.7]` ≈ 2.137 per-period"**.
+
+`deflated_sharpe_ratio` works **per-period**: it compares the
+non-annualized daily Sharpe against `sharpe_std_dev`. The project's
+pinned conservative assumption `sd_trial_sharpes ≈ 0.7` is
+**annualized** (factor 365, daily bars) and must be de-annualized
+before it is passed: `0.7 / sqrt(365) ≈ 0.0366` per-period. So:
+
+* **2.137 is the annualized bar, not a per-period one.** The
+  per-period expected-max bar is
+  `expected_max_sharpe(500, 0.7/sqrt(365)) = 0.1118`, which
+  annualizes to 2.137 — the pinned constant. The document's own comparison
+  ("neither the verified nor the full-sample *annualized* Sharpes
+  clear 2.137") is therefore right in substance; only the label
+  "per-period" is wrong.
+* **The "≈ 0.000" cells are a dimensional artifact.** Passing raw
+  0.7 puts the bar at 2.137 *per-period* (≈ 40.8 annualized), which
+  no daily Sharpe can clear, so the call returns exactly `0.0` for
+  any series whatsoever. That is not a measurement of this strategy.
+
+Under the convention as it is actually defined
+(`sharpe_std_dev = 0.7/sqrt(365)`, `num_trials = 500`), recomputed on
+the return series committed with `findings/dsr_convention_2026_08.md`:
+
+| Object | Bars | Annualized SR | DSR, conservative (`0.7/sqrt(365)`) | DSR, minimal (`1/sqrt(T)`) |
+|---|---:|---:|---:|---:|
+| Venue-verified replay window (2022-01-21 → 2026-05-27) | 1588 | +0.7217 | **0.0016** | 0.061 |
+| Walk-forward concat-OOS (2020-01-01 → 2026-05-27) | 2339 | +1.4784 | **0.037** | 0.770 |
+
+Notes on reading that table against the historical one above:
+
+* The replay row is the same object as this document's "Verified"
+  row, one bar shorter: the table above says 1589 bars / +0.721
+  through 2026-05-28, the committed artifact is 1588 bars / +0.7217
+  through 2026-05-27 because the local BTC parquet vintage ends a bar
+  earlier. Sharpe moves by 0.0003, DSR by < 0.001.
+* The **full-sample row (3070 bars, +1.377) has not been recomputed**
+  — no derived series for that window is committed. Its literal
+  "≈ 0.000" came from the same raw-0.7 call, so treat it as
+  unquantified rather than measured. Its direction is not in doubt:
+  +1.377 annualized sits below the 2.137 annualized expected-max bar,
+  so its DSR is < 0.5 and in the same ≈ 0 neighborhood.
+* **"0.770 (different DSR convention)"** in § "Deployable Sharpe
+  expectation" is, precisely: the **minimal 1/sqrt(T)** convention on
+  the walk-forward concat-OOS series (T = 2339). Same code, same
+  N=500 extreme-value correction — only the assumed trial-pool
+  dispersion differs.
+* The verdict of this document is unchanged. Under the conservative
+  deflator — now the project's primary *reported* convention — the
+  deployed config sits at DSR ≈ 0 (0.0016 on the replay window,
+  0.037 concat-OOS), which is exactly what "What we EXPLICITLY chose
+  not to act on" recorded. Only the units and the labels are
+  corrected here; no number moved, no computation changed, no trials
+  added.
+
+Convention decision, both committed series, and the reproduction
+snippet: `findings/dsr_convention_2026_08.md`.

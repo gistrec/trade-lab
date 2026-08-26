@@ -404,6 +404,19 @@ redundant.
 
 ## 8. Honest DSR on the venue-verified sample
 
+**Note added 2026-08-26; the section below is the 2026-05-29 draft text,
+kept as written.** Two of its labels are stale. (1) `DSR 0.770` is a
+**minimal 1/sqrt(T)-convention** figure on the walk-forward concat-OOS
+series; the project's primary *reported* convention is now the
+conservative deflator, under which that same series scores 0.037.
+(2) The snippet's `sd = 0.7` is annualized while `deflated_sharpe_ratio`
+works per-period, so passing raw 0.7 puts the bar at 2.137 *per-period*
+and returns exactly 0.0 for any input. The de-annualized call
+(`0.7/sqrt(365) ≈ 0.0366`) gives DSR **0.0016** on the venue-verified
+window — same verdict (≈ 0), correct units. That window is also a
+fixed-config historical *replay* of the frozen config, not a second
+out-of-sample result. See `findings/dsr_convention_2026_08.md`.
+
 The headline number that justified entering validation in the
 trade-lab case was a Deflated Sharpe Ratio (DSR) of 0.770 — the
 Bailey-López de Prado correction for multiple-testing on a Sharpe

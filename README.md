@@ -24,7 +24,10 @@ What lives in this repo today:
 - **Walk-forward** runner with warmup-feed, optional purge gap, and
   per-fold + concatenated-OOS Deflated Sharpe Ratio (Bailey & López de
   Prado 2014). `PROJECT_NUM_TRIALS = 500` is pinned in code with a census
-  comment — it does not move retroactively.
+  comment — it does not move retroactively. Every DSR in this README is
+  the **minimal 1/sqrt(T)** convention — read "DSR convention" below
+  before comparing any of these numbers with the deployed config's
+  reported figure.
 - A **21-sleeve equal-weight portfolio runner** (3 strategies × 7 assets,
   per-asset vol-target picks, dynamic 1/N_active with rebalance-on-
   universe-change costing) that aggregates everything above into a single
@@ -551,6 +554,26 @@ Adding a new strategy is a five-minute job — subclass `Strategy`,
 implement `generate_signals(candles)`, register the class in
 `STRATEGIES` in `src/trade_lab/cli.py`. See
 [Adding a new strategy](#adding-a-new-strategy) below.
+
+### DSR convention
+
+Every DSR figure above and in the linked `docs/results/` writeups is a
+**minimal 1/sqrt(T)-convention** number at `PROJECT_NUM_TRIALS = 500`:
+the trial-pool dispersion is set to the sampling noise of a single
+Sharpe estimate. That is the convention this project's deploy gate
+("DSR > 0.5, cluster-stable") is defined on, and the one those
+commit-pinned writeups were computed under.
+
+Since the 2026-08-25 owner decision the project *reports* the deployed
+config on a **conservative** deflator instead — the pinned assumption
+`sd_trial_sharpes ≈ 0.7` annualized, `0.7/sqrt(365) ≈ 0.0366`
+per-period — under which the deployed TSMOM (28, 60) basket config
+scores **DSR 0.037 ≈ 0**, and every other figure on this page would
+read ≈ 0 as well. Nothing was re-run and no threshold was restated;
+only the deployed config has ever been recomputed conservatively, so
+treat the numbers above as gate-convention figures and never mix the
+two. Full statement: `RESULTS.md` and
+`findings/dsr_convention_2026_08.md`.
 
 ## Roadmap
 

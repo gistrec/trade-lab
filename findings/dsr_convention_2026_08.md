@@ -149,7 +149,7 @@ purpose:
 
 | Convention | `sharpe_std_dev` (per-period) | DSR (computed) |
 |---|---|---|
-| Minimal (1/sqrt(T)) — also the project's gate convention | `1/sqrt(2339) ≈ 0.0207` | **0.770** at the peak config; **0.736** neighborhood median, 7/7 neighbors > 0.5 (both figures exist only under this convention) |
+| Minimal (1/sqrt(T)) — also the project's gate convention | `1/sqrt(2339) ≈ 0.0207` | **0.770** for the deployed config; **0.736** cluster median over its 7 members (the deployed config + 6 neighbours), 6/6 neighbours > 0.5 (both figures exist only under this convention) |
 | Conservative (pinned assumption) — the primary *reported* convention | `0.7 / sqrt(365) ≈ 0.0366` | **0.037** on the concat-OOS series (Sharpe +1.48); **0.002** (0.0016) on the venue-verified *replay* window (+0.72 — fixed-config historical replay, not selection-OOS) |
 
 The venue-verified 0.002 was **recomputed from the validation
@@ -179,13 +179,14 @@ Sharpe **+1.48** (selection-OOS), venue-verified **replay** window
 > assumption `sd_trial_sharpes ≈ 0.7` annualized, `0.7/sqrt(365)`
 > per-period — an a-priori pool dispersion, no trial panel exists)
 > = 0.037 ≈ 0. The deploy case rests on parameter stability stated
-> convention-free — all seven neighbor configs land in the raw
-> concat-OOS Sharpe band +1.37…+1.49, no lone peak — plus the
-> forward test.
+> convention-free — the deployed config plus its six neighbour
+> configs (seven cluster members, i.e. six confirmations, not seven)
+> land in the raw concat-OOS Sharpe band +1.37…+1.49, no lone peak —
+> plus the forward test.
 
 DSR 0.770 may still be cited, always labeled "under the 1/sqrt(T)
 convention"; the same label applies to the cluster's DSR-threshold
-form (median 0.736, 7/7 > 0.5).
+form (median 0.736 over the 7 cluster members, 6/6 neighbours > 0.5).
 
 **Scope of that labeling rule, so it does not become
 self-contradicting.** It binds every statement about the **deployed
@@ -215,18 +216,23 @@ from any DSR number.
 The headline flips from 0.770 to ≈ 0 on a single convention choice,
 so it cannot carry a deploy decision by itself. What carries it:
 
-* **Parameter stability, stated convention-free.** All seven
-  neighbor configs of (28, 60) post raw concat-OOS Sharpe in the
-  tight band +1.37…+1.49 (`findings/cluster_stability.md`) — the
-  config is a plateau, not a lone peak. Honest limits: the
-  neighbors are not independent evidence — they hold identical
-  positions on 86–97% of days and their daily returns correlate at
-  0.97–0.99 with the deployed config (one bet measured seven times);
-  stability rules out single-point cherry-picking, nothing more.
-  The familiar "median DSR 0.736, 7/7 > 0.5" is this same fact
-  expressed under the secondary 1/sqrt(T) convention — under the
-  conservative deflator all seven sit at DSR ≈ 0, so the threshold
-  form cannot back the primary statement (that would be circular).
+* **Parameter stability, stated convention-free.** The deployed
+  (28, 60) config **plus its six neighbours** — seven cluster members
+  in total — post raw concat-OOS Sharpe in the tight band
+  +1.37…+1.49 (`findings/cluster_stability.md`); the six neighbours
+  alone span that same band, so the plateau does not depend on the
+  deployed point being in it. Honest limits: the neighbours are not
+  independent evidence — they hold identical positions on 86–97% of
+  days and their daily returns correlate at 0.97–0.99 with the
+  deployed config (one bet measured six more times); stability rules
+  out single-point cherry-picking, nothing more. And the deployed
+  config must not be counted among its own confirmations: the
+  familiar "7 of 7 pass" is one deployed point plus **six**
+  confirmations. The familiar "median DSR 0.736, 7/7 > 0.5" is this
+  same fact expressed under the secondary 1/sqrt(T) convention —
+  under the conservative deflator all seven sit at DSR ≈ 0, so the
+  threshold form cannot back the primary statement (that would be
+  circular).
 * **The forward test.** Live observation on the target venue with
   the real order pipeline measures the thing DSR only bounds.
 
@@ -341,3 +347,44 @@ Documentation-only pass over this finding and the docs that cite it:
    left as bare unscoped figures.
 
 No number changed. No computation changed.
+
+## Revision 2026-08-26 (fourth review round) — counting and labels
+
+Documentation-only again; no computation, no re-run, no new trials.
+
+1. **The cluster is 1 + 6, not 7 confirmations.** Every live doc that
+   said "7 neighbor configs" / "7 of 7 pass" was counting the
+   deployed `(28, 60)` as one of its own confirmations —
+   `findings/cluster_stability.md` § 2 lists it inside the seven-member
+   TSMOM short-ensemble cluster. Restated here, in RESULTS.md and in
+   CLAUDE.md as **the deployed config plus six neighbours**: the
+   cluster still has 7 members, the published median 0.736 is still
+   the median over all 7, but the evidence it supplies for the
+   deployed point is **6 of 6 neighbours**, not 7 of 7. Neighbour-only
+   median under the same 1/sqrt(T) convention is 0.726 (0.671, 0.693,
+   0.716, 0.736, 0.750, 0.782 — plain arithmetic on the finding's own
+   per-variant table, nothing re-run). The raw-Sharpe band is
+   unchanged at +1.37…+1.49 whether or not the deployed +1.48 is
+   counted, which is the point: the plateau survives dropping the
+   deployed point from it.
+2. **"0.770 at the peak config" was wrong** and is now "0.770 for the
+   deployed config". The cluster peak is `(30, 60)` at DSR 0.782 /
+   Sharpe +1.49 (same table). Same correction applied to the
+   RESULTS.md line that called `(28, 60)` the family's best
+   individual.
+3. **One unmissable scoping note per live doc instead of per-figure
+   edits.** RESULTS.md gained a file-wide DSR-convention paragraph
+   above the table (footnote ¹ stays as the per-number repeat), and
+   README.md — which quotes DSR figures from `docs/results/` with no
+   convention anywhere — gained the same note covering itself and the
+   commit-pinned writeups it links. Those writeups and `findings/`
+   are dated artifacts and are not rewritten.
+4. **The deploy record's DSR units are corrected by addendum.**
+   `findings/production_config_v1.md` reported the ratified figures as
+   "DSR @ N=500, sd=0.7 ≈ 0.000" with "`E[max SR]` ≈ 2.137
+   per-period". Raw 0.7 into `deflated_sharpe_ratio` is the
+   dimensional artifact described in § "Both conventions" — it returns
+   exactly 0.0 for any series, and 2.137 is the *annualized* bar
+   (per-period 0.1118). Per findings immutability the historical lines
+   stay; the dated addendum there states the conservative-convention
+   figures (0.0016 replay / 0.037 concat-OOS) and points here.
