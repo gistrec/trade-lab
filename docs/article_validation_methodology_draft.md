@@ -166,7 +166,25 @@ correct corollary: **Binance PASS, Kraken fee-fragile-not-advisable
 at the current 0.40% taker, with a documented conditional re-entry
 path (maker or ≤ 0.20% taker)**.
 
-## 4. Universe-bias closure is two axes, not one
+## 4. Universe-bias closure is two axes — and I originally missed a third
+
+> **Correction, 2026-08-25.** This section was first written as
+> "universe bias is two axes, and I closed both." That framing was
+> wrong, and the error is worth keeping visible because it is the
+> exact shape of mistake this article is about. "Universe bias"
+> decomposes into **three** axes, not two. The two I checked
+> (listing, liquidity) are the two that a *given* basket makes easy
+> to check. The one I did not check — **composition**, i.e. *why
+> these seven coins* — is the one that actually carries survivorship
+> risk, because the basket was hand-picked in 2026 knowing ex post
+> which majors endured. Closing two axes and writing "universe bias:
+> PASS" is precisely the "tested what was easy, reported what was
+> tested" failure the rest of this piece warns against. The composition
+> axis is still open at time of writing, pending a point-in-time
+> universe diagnostic. A size gauge from the same project: a
+> cross-sectional-momentum measurement dropped Sharpe 1.40 → 0.93 when
+> moved to a PIT universe — this is not a rounding error.
+> Read everything below as scoped to the two axes it names.
 
 "Universe bias" gets used as a single phrase, but it decomposes
 into:
@@ -175,9 +193,12 @@ into:
   asset was not yet listed on the assumed exchange?
 * **Liquidity axis**: is any asset in the basket on a date where its
   realistic liquidity could not absorb the deploy notional?
+* **Composition axis** (added in the correction above; NOT closed):
+  was the membership of the basket itself chosen with knowledge of
+  which assets would survive the sample?
 
-For a frozen hand-picked top-7 basket at $10k notional, both axes
-turned out to be moot — but only after explicit per-axis checks:
+For a frozen hand-picked top-7 basket at $10k notional, the first two
+axes turned out to be moot — but only after explicit per-axis checks:
 
 1. For listing axis: read each asset's parquet's `min(date)` and
    compare against the exchange's official listing date. For the
@@ -310,9 +331,15 @@ failure mode that is otherwise undetectable from the equity curve.
 The scope boundary deserves writing down:
 
 * Catches: temporal look-ahead in the signal / index / SMA / gate.
-* Does NOT catch: universe-selection bias (closed separately,
-  Section 4), live data-revision look-ahead (the harness's
-  content-hashed vintage store is the mechanism for the latter).
+* Does NOT catch: universe-selection bias, live data-revision
+  look-ahead (the harness's content-hashed vintage store is the
+  mechanism for the latter). **Corrected 2026-08-25:** this bullet
+  used to say universe-selection bias was "closed separately,
+  Section 4". It is not closed. Section 4 closes the listing and
+  liquidity axes; the composition axis — the ex-post choice of the
+  seven basket members — is open. Nothing in the truncation audit
+  touches it: the audit is conditional on the chosen universe by
+  construction.
 
 The audit takes 33 seconds on a 2026 laptop. Cheap enough to be
 re-run after any code change that touches the strategy, index, or
@@ -493,9 +520,14 @@ similar discipline, the order I think is correct:
    verdicts, not a single PASS / FAIL. State the conditional path
    under which a fee-fragile verdict could re-enter (maker tier,
    lower-fee promo).
-4. **Check universe bias on both axes** (listing + liquidity).
-   Use NaN in an eligibility computation as a fail-loud signal,
-   not a silent re-rank.
+4. **Check universe bias on all three axes** (listing + liquidity +
+   composition). Use NaN in an eligibility computation as a
+   fail-loud signal, not a silent re-rank. The third axis is the
+   one I got wrong (see the correction in Section 4): closing
+   listing and liquidity does not close survivorship in the choice
+   of basket members. If the membership was picked with hindsight,
+   say so and re-run against a point-in-time universe before
+   quoting the Sharpe.
 5. **Run a per-bar truncation audit** at the signal and index
    layers on the verified window. Report 0 mismatches and the
    scope boundary, or stop and re-think the pipeline.

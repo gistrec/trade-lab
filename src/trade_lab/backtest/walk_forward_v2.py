@@ -468,18 +468,25 @@ def aggregate_walk_forward(
     )
 
     # 1/sqrt(T) is the MINIMAL deflator: the null sampling std of a
-    # single per-period Sharpe estimate. It corrects for estimation
-    # noise only, not for the dispersion of the actual trial pool —
-    # the project's pinned conservative assumption for that pool is
-    # sd ≈ 0.7 annualized (a-priori, no trial panel; the DSR call
-    # below compares per-period quantities: pass 0.7/sqrt(365),
+    # single per-period Sharpe estimate. What is minimal is the
+    # DISPERSION, not the correction — deflated_sharpe_ratio still
+    # feeds this into expected_max_sharpe, so the N=500 extreme-value
+    # factor is applied either way. The assumption baked in here is
+    # that trials spread out only as much as re-estimation noise
+    # would, rather than as much as the pool of strategies actually
+    # searched. The project's pinned conservative assumption for that
+    # pool is sd ≈ 0.7 annualized (a-priori, no trial panel; the DSR
+    # call below compares per-period quantities: pass 0.7/sqrt(365),
     # never the raw 0.7) and yields DSR ≈ 0.04 for the deployed
-    # config, which RESULTS.md cites as the primary
-    # (conservative) layer with this figure as secondary (see
-    # findings/dsr_convention_2026_08.md). Keep the computation as-is
-    # so both numbers stay reproducible. Do not swap in the std of
-    # OOS fold Sharpes: sample-driven noise, several times larger,
-    # floors DSR to 0 for the wrong reason.
+    # config, which RESULTS.md cites as the primary (conservative)
+    # layer with this figure as secondary (see
+    # findings/dsr_convention_2026_08.md). This 1/sqrt(T) figure is
+    # also the convention the project's DSR > 0.5 deploy gate is
+    # defined on; that gate was not re-run when reporting moved to
+    # the conservative deflator. Keep the computation as-is so both
+    # numbers stay reproducible. Do not swap in the std of OOS fold
+    # Sharpes: sample-driven noise, several times larger, floors DSR
+    # to 0 for the wrong reason.
     T = len(concatenated)
     sharpe_std_dev = 1.0 / np.sqrt(T) if T > 0 else 0.0
 

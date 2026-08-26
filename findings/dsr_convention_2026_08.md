@@ -5,8 +5,36 @@
 **Decision (owner):** the honest two-layer statement below becomes
 the primary citation everywhere alive (RESULTS.md, CLAUDE.md, code
 comments); DSR 0.770 stays as a clearly labeled secondary figure
-under the 1/sqrt(T) convention. No computation changes — both
-numbers remain reproducible.
+under the 1/sqrt(T) convention. No computation changes.
+
+**Reproducibility (revised 2026-08-26).** The original wording here
+claimed both numbers "remain reproducible" while `data/` is
+gitignored, no parquet snapshot is committed, and this finding itself
+concedes that a refetch yields a longer sample and different bar
+counts. As written the claim was not true from committed history
+alone. It is now made true by committing the two derived return
+series as immutable artifacts:
+
+* `docs/results/dsr_convention_2026_08_concat_oos_returns.csv` —
+  2339 daily bars, the walk-forward concatenated OOS series.
+* `docs/results/dsr_convention_2026_08_venue_replay_returns.csv` —
+  1588 daily bars, the venue-verified replay window.
+
+Each file carries a `#` provenance header naming the frozen-config
+hash `ac8919…`, the walk-forward parameters, the per-asset data
+vintage (local `data/binance_*_1d.parquet` snapshot as of
+2026-08-26, panel trimmed to the common last bar 2026-05-27), the
+generating commit, and the Sharpe / DSR values the file reproduces.
+Read them with
+`pandas.read_csv(path, comment="#", index_col=0, parse_dates=True)`
+and feed them to `deflated_sharpe_ratio(..., num_trials=500, ...)`.
+Route chosen deliberately: ~96 KB of committed floats is a cheap
+price for turning "reproducible if you happen to hold the same
+private parquet snapshot" into "reproducible from this repository",
+and it also fixes the vintage so a later refetch cannot silently
+move the published numbers. The parquets themselves stay
+uncommitted — the artifacts are the *derived* series, which is the
+object every DSR figure in this finding is actually computed on.
 
 ## The problem
 
@@ -14,13 +42,37 @@ The project's headline "DSR 0.770" depends on one input the data
 does not pin down: `sharpe_std_dev`, the dispersion of the trial
 pool under the null. `walk_forward_v2.py` uses the *minimal*
 deflator 1/sqrt(T) — the null sampling std of a single per-period
-Sharpe estimate. That corrects for estimation noise only; it does
-not model how far the best of 500 dispersed trials drifts. The
-project's own pinned conservative *assumption* (RESULTS.md pinned
-constants, both annualized: `sd_trial_sharpes ≈ 0.7`,
-`E[max Sharpe over 500 trials] ≈ 2.14`) gives a very different
-answer on the same returns. Citing only 0.770 was quoting the
-flattering convention without the label.
+Sharpe estimate.
+
+Be precise about what that does and does not skip, because an
+earlier draft of this finding got it wrong. It said 1/sqrt(T)
+"does not model how far the best of 500 dispersed trials drifts."
+**That is false.** Read `src/trade_lab/backtest/dsr.py`:
+`deflated_sharpe_ratio` passes `sharpe_std_dev` straight into
+`expected_max_sharpe(num_trials, sharpe_std_dev)`, which multiplies
+it by the Bailey-LdP extreme-value factor
+`(1 - γ)·Φ⁻¹(1 - 1/N) + γ·Φ⁻¹(1 - 1/(N·e))` at N = 500 and uses the
+product as the bar `SR_0`. The N=500 extreme-value correction is
+applied in **both** conventions; the conventions differ only in the
+number it is applied to. At N = 500 that factor is ≈ 3.053, so:
+1/sqrt(2339) ≈ 0.0207 × 3.053 → SR_0 ≈ 0.0631 per-period
+(≈ 1.21 annualized), versus 0.0366 × 3.053 → SR_0 ≈ 0.1118
+per-period (≈ 2.14 annualized, matching the pinned constant). Same
+correction, two different bars.
+
+The real limitation is narrower. 1/sqrt(T) assumes the cross-trial
+dispersion comes **only from sampling noise** — as if the 500 trials
+were 500 re-estimates of one and the same zero-skill strategy on the
+same length of data. The trials the project actually ran are not
+that: they are different strategies, lookbacks and overlays, whose
+Sharpes spread out far more than re-estimation noise would. Using
+the narrower dispersion sets a lower bar, and a lower bar is what
+produces the flattering 0.770. The project's own pinned conservative
+*assumption* (RESULTS.md pinned constants, both annualized:
+`sd_trial_sharpes ≈ 0.7`, `E[max Sharpe over 500 trials] ≈ 2.14`)
+substitutes a pool-sized dispersion into the same formula and gives
+a very different answer on the same returns. Citing only 0.770 was
+quoting the flattering convention without the label.
 
 ## Where 0.7 comes from — assumption, not measurement
 
@@ -70,22 +122,35 @@ they are different statistical objects and are kept apart on
 purpose:
 
 * **Concat-OOS (walk-forward stitched)** — the object behind the
-  0.770 headline: T = 2339 daily bars, 2020-01-01 → 2026-05-27,
-  concat-OOS Sharpe +1.478.
-* **Venue-verified window (direct frozen-config backtest)** — the
-  object `findings/validation_multiexchange.md` §"RISK FLAG" calls
-  authoritative: the frozen config (hash `ac8919…`) replayed on the
-  Binance basket, sliced to 2022-01-21 → end of sample. That
+  0.770 headline, and the only genuinely selection-OOS series here:
+  T = 2339 daily bars, 2020-01-01 → 2026-05-27, concat-OOS Sharpe
+  +1.478. Committed as
+  `docs/results/dsr_convention_2026_08_concat_oos_returns.csv`.
+* **Venue-verified replay window (direct frozen-config backtest)** —
+  the object `findings/validation_multiexchange.md` §"RISK FLAG"
+  calls authoritative: the frozen config (hash `ac8919…`) replayed
+  on the Binance basket, sliced to 2022-01-21 → end of sample.
+  **Label this correctly wherever it is cited: it is a fixed-config
+  HISTORICAL REPLAY, not a second out-of-sample result.** The config
+  was already selected before this window was measured; the window
+  overlaps the walk-forward OOS sample rather than extending past
+  it; and none of it is forward data. What the replay tests is
+  *venue agreement* — do Binance prices and independently sourced
+  Bybit prices produce the same strategy — plus how much of the
+  historical edge sits in the venue-verifiable era (a lot less than
+  the full-sample Sharpe suggests: +0.72 vs +1.38). It adds no
+  selection-bias protection on top of the concat-OOS number. That
   finding reports 1589 bars / Sharpe **+0.721** through 2026-05-28;
   recomputed today on the same parquets it is 1588 bars /
   **+0.7217** through 2026-05-27, because the local BTC snapshot
   now ends one bar earlier than the 2026-05-29 run. That one bar
-  moves the Sharpe by 0.0003 and the DSR by < 0.001.
+  moves the Sharpe by 0.0003 and the DSR by < 0.001. Committed as
+  `docs/results/dsr_convention_2026_08_venue_replay_returns.csv`.
 
 | Convention | `sharpe_std_dev` (per-period) | DSR (computed) |
 |---|---|---|
-| Minimal (1/sqrt(T)) | `1/sqrt(2339) ≈ 0.0207` | **0.770** at the peak config; **0.736** neighborhood median, 7/7 neighbors > 0.5 (both figures exist only under this convention) |
-| Conservative (pinned assumption) | `0.7 / sqrt(365) ≈ 0.0366` | **0.037** on the concat-OOS series (Sharpe +1.48); **0.002** (0.0016) on the venue-verified frozen-config backtest (+0.72) |
+| Minimal (1/sqrt(T)) — also the project's gate convention | `1/sqrt(2339) ≈ 0.0207` | **0.770** at the peak config; **0.736** neighborhood median, 7/7 neighbors > 0.5 (both figures exist only under this convention) |
+| Conservative (pinned assumption) — the primary *reported* convention | `0.7 / sqrt(365) ≈ 0.0366` | **0.037** on the concat-OOS series (Sharpe +1.48); **0.002** (0.0016) on the venue-verified *replay* window (+0.72 — fixed-config historical replay, not selection-OOS) |
 
 The venue-verified 0.002 was **recomputed from the validation
 run's own object**, not from a slice of the stitched series: the
@@ -101,11 +166,15 @@ depended on which one was used.
 
 Reference Sharpe layers (unchanged, from
 `findings/han_28d_tsmom.md` and the validation phase): concat-OOS
-Sharpe **+1.48**, venue-verified window **+0.72**.
+Sharpe **+1.48** (selection-OOS), venue-verified **replay** window
+**+0.72** (fixed-config historical replay, not OOS).
 
 ## The primary statement (verbatim)
 
-> Concat-OOS Sharpe +1.48 (verified window 0.72); DSR under the
+> Concat-OOS Sharpe +1.48 (venue-verified *replay* window 0.72 —
+> a fixed-config historical replay of the frozen config over
+> 2022-01-21 → 2026-05-27 checking venue agreement, not
+> selection-OOS and not forward data); DSR under the
 > project's own conservative deflator (pinned conservative
 > assumption `sd_trial_sharpes ≈ 0.7` annualized, `0.7/sqrt(365)`
 > per-period — an a-priori pool dispersion, no trial panel exists)
@@ -117,6 +186,29 @@ Sharpe **+1.48**, venue-verified window **+0.72**.
 DSR 0.770 may still be cited, always labeled "under the 1/sqrt(T)
 convention"; the same label applies to the cluster's DSR-threshold
 form (median 0.736, 7/7 > 0.5).
+
+**Scope of that labeling rule, so it does not become
+self-contradicting.** It binds every statement about the **deployed
+config** and every place a **gate or threshold** is defined — those
+are what the project acts on. It does not oblige a rewrite of the
+historical per-strategy rows in RESULTS.md (#2–#14 and the family
+sections): those carry one blanket footnote declaring the whole
+table minimal-convention, which is accurate — none of those figures
+has ever been recomputed under the conservative deflator. One
+scoping sentence plus a column footnote, not dozens of per-row
+edits; but no bare, unscoped DSR is left standing anywhere.
+
+**And the gate is not the reporting convention.** The project's
+deploy gate ("DSR > 0.5 at N=500, cluster-stable") was and remains
+defined on the *minimal* convention. This decision moved reporting,
+not gating: nothing was re-run and no threshold was re-set. The
+honest phrasing, used verbatim in RESULTS.md, is that the deployed
+config **passed the gate as the gate is defined and would not pass
+a gate restated on the conservative deflator** — under which no
+config in this project would pass, which is why the bar was not
+restated. That is also why the deploy case is argued from the
+convention-free Sharpe plateau plus the forward test rather than
+from any DSR number.
 
 ## Why the deploy case does not rest on the DSR headline
 
@@ -144,6 +236,26 @@ artifacts of the chosen deflator and are reported as layers, per the
 
 ## Reproducing the venue-verified 0.0016
 
+Shortest path (no private data needed): read the committed series
+and make one deflator call.
+
+```python
+import math, pandas as pd
+from trade_lab.backtest.dsr import deflated_sharpe_ratio
+
+r = pd.read_csv(
+    "docs/results/dsr_convention_2026_08_venue_replay_returns.csv",
+    comment="#", index_col=0, parse_dates=True,
+)["net_return"]
+deflated_sharpe_ratio(r, num_trials=500, sharpe_std_dev=0.7/math.sqrt(365))
+# -> 0.0016184134334346623
+```
+
+The same two lines against
+`dsr_convention_2026_08_concat_oos_returns.csv` give 0.0368 at
+`0.7/sqrt(365)` and 0.7705 at `1/sqrt(2339)`.
+
+Long path, from the parquet snapshot (what produced those files).
 No new script is committed (this is a reporting convention, not a
 new experiment). The steps are the `validation_multiexchange.md`
 path plus one deflator call, on the seven `data/binance_*_1d.parquet`
@@ -167,12 +279,25 @@ For reference the same slice under the minimal deflator
 (`1/sqrt(1588)`) gives 0.061 — the convention gap is the whole
 point of this finding.
 
-Reproducibility caveat: `data/` is gitignored, so the parquets are a
-local snapshot, not committed history (the "committed to the repo"
-line in `validation_multiexchange.md` § Reproducing is inaccurate on
-that point). Anyone re-fetching from Binance will get a longer
-sample and slightly different bar counts; the DSR verdict (≈ 0
-under the conservative deflator) is not close to any threshold.
+Reproducibility caveat, stated precisely — what a reader can and
+cannot reproduce:
+
+* **Can, exactly, from this repository:** every DSR and Sharpe
+  figure in this finding. The two committed CSVs are the exact
+  derived series the numbers were computed on, so the deflator calls
+  reproduce bit-for-bit.
+* **Cannot, from this repository:** the step *upstream* of those
+  series. `data/` is gitignored, so the seven Binance parquets are a
+  local snapshot, not committed history (the "committed to the repo"
+  line in `validation_multiexchange.md` § Reproducing is inaccurate
+  on that point — see the addendum there). Rebuilding the basket
+  from a fresh Binance fetch will give a longer sample and slightly
+  different bar counts than the 2026-08-26 vintage pinned in the
+  CSV headers, so the re-derived series will not match row-for-row.
+* **Does it matter for the verdict:** no. The DSR verdict (≈ 0 under
+  the conservative deflator) is not close to any threshold, and the
+  one-bar vintage difference already observed against the 2026-05-29
+  run moved Sharpe by 0.0003 and DSR by < 0.001.
 
 ## Non-changes
 
@@ -185,3 +310,34 @@ under the conservative deflator) is not close to any threshold.
 * The 0.7 assumption itself is unchanged — only its label. No
   number moved except the venue-verified DSR's provenance
   (0.002 → 0.0016 from the authoritative object).
+* The two CSVs added under `docs/results/` are **derived artifacts**,
+  not new experiments and not code: they pin series this finding
+  already reported. Zero trials, zero behavior change.
+
+## Revision 2026-08-26 (third Codex review round)
+
+Documentation-only pass over this finding and the docs that cite it:
+
+1. **Corrected a factual error in this file.** "1/sqrt(T) does not
+   model how far the best of 500 dispersed trials drifts" was wrong —
+   `deflated_sharpe_ratio` does feed `sharpe_std_dev` into
+   `expected_max_sharpe`, so the N=500 extreme-value correction is
+   applied under both conventions. The real limitation, now stated in
+   § "The problem", is that 1/sqrt(T) assumes the cross-trial
+   dispersion is pure sampling noise instead of the wider dispersion
+   of the strategy pool actually searched. Same wording corrected in
+   RESULTS.md and in the `walk_forward_v2.py` comment.
+2. **Made "remain reproducible" true** by committing the two derived
+   return series (see § Decision).
+3. **Labeled the venue-verified figure as a fixed-config historical
+   replay** everywhere it is cited (here, RESULTS.md, CLAUDE.md) so
+   it stops reading as an independent OOS result under the
+   "OOS unless marked" project convention.
+4. **Separated the gate convention from the reporting convention**
+   in RESULTS.md, which previously asserted both that the config
+   passed DSR > 0.5 and that its primary DSR is ≈ 0.
+5. **Scoped the labeling rule** so the historical per-strategy rows
+   in RESULTS.md are covered by one blanket footnote rather than
+   left as bare unscoped figures.
+
+No number changed. No computation changed.
