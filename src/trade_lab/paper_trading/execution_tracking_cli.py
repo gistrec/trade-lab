@@ -154,11 +154,24 @@ def main(argv: list[str] | None = None) -> int:
             f"filled {m['filled_amount']} of {m['intended_amount']} "
             f"({m['client_order_id']})"
         )
+    for m in tr.size_mismatches:
+        print(
+            f"    SIZE MISMATCH: {m['date']} {m['symbol']} {m['side']} "
+            f"filled {m['filled_notional_quote']:.2f} quote = "
+            f"{m['actual_weight_delta']:.4f} of the book, sim intended "
+            f"{m['expected_weight_delta']:.4f} (x{m['ratio']:.2f})"
+        )
     for e in tr.unexpected_orders:
         print(
             f"    UNEXPECTED ORDER: {e['date']} {e['symbol']} "
             f"{e['side']} {e['filled_notional_quote']:.2f} quote "
             f"(cycle {e['cycle_id']}) — no sim-intended trade"
+        )
+    for m in tr.pre_live_sim_trades:
+        # Not a mismatch: no live cycle existed on that date yet.
+        print(
+            f"    BEFORE LIVE COVERAGE: {m['date']} {m['symbol']} "
+            f"sim intended {m['expected_side']} — no real cycle to execute it"
         )
     for e in tr.out_of_coverage_fills:
         # Not a mismatch: the harness never logged this date, so it holds

@@ -93,6 +93,10 @@ def _filled_order(
     terminal_status: str = "closed",
     intended_amount: float = 0.001,
     filled_amount: float = 0.001,
+    # Default book in these fixtures is 100.0 and the default sim intent
+    # is 0.5/7 of it, so the fill must be ~7.14 quote for the size check
+    # to see a faithful execution.
+    filled_notional_quote: float = 100.0 * 0.5 / 7,
 ) -> dict:
     return {
         # Distinct default ids: events dedupe by clientOrderId.
@@ -102,7 +106,7 @@ def _filled_order(
         "terminal_status": terminal_status,
         "intended_amount": intended_amount,
         "filled_amount": filled_amount,
-        "filled_notional_quote": 25.0,
+        "filled_notional_quote": filled_notional_quote,
     }
 
 
@@ -555,6 +559,9 @@ def test_dry_run_skip_does_not_cover(tmp_path):
     """Planning skips of the 6-hourly dry-run never blocked a real order."""
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     _write_real(real_p, [
+        # A live cycle must exist, else the date sits before live coverage
+        # and carries no expectation at all.
+        _cycle(DATES[1], 100.0, 1.0),
         _cycle(DATES[1], 100.0, 1.0, mode="dry_run",
                orders_skipped=[_min_notional_skip("DOGE/USDT", "buy")]),
     ])
@@ -760,18 +767,44 @@ def test_invalid_threshold_rejected_at_parse_time(tmp_path, capsys, value):
     assert "must be a finite number > 0" in capsys.readouterr().err
 
 
-def test_failed_cycles_do_not_enter_equity_series(tmp_path):
+def test_failed_live_cycle_with_read_phase_equity_is_used(tmp_path):
+    """A live attempt owns its date whatever the outcome (Codex 3858753685).
+
+    'partial' / 'unknown_orders' cycles still read equity PRE-trade and may
+    have placed fills; substituting a later dry-run would value the book
+    AFTER those fills, at a different market window."""
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
-    failed = _cycle(DATES[1], 50.0, 0.5, outcome="failed")
     _write_real(real_p, [
-        _cycle(DATES[0], 100.0, 0.5), failed, _cycle(DATES[2], 100.0, 0.5),
+        _cycle(DATES[0], 100.0, 0.5),
+        _cycle(DATES[1], 100.0, 0.5, outcome="partial"),
+        _cycle(DATES[2], 100.0, 0.5),
     ])
     _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
     report = check_execution_tracking(real_p, sim_p)
-    # Failed cycle's equity is excluded: only 2 aligned days, flat → no gap.
-    assert report.equity.n_aligned_days == 2
+    assert report.equity.n_aligned_days == 3
     assert report.equity.level_gap_pct == pytest.approx(0.0, abs=1e-9)
     assert not report.equity.breached
+
+
+def test_live_cycle_without_equity_drops_the_date(tmp_path):
+    """A live attempt that never reached the read phase must NOT be
+    back-filled by that day's dry-run: whether it traded is exactly what
+    is unknown, so a post-execution valuation could be silently compared
+    against the sim's pre-trade one."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    dead = _cycle(DATES[1], 100.0, 0.5, outcome="failed")
+    dead["equity_usd"] = None
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5),
+        dead,
+        # Same date, later dry-run — must not become the date's sample.
+        _cycle(DATES[1], 250.0, 0.5, mode="dry_run"),
+        _cycle(DATES[2], 100.0, 0.5),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.equity.n_aligned_days == 2
+    assert report.equity.overlap == (DATES[0], DATES[2])
 
 
 # ---------------------------------------------------------------------------
@@ -910,3 +943,138 @@ def test_fill_after_sim_coverage_is_not_unexpected(tmp_path):
     assert tr.unexpected_orders == []
     assert [e["date"] for e in tr.out_of_coverage_fills] == [DATES[2]]
     assert tr.coverage == (DATES[0], DATES[0])
+
+
+# ---------------------------------------------------------------------------
+# Third review round: size, pre-live coverage, cache re-journal, non-finite
+# ---------------------------------------------------------------------------
+
+def test_undersized_fill_is_flagged(tmp_path, capsys):
+    """Codex 3858753674: presence + direction is not a match. A fully
+    filled dust order where the sim intended a real weight change must
+    surface, not read as clean."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        # Sim intends 0.5/7 ≈ 7.1% of a 100 book (~7.14 quote); a sizing
+        # bug sends 1.00 quote and fills it completely.
+        _cycle(DATES[1], 100.0, 1.0,
+               orders_executed=[_filled_order(filled_notional_quote=1.0)]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert tr.missing_trades == []      # the order exists and fills fully
+    assert tr.partial_fills == []       # ... and is not partial
+    assert len(tr.size_mismatches) == 1
+    m = tr.size_mismatches[0]
+    assert m["symbol"] == "BTC" and m["side"] == "buy"
+    assert m["ratio"] == pytest.approx(0.14, abs=0.01)
+    assert "mis-sized" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p)) == 0
+    assert "SIZE MISMATCH" in capsys.readouterr().out
+
+
+def test_faithful_fill_size_is_not_flagged(tmp_path):
+    """The band must tolerate lot steps, the funding reserve and price
+    drift — only order-of-magnitude errors trip it."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[
+            # 3% under the intent: lot step + 10 bp reserve territory.
+            _filled_order(filled_notional_quote=100.0 * 0.5 / 7 * 0.97),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.size_mismatches == []
+
+
+def test_sim_intents_before_first_live_attempt_are_not_missing(tmp_path):
+    """Codex 3858753683: the harness journal predates live trading — those
+    intents never had a real cycle to execute them."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        # Observation phase: dry-runs only on DATES[0].
+        _cycle(DATES[0], 100.0, 0.5, mode="dry_run"),
+        _cycle(DATES[1], 100.0, 1.0),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert tr.missing_trades == []
+    assert [e["date"] for e in tr.pre_live_sim_trades] == [DATES[0]]
+    assert "before the first live attempt" in report.advisory
+
+
+def test_sim_intent_after_first_live_attempt_still_flagged(tmp_path):
+    """The pre-live exemption must not swallow genuine gaps afterwards."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.pre_live_sim_trades == []
+    assert [m["symbol"] for m in tr.missing_trades] == ["BTC"]
+
+
+def test_cached_rerun_record_does_not_erase_the_fill(tmp_path):
+    """Codex 3858753688: a same-day rerun re-journals the state-cache
+    result with zeroed fill detail; letting it win would report the
+    executed trade as missing."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    coid = "tsmom_20260801_BTCUSDT_buy"
+    filled = _filled_order(coid=coid)
+    cached = _filled_order(
+        coid=coid, intended_amount=0.0, filled_amount=0.0,
+        filled_notional_quote=0.0,
+    )
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[filled]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[cached],
+               cycle_id="aabbccdd-0001"),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.missing_trades == []
+    assert tr.size_mismatches == []
+    assert tr.n_real_fill_events == 1
+
+
+@pytest.mark.parametrize("bad", ["NaN", '"nan"'])
+def test_non_finite_equity_is_a_tool_error(tmp_path, capsys, bad):
+    """Codex 3858753678: NaN fails every comparison, so a bare positivity
+    check would pass it through and the breach test would silently read
+    'within threshold'. Both shapes reach the equity check — bare NaN is
+    a json module extension, "nan" is a string float() accepts (bare
+    lowercase nan is invalid JSON and dies earlier, as a corrupt line)."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5), _cycle(DATES[1], 100.0, 0.5),
+    ])
+    lines = real_p.read_text().splitlines()
+    lines[1] = lines[1].replace('"equity_usd": 100.0', f'"equity_usd": {bad}')
+    real_p.write_text("\n".join(lines) + "\n")
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    err = capsys.readouterr().err
+    assert "non-finite equity" in err

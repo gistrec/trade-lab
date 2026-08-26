@@ -231,10 +231,18 @@ override `--sim-journal`), aligns by signal date, and reports:
   (`intended_trades`), never from the mainnet journal itself (an
   erroneous production signal and its own orders would match each
   other); mainnet supplies only the actual side. Mismatches are
-  per-symbol: missing, wrong-direction, partial fill, unexpected.
-  Only LIVE-cycle skips with a sub-minimum reason (min-notional /
-  lot-step class from `delta.py`; not `pending_*`) may cover a
-  missing trade — counted separately, never alerted on.
+  per-symbol: missing, wrong-direction, partial fill, mis-sized,
+  unexpected. Only LIVE-cycle skips with a sub-minimum reason
+  (min-notional / lot-step class from `delta.py`; not `pending_*`)
+  may cover a missing trade — counted separately, never alerted on.
+* **Size, not just presence** — the aggregate fill is normalized by
+  the book and compared with the sim's intended weight delta, so a
+  fully filled dust order where the simulation wanted a real weight
+  change surfaces as `SIZE MISMATCH` instead of reading as clean.
+  The band (0.5x–2x, intents under 0.5% of book unjudged) is wide on
+  purpose: lot steps, the 10 bp funding reserve and snapshot-to-fill
+  drift move a leg by percent, so only sizing errors of a different
+  order of magnitude trip it.
 * **Simulation coverage** — a fill counts as *unexpected* only on a
   date that HAS a harness row (there the "no trade" expectation is
   real). Fills on dates the harness never logged (mainnet started

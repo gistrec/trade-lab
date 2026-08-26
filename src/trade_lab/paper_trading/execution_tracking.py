@@ -35,6 +35,7 @@ Descriptive, not normative — same contract as the fingerprint monitor.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -62,6 +63,16 @@ DEFAULT_GAP_THRESHOLD_PCT = 5.0
 # not an intended trade.
 _INTENT_EPS = 1e-9
 
+# Size check: a fill is compared as a fraction of the real book against
+# the sim's intended weight delta. The band is deliberately wide — lot
+# steps, the 10 bp funding reserve and snapshot-to-fill price drift all
+# move a leg by percent, not by multiples — so only order-of-magnitude
+# sizing errors trip it. Intents below the floor are left unjudged:
+# there lot-step quantization dominates the signal.
+_SIZE_RATIO_LO = 0.5
+_SIZE_RATIO_HI = 2.0
+_SIZE_MIN_INTENT_DW = 0.005
+
 
 @dataclass(frozen=True)
 class EquityTracking:
@@ -85,8 +96,10 @@ class TransitionCheck:
     missing_trades: list          # [{date, symbol, expected_side}]
     wrong_direction_trades: list  # [{date, symbol, expected_side, actual_side}]
     partial_fills: list           # [{date, symbol, side, filled, intended, id}]
+    size_mismatches: list         # [{date, symbol, expected_dw, actual_dw, ratio}]
     unexpected_orders: list       # [{date, symbol, side, notional, cycle_id}]
     out_of_coverage_fills: list   # fills on dates the harness never logged
+    pre_live_sim_trades: list     # sim intents before the first live attempt
     coverage: Optional[tuple]     # (first, last) harness-covered ISO dates
 
 
@@ -201,37 +214,60 @@ def _base_asset(symbol) -> str:
 # ---------------------------------------------------------------------------
 
 def real_equity_by_date(cycles: list[dict]) -> dict[str, float]:
-    """Successful cycles' ``equity_usd`` keyed by signal date.
+    """Read-phase ``equity_usd`` keyed by signal date, one cycle per date.
 
     PRE-TRADE by construction: ``equity_usd`` comes from the cycle's read
     phase, before that date's orders are placed. The sim side is brought
     onto the same phase (see :func:`sim_pre_trade_equity_by_date`).
 
-    One CONSISTENT cycle per date: the first live cycle wins; the first
-    dry-run is a fallback only until a live cycle appears. Last-wins
-    would let an 18:00 dry-run valuation retroactively replace the 00:05
-    live observation — a different market window.
+    A live attempt wins the date whatever its OUTCOME — a 'partial' or
+    'unknown_orders' cycle still read its equity pre-trade, and it may
+    have placed fills, which would make any later dry-run that day a
+    POST-trade valuation at a different market window. When a live
+    attempt exists but never reached the read phase, the date is dropped
+    rather than back-filled from a dry-run: whether it traded is exactly
+    what is unknown. Dry-runs supply a date only when no live attempt
+    touched it at all (observation-phase journals).
     """
-    out: dict[str, float] = {}
-    live_seen: set[str] = set()
+    live_eq: dict[str, float] = {}
+    live_dates: set[str] = set()
+    dry_eq: dict[str, float] = {}
     for c in cycles:
-        if c.get("outcome") != "success":
-            continue
         d = _cycle_signal_date(c)
+        if d is None:
+            continue
+        live = is_live_attempt(c)
+        if live:
+            live_dates.add(d)
         eq = c.get("equity_usd")
-        if d is None or eq is None:
+        if eq is None:
             continue
         try:
             val = float(eq)
         except (TypeError, ValueError):
             continue
-        if is_live_attempt(c):
-            if d not in live_seen:
-                live_seen.add(d)
-                out[d] = val
-        elif d not in out:
+        if live:
+            live_eq.setdefault(d, val)
+        elif c.get("outcome") == "success":
+            dry_eq.setdefault(d, val)
+    out = dict(live_eq)
+    for d, val in dry_eq.items():
+        if d not in live_dates:
             out[d] = val
     return out
+
+
+def first_live_attempt_date(cycles: list[dict]) -> Optional[str]:
+    """Earliest signal date carrying a live attempt, or None.
+
+    Sim intents before it were never given a chance to execute — the
+    mirror image of real fills outside harness coverage.
+    """
+    dates = {
+        d for c in cycles if is_live_attempt(c)
+        for d in [_cycle_signal_date(c)] if d is not None
+    }
+    return min(dates) if dates else None
 
 
 def sim_pre_trade_equity_by_date(rows: list[HarnessLogRow]) -> dict[str, float]:
@@ -278,6 +314,14 @@ def compare_equity(
             threshold_pct=threshold_pct, breached=False,
         )
     for d in aligned:
+        # isfinite first: NaN fails every comparison, so a bare <= 0 test
+        # would pass it through and turn the whole report into NaN — with
+        # `abs(gap) > threshold` false, i.e. a silent "within threshold".
+        if not (math.isfinite(real[d]) and math.isfinite(sim[d])):
+            raise ValueError(
+                f"non-finite equity on aligned date {d}: "
+                f"real={real[d]}, sim={sim[d]} — repair the journal"
+            )
         if real[d] <= 0.0 or sim[d] <= 0.0:
             raise ValueError(
                 f"non-positive equity on aligned date {d}: "
@@ -364,7 +408,18 @@ def real_order_events(cycles: list[dict]) -> list[dict]:
                 "cycle_id": (c.get("cycle_id") or "?")[:8],
             }
             if coid:
-                by_coid[coid] = event
+                prev = by_coid.get(coid)
+                # Last-wins EXCEPT for a detail-less state-cache record: a
+                # same-day rerun re-journals the cached terminal result with
+                # zeroed fill fields (the store does not retain them), and
+                # letting it win would erase the real fill and report the
+                # trade as missing.
+                if not (
+                    prev is not None
+                    and prev["filled_amount"] > 0.0
+                    and event["filled_amount"] <= 0.0
+                ):
+                    by_coid[coid] = event
             else:
                 no_coid.append(event)
     events = [
@@ -406,6 +461,45 @@ def live_min_notional_skips(cycles: list[dict]) -> dict[tuple, set]:
     return out
 
 
+def _size_mismatch(
+    date: str,
+    asset: str,
+    expected_dw: float,
+    events: list[dict],
+    real_equity: dict[str, float],
+) -> Optional[dict]:
+    """Aggregate fill vs the sim's intended weight delta, or None.
+
+    Presence and direction alone cannot catch a sizing bug: a fully
+    filled 1-USDT buy where the sim intended a tenth of the book reads
+    as a clean match and can sit under the equity threshold for weeks.
+    Real notional is normalized by the book so the two sides are
+    comparable (the sim bankroll and the real book differ by orders of
+    magnitude by design).
+    """
+    equity = real_equity.get(date)
+    want = abs(float(expected_dw))
+    if equity is None or not math.isfinite(equity) or equity <= 0.0:
+        return None
+    if want < _SIZE_MIN_INTENT_DW:
+        return None
+    filled = sum(e["filled_notional_quote"] for e in events)
+    actual = filled / equity
+    ratio = actual / want
+    if _SIZE_RATIO_LO <= ratio <= _SIZE_RATIO_HI:
+        return None
+    return {
+        "date": date,
+        "symbol": asset,
+        "side": "buy" if expected_dw > 0 else "sell",
+        "expected_weight_delta": want,
+        "actual_weight_delta": actual,
+        "ratio": ratio,
+        "filled_notional_quote": filled,
+        "equity_usd": equity,
+    }
+
+
 def _is_partial_fill(event: dict) -> bool:
     if event["terminal_status"] == "partial":
         return True
@@ -419,6 +513,8 @@ def check_transitions(
     expected = sim_expected_trades(sim_rows)
     events = real_order_events(cycles)
     skips = live_min_notional_skips(cycles)
+    real_eq = real_equity_by_date(cycles)
+    first_live = first_live_attempt_date(cycles)
 
     by_key: dict[tuple, list[dict]] = {}
     for e in events:
@@ -427,8 +523,19 @@ def check_transitions(
     missing: list[dict] = []
     wrong_direction: list[dict] = []
     partials: list[dict] = []
+    size_mismatches: list[dict] = []
+    pre_live: list[dict] = []
     covered = 0
     for d in sorted(expected):
+        # Sim intents predating the first retained live attempt never had
+        # a real counterpart to miss — the mirror of out-of-coverage fills.
+        if first_live is None or d < first_live:
+            for asset in sorted(expected[d]):
+                pre_live.append({
+                    "date": d, "symbol": asset,
+                    "expected_side": "buy" if expected[d][asset] > 0 else "sell",
+                })
+            continue
         for asset in sorted(expected[d]):
             want = "buy" if expected[d][asset] > 0 else "sell"
             evs = by_key.get((d, asset), [])
@@ -444,6 +551,11 @@ def check_transitions(
                             "intended_amount": e["intended_amount"],
                             "client_order_id": e["client_order_id"],
                         })
+                mismatch = _size_mismatch(
+                    d, asset, expected[d][asset], same_side, real_eq,
+                )
+                if mismatch is not None:
+                    size_mismatches.append(mismatch)
                 continue
             if evs:
                 wrong_direction.append({
@@ -495,8 +607,10 @@ def check_transitions(
         missing_trades=missing,
         wrong_direction_trades=wrong_direction,
         partial_fills=partials,
+        size_mismatches=size_mismatches,
         unexpected_orders=unexpected,
         out_of_coverage_fills=out_of_coverage,
+        pre_live_sim_trades=pre_live,
         coverage=coverage,
     )
 
@@ -536,12 +650,21 @@ def check_execution_tracking(
     n_missing = len(transitions.missing_trades)
     n_wrong = len(transitions.wrong_direction_trades)
     n_partial = len(transitions.partial_fills)
+    n_size = len(transitions.size_mismatches)
     n_unexpected = len(transitions.unexpected_orders)
-    if n_missing or n_wrong or n_partial or n_unexpected:
+    if n_missing or n_wrong or n_partial or n_size or n_unexpected:
         advisory += (
             f" Trade mismatches: {n_missing} missing, {n_wrong} "
-            f"wrong-direction, {n_partial} partial, {n_unexpected} "
-            f"unexpected."
+            f"wrong-direction, {n_partial} partial, {n_size} mis-sized, "
+            f"{n_unexpected} unexpected."
+        )
+    if transitions.pre_live_sim_trades:
+        dates = sorted({e["date"] for e in transitions.pre_live_sim_trades})
+        advisory += (
+            f" COVERAGE NOTE: {len(transitions.pre_live_sim_trades)} sim "
+            f"intent(s) on {len(dates)} date(s) before the first live "
+            f"attempt ({dates[0]}..{dates[-1]}) — no real cycle existed "
+            "to execute them, so they are not counted as missing."
         )
     if transitions.out_of_coverage_fills:
         dates = sorted({e["date"] for e in transitions.out_of_coverage_fills})
