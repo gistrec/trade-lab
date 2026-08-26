@@ -257,18 +257,21 @@ def run_live_cycle(
         # rather than sending a resized one — or it is already terminal,
         # and place_order's state fast-path places nothing at all.
         # Scaling either only shrinks the buys that DO need funding.
-        no_spend_symbols: set[str] = set()
+        no_flow_symbols: set[str] = set()
         for intent in plan.orders:
             coid = make_client_order_id(rebal_date, intent.symbol, intent.side)
             pending = pending_by_pair.get(intent.symbol, [])
             blockers = [e for e in pending if e.client_order_id != coid]
             if not blockers:
                 sendable.append(intent)
-                if intent.side == "buy" and (
+                # Both sides: a resolved BUY takes nothing from quote_free,
+                # a resolved SELL adds nothing to it. Either way the cap
+                # must not count it.
+                if (
                     coid in terminal_coids
                     or any(e.client_order_id == coid for e in pending)
                 ):
-                    no_spend_symbols.add(intent.symbol)
+                    no_flow_symbols.add(intent.symbol)
                 continue
             logger.warning(
                 "SKIP %s %s (%.2f %s): order %s from a prior cycle is "
@@ -333,7 +336,7 @@ def run_live_cycle(
             quote_free=balance.quote_free,
             constraints=read.constraints,
             fee_rate=fee_rate,
-            no_spend_symbols=no_spend_symbols,
+            no_flow_symbols=no_flow_symbols,
         )
 
         sorted_intents = sort_orders_for_placement(sendable)

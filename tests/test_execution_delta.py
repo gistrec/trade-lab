@@ -383,7 +383,7 @@ def test_zero_free_quote_records_true_gap_as_funding_cap():
     assert total_funding_cap_quote(plan) == pytest.approx(70_000.0, rel=1e-6)
 
 
-def test_no_spend_symbol_is_excluded_from_cap_spend_and_scaling():
+def test_no_flow_symbol_is_excluded_from_cap_spend_and_scaling():
     """A buy that draws nothing from quote_free (caller's call: the same
     coid is still open on the exchange, or already terminal so nothing
     gets placed) must neither consume the cap nor be scaled. Only the buy
@@ -398,7 +398,7 @@ def test_no_spend_symbol_is_excluded_from_cap_spend_and_scaling():
     ]
     capped, skips = apply_reserve_cap(
         orders, quote_free=3_000.0, constraints={}, fee_rate=0.001,
-        no_spend_symbols={"BTC/USDT"},
+        no_flow_symbols={"BTC/USDT"},
     )
     by_sym = {o.symbol: o for o in capped}
     assert by_sym["BTC/USDT"] == orders[0]
@@ -551,4 +551,32 @@ def test_cap_restores_a_buy_it_pushed_below_the_minimum():
     assert by_sym["BTC/USDT"].notional_quote >= 10.0
     total = sum(o.notional_quote for o in capped)
     assert total <= 10_000.0 * 0.999 + 1e-6, "the cap still holds"
+    assert all(s.reason == "funding_cap" for s in skips)
+
+
+def test_resolved_sell_does_not_fund_the_buys():
+    """A sell whose today-coid is already resolved brings no NEW quote:
+    filled, its proceeds sit in quote_free already; canceled, they never
+    arrive. Counting it would size the buys against money that is not
+    there and hand the tail order an InsufficientFunds rejection."""
+    alloc = _allocation()                       # $35k target per asset
+    current = {                                 # BTC $45k, ETH $25k held
+        "BTC": 45_000.0 / _PRICES["BTC"],
+        "ETH": 25_000.0 / _PRICES["ETH"],
+    }
+    kwargs = dict(
+        allocation=alloc, current_holdings=current,
+        constraints={}, quote_currency="USDT", fee_rate=0.001,
+    )
+    plan = compute_delta_plan(**kwargs, quote_free=0.0)
+    counted = next(o for o in plan.orders if o.side == "buy")
+    assert counted.notional_quote > 0.0        # sell funds the buy today
+
+    # Same plan, but the sell is already resolved: nothing funds the buy.
+    capped, skips = apply_reserve_cap(
+        plan.orders, quote_free=0.0, constraints={}, fee_rate=0.001,
+        no_flow_symbols={"BTC/USDT"},          # the sell leg
+    )
+    buys = [o for o in capped if o.side == "buy"]
+    assert buys == [], "an unfunded buy must not be sent"
     assert all(s.reason == "funding_cap" for s in skips)
