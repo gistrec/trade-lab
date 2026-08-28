@@ -516,7 +516,8 @@ def test_print_dry_run_flags_known_preview_vs_live_cap_divergence(capsys):
     )
     out = capsys.readouterr().out
     assert "preview-only figure" in out
-    assert "caps LESS than shown, never more" in out
+    assert "cap EITHER WAY" in out
+    assert "LESS when a buy" in out and "MORE when a sell" in out
 
 
 def test_print_dry_run_uncapped_cycle_says_so_without_the_caveat(capsys):

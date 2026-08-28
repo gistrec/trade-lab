@@ -264,13 +264,20 @@ def run_live_cycle(
             blockers = [e for e in pending if e.client_order_id != coid]
             if not blockers:
                 sendable.append(intent)
-                # Both sides: a resolved BUY takes nothing from quote_free,
-                # a resolved SELL adds nothing to it. Either way the cap
-                # must not count it.
-                if (
-                    coid in terminal_coids
-                    or any(e.client_order_id == coid for e in pending)
-                ):
+                # A buy takes nothing from quote_free whether its coid is
+                # terminal (fast-path places nothing) or still live (the
+                # exchange already holds the quote). A SELL is different:
+                # only a TERMINAL one is known to add nothing — proceeds
+                # already inside quote_free, or never coming. A live
+                # same-coid sell is still expected to fund the buys; the
+                # executor waits for it before placing them, so excluding
+                # it would cap the buys away and underallocate the cycle.
+                same_coid_live = any(e.client_order_id == coid for e in pending)
+                if intent.side == "buy":
+                    no_flow = coid in terminal_coids or same_coid_live
+                else:
+                    no_flow = coid in terminal_coids
+                if no_flow:
                     no_flow_symbols.add(intent.symbol)
                 continue
             logger.warning(

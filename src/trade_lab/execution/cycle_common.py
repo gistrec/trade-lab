@@ -138,12 +138,12 @@ def run_read_phase(
     buys net of it — and omitting it raises in the planner.
 
     Known divergence with ``reserve_cap=True``: the cap runs with no
-    ``no_spend_symbols`` exemptions, because a caller without the
-    order-state store (:mod:`dry_run`) cannot tell which buys today's
-    clientOrderId already covers. Such a preview shaves buys the live
-    cycle sends whole — one-directional (previewed spend <= live spend),
-    never the reverse, and flagged in ``print_dry_run``'s reserve-cap
-    block."""
+    ``no_flow_symbols`` exemptions, because a caller without the
+    order-state store (:mod:`dry_run`) cannot see today's
+    clientOrderIds. It cuts BOTH ways — the preview shaves buys the
+    live cycle sends whole (a buy its coid already covers), and counts
+    proceeds of a sell the live cycle knows is terminal. Flagged in
+    ``print_dry_run``'s reserve-cap block."""
     balance = broker.fetch_balance_snapshot()
     equity = broker.estimate_total_equity_usd(snapshot=balance)
 

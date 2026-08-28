@@ -1947,3 +1947,31 @@ def test_failed_cycle_before_read_phase_price_fallbacks_none(tmp_path):
     assert cycle["price_fallbacks"] is None
     # No orders were placed: None, never [] (failed-vs-empty invariant).
     assert cycle["orders_executed"] is None
+
+
+def test_live_same_coid_sell_still_funds_the_buys(monkeypatch, tmp_path):
+    """A same-coid SELL left open by reconstruction is waited for by the
+    executor before the buys go out, so its proceeds still fund them.
+    Excluding it (as a TERMINAL sell is excluded) would cap the buys away
+    and end the cycle underallocated."""
+    from trade_lab.execution.delta import OrderIntent, apply_reserve_cap
+
+    sell = OrderIntent(
+        symbol="BTC/USDT", side="sell", base_amount=0.2,
+        notional_quote=10_000.0, price_used=50_000.0, reason="delta",
+    )
+    buy = OrderIntent(
+        symbol="ETH/USDT", side="buy", base_amount=3.0,
+        notional_quote=9_000.0, price_used=3_000.0, reason="delta",
+    )
+    # Sell counted (live, still expected to settle) → the buy survives.
+    capped, _ = apply_reserve_cap(
+        [sell, buy], quote_free=0.0, constraints={}, fee_rate=0.001,
+    )
+    assert any(o.side == "buy" for o in capped)
+    # Sell excluded (terminal) → nothing funds the buy, it is capped away.
+    capped_terminal, _ = apply_reserve_cap(
+        [sell, buy], quote_free=0.0, constraints={}, fee_rate=0.001,
+        no_flow_symbols={"BTC/USDT"},
+    )
+    assert not any(o.side == "buy" for o in capped_terminal)

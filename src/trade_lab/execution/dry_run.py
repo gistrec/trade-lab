@@ -255,10 +255,11 @@ def _success_cycle(
 # cap cannot exempt buys today's clientOrderId already covers (the live
 # cycle does). Printed with the figure, never silently.
 _CAP_PREVIEW_CAVEAT = (
-    "  NOTE: preview-only figure — the dry run has no order-state store\n"
-    "        and cannot exempt buys already covered by today's\n"
-    "        clientOrderId; the live cycle exempts those and\n"
-    "        caps LESS than shown, never more."
+    "  NOTE: preview-only figure — the dry run has no order-state store,\n"
+    "        so it cannot see today's clientOrderIds. The live cycle may\n"
+    "        cap EITHER WAY: LESS when a buy is already covered by its\n"
+    "        coid (exempt from the spend), MORE when a sell is already\n"
+    "        terminal (its proceeds do not fund anything)."
 )
 
 
