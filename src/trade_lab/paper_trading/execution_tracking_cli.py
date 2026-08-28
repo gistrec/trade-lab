@@ -10,7 +10,8 @@ threshold breached OR an unexplained equity move suppressed the gap
 number, AND ``--fail-on-breach`` was passed (a refusal to report is not
 a pass); 2 — tool error (missing journal, filesystem failure, corrupt
 mainnet journal lines, a malformed harness row before the end of its
-journal, harness-row schema drift, a malformed capital-events file;
+journal, harness-row schema drift, a malformed capital-events file or a
+flow declared on a date the real journal has no equity reading for;
 argparse exits 2 natively on invalid flag values).
 """
 from __future__ import annotations
@@ -117,9 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         # ValueError: non-positive or non-numeric equity, corrupt mainnet
         # journal lines, a malformed mid-journal harness row, harness-row
         # schema drift (incl. an unrecoverable equity phase), a malformed
-        # capital-events declaration. TypeError: a HarnessLogRow that
-        # slipped past the per-row wrap — still a tool error, never exit 1
-        # (the breach code).
+        # or undatable capital-events declaration. TypeError: a
+        # HarnessLogRow that slipped past the per-row wrap — still a tool
+        # error, never exit 1 (the breach code).
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
         return 2
 

@@ -209,8 +209,10 @@ def load_capital_events(path: Path) -> dict[str, float]:
     inferred. The file is a JSON list of
     ``{"date": "YYYY-MM-DD", "amount_usd": <signed float>, "note": ...}``;
     ``date`` is the first signal date whose ``equity_usd`` reading ALREADY
-    includes the transfer (that is what the daily return arithmetic
-    subtracts). Positive = deposit, negative = withdrawal.
+    includes the transfer. That reading must exist in the real journal:
+    the span return is SPLIT there, so a flow declared on a date with no
+    equity reading is rejected rather than netted at one end of the span.
+    Positive = deposit, negative = withdrawal.
 
     Every malformed entry is a tool error: a silently ignored declaration
     would leave a transfer inside the return series, which is exactly the
@@ -411,6 +413,29 @@ def sim_basket_returns(rows: list[HarnessLogRow]) -> dict[str, float]:
     return {r.date: as_float(r.daily_return) for r in rows}
 
 
+def _span_basket_return(
+    basket_returns: dict[str, float], prev: str, cur: str,
+) -> Optional[float]:
+    """Basket return COMPOUNDED over ``prev``..``cur``, or None if unusable.
+
+    An aligned step spans every day the two journals failed to intersect,
+    and the compared returns span it too. Judging such a step against the
+    ending date's one-day move alone shrinks the yardstick to a fraction
+    of the move that actually happened — a multi-day drawdown then reads
+    as a transfer and suppresses a real tracking gap.
+    """
+    growth = 1.0
+    seen = False
+    for d, r in basket_returns.items():
+        if not prev < d <= cur:
+            continue
+        if not math.isfinite(r):
+            return None      # a hole leaves the stricter floor in place
+        growth *= 1.0 + r
+        seen = True
+    return growth - 1.0 if seen else None
+
+
 def _is_capital_move(
     real_ret: float, sim_ret: float, basket_ret: Optional[float],
 ) -> bool:
@@ -476,27 +501,46 @@ def compare_equity(
     for prev, cur in zip(aligned, aligned[1:]):
         # Flows are attributed to the STEP, not the date: an aligned span
         # can skip days, and the transfer still sits inside that step.
-        flow = sum(a for d, a in capital_events.items() if prev < d <= cur)
-        if flow:
+        # Each one is settled AT its own date, because the enlarged book
+        # earns every market move that FOLLOWS the transfer — netting the
+        # nominal amount at `cur` would book those moves as performance.
+        flow_total = 0.0
+        growth = 1.0
+        anchor_date, anchor_eq = prev, real[prev]
+        for d, amount in sorted(
+            (d, a) for d, a in capital_events.items() if prev < d <= cur
+        ):
+            eq = real.get(d)
+            if eq is None or not math.isfinite(eq) or eq <= 0.0:
+                raise ValueError(
+                    f"declared capital flow {amount:+.2f} USD on {d}: no "
+                    f"usable real equity reading there ({eq!r}) — declare "
+                    "the flow on the first signal date whose equity_usd "
+                    "already includes the transfer"
+                )
+            funded = eq - amount
+            if funded <= 0.0:
+                raise ValueError(
+                    f"declared capital flow {amount:+.2f} USD on {d} leaves "
+                    f"non-positive equity ({eq} → {funded}) — check the "
+                    "declaration"
+                )
+            growth *= funded / anchor_eq
             applied.append(
-                {"from_date": prev, "date": cur, "amount_usd": flow}
+                {"from_date": anchor_date, "date": d, "amount_usd": amount}
             )
-        funded = real[cur] - flow
-        if funded <= 0.0:
-            raise ValueError(
-                f"declared capital flow {flow:+.2f} USD on {prev}..{cur} "
-                f"leaves non-positive equity ({real[cur]} → {funded}) — "
-                "check the declaration"
-            )
-        real_ret = funded / real[prev] - 1.0
+            flow_total += amount
+            anchor_date, anchor_eq = d, eq
+        real_ret = growth * (real[cur] / anchor_eq) - 1.0
         sim_ret = sim[cur] / sim[prev] - 1.0
-        if _is_capital_move(real_ret, sim_ret, basket_returns.get(cur)):
+        basket_ret = _span_basket_return(basket_returns, prev, cur)
+        if _is_capital_move(real_ret, sim_ret, basket_ret):
             unexplained.append({
                 "from_date": prev, "date": cur,
                 "real_equity_from": real[prev], "real_equity": real[cur],
-                "declared_flow_usd": flow,
+                "declared_flow_usd": flow_total,
                 "real_return": real_ret, "sim_return": sim_ret,
-                "basket_return": basket_returns.get(cur),
+                "basket_return": basket_ret,
             })
         cum += abs(real_ret - sim_ret)
         real_growth *= 1.0 + real_ret
@@ -886,6 +930,7 @@ def check_transitions(
     bootstrap_date = min((d for d, _ in by_key), default=None)
     unexpected: list[dict] = []
     bootstrap: list[dict] = []
+    bootstrap_fills: dict[tuple, list[dict]] = {}
     out_of_coverage: list[dict] = []
     for e in events:
         if _quote_asset(e["symbol"]) != SIM_QUOTE:
@@ -908,8 +953,35 @@ def check_transitions(
         if origin is not None:
             record["sim_intent_date"] = origin
             bootstrap.append(record)
+            # Bootstrap excuses the DATE only — the sim intended earlier,
+            # execution came later. Fill quality is never excused: a
+            # catch-up that under-fills leaves the real book short of the
+            # position the simulation holds.
+            if _is_partial_fill(e):
+                partials.append({
+                    "date": e["date"],
+                    "symbol": e["symbol"],
+                    "side": e["side"],
+                    "filled_amount": e["filled_amount"],
+                    "intended_amount": e["intended_amount"],
+                    "client_order_id": e["client_order_id"],
+                })
+            bootstrap_fills.setdefault(
+                (e["date"], _base_asset(e["symbol"])), []
+            ).append(e)
         else:
             unexpected.append(record)
+
+    # A catch-up establishes the position the sim already STANDS in, so
+    # the standing target weight is its size expectation — there is no
+    # same-day intent to measure it against.
+    for (d, asset), evs in sorted(bootstrap_fills.items()):
+        weights = rows_by_date[d].target_weights
+        mismatch = _size_mismatch(
+            d, asset, as_float(weights.get(asset)), evs, real_eq,
+        )
+        if mismatch is not None:
+            size_mismatches.append(mismatch)
 
     coverage = (
         (min(covered_dates), max(covered_dates)) if covered_dates else None
