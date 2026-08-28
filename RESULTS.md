@@ -6,6 +6,21 @@ finding for details. Project-wide convention: every Sharpe / DSR
 quoted is **net of cost** and **OOS** unless explicitly marked
 otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 
+**DSR convention — read this before any DSR number in this file.**
+Every DSR quoted below — in the strategy table, in the family
+sections, in the overlay / portfolio / cross-section sections — is a
+**minimal 1/sqrt(T)-convention** figure at N=500, *unless it is marked
+"conservative" at the point of use*. That is the project's **gate**
+convention. The deployed config (#1) is the only one ever recomputed
+under the primary **conservative** deflator (pinned
+`sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366`
+per-period): 0.037 on the concat-OOS series, 0.0016 on the
+venue-verified replay window. Under that deflator every other DSR in
+this file would read ≈ 0 — none of them has been recomputed, and none
+is claimed conservative. This paragraph is the file-wide label;
+footnote ¹ under the table repeats it, and the policy plus its scope
+live in "DSR reporting convention" at the bottom.
+
 One standing exception to the "OOS unless marked" rule, marked at
 every use below: the **venue-verified replay window** figures
 (Sharpe +0.72 and the DSRs computed on it) are a **fixed-config
@@ -23,7 +38,7 @@ result.
 A strategy that reaches PAPER status has cleared **one** gate, not all of them. Specifically:
 
 * **The deploy gate is "DSR > 0.5 at N=500, cluster-stable" evaluated UNDER THE MINIMAL 1/sqrt(T) DEFLATOR CONVENTION.** That is the convention every gate decision in this repo was made under, and it is still the gate. Read literally, passing it means: after correcting for the project's effective multiple-testing budget (500 trials) with a trial dispersion set to the sampling noise of one Sharpe estimate, the strategy's Sharpe is unlikely to be pure selection noise. **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact under that convention.**
-* **The gate convention and the reporting convention are deliberately different — this is not an oversight, and there is no claim here that both were passed.** The 2026-08-25 owner decision (see "DSR reporting convention" at the bottom of this file and `findings/dsr_convention_2026_08.md`) made the *conservative* deflator the primary **reported** figure. Under it the deployed config scores DSR 0.037 ≈ 0, and so do all 7 of its cluster neighbors. That decision changed **reporting only**: no gate was re-run, no threshold was re-set, and a 0.5 bar was never restated for the conservative deflator. So the honest statement is: **strategy #1 passed the gate as the gate is defined (minimal convention), and would NOT pass a gate restated on the conservative convention — under which no config in this project would pass, which is why the bar was not restated.** The deploy case therefore does not rest on the DSR headline at all; it rests on parameter stability (a convention-free raw-Sharpe plateau) plus the forward test.
+* **The gate convention and the reporting convention are deliberately different — this is not an oversight, and there is no claim here that both were passed.** The 2026-08-25 owner decision (see "DSR reporting convention" at the bottom of this file and `findings/dsr_convention_2026_08.md`) made the *conservative* deflator the primary **reported** figure. Under it the deployed config scores DSR 0.037 ≈ 0, and so do all **six** of its cluster neighbours (seven cluster members in total, the deployed config included — see the counting note in section #2 below). That decision changed **reporting only**: no gate was re-run, no threshold was re-set, and a 0.5 bar was never restated for the conservative deflator. So the honest statement is: **strategy #1 passed the gate as the gate is defined (minimal convention), and would NOT pass a gate restated on the conservative convention — under which no config in this project would pass, which is why the bar was not restated.** The deploy case therefore does not rest on the DSR headline at all; it rests on parameter stability (a convention-free raw-Sharpe plateau) plus the forward test.
 * Consequence for reading this file: wherever **"DSR > 0.5"** appears as a *status* or a *threshold*, it means the minimal-convention gate. Wherever a DSR is quoted as the **headline for the deployed config**, it is the conservative figure. The two never mean the same number.
 * The **next honest gate is paper trading itself** — ≥ 4–8 clean weeks on the target venue with the actual order-placement pipeline. Sources of failure that DSR cannot rule out and that only paper trading can catch: signal stability under live data feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw.
 * Real-money deployment requires the paper-trading gate to be passed first, AND (per CLAUDE.md hard rule "Live orders only on testnet") a manual mainnet-migration code-path change. Neither has happened.
@@ -34,8 +49,8 @@ PAPER (testnet) status in the table below = "passed the **minimal-convention** D
 
 | # | Strategy / variant | Class | Status | Key metric ¹ | Finding |
 |---|---|---|---|---|---|
-| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | Concat-OOS Sharpe +1.48 (venue-verified *replay* window 0.72 — fixed-config historical replay, not selection-OOS); conservative-deflator DSR 0.037 ≈ 0 — deploy case = parameter plateau (7 neighbors, raw Sharpe +1.37…+1.49, one shared return stream) + forward test; DSR 0.770 / median 0.736 (7/7 > 0.5) under 1/sqrt(T) (secondary, = the gate convention) | `findings/han_28d_tsmom.md` |
-| 2 | TSMOM short-ensemble (lookbacks 28/60/120, etc) | Strategy family | Cluster-stable | DSR median 0.736 (7/7 pass) | `findings/cluster_stability.md` |
+| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | Concat-OOS Sharpe +1.48 (venue-verified *replay* window 0.72 — fixed-config historical replay, not selection-OOS); conservative-deflator DSR 0.037 ≈ 0 — deploy case = parameter plateau (deployed config + **6** neighbors, raw Sharpe +1.37…+1.49, one shared return stream) + forward test; DSR 0.770 / cluster median 0.736 over all 7 members, **6/6 neighbors** > 0.5, under 1/sqrt(T) (secondary, = the gate convention) | `findings/han_28d_tsmom.md` |
+| 2 | TSMOM short-ensemble (lookbacks 28/60/120, etc) | Strategy family | Cluster-stable | DSR median 0.736 over 7 cluster members = deployed (28, 60) + 6 neighbors (6/6 neighbors pass) | `findings/cluster_stability.md` |
 | 3 | TSMOM Han single lookbacks | Strategy family | Cluster-stable | DSR median 0.702 (6/6 pass) | `findings/cluster_stability.md` |
 | 4 | PMA ratio ladder | Strategy family | Cluster-stable | DSR median 0.716 (6/6 pass) | `findings/cluster_stability.md` |
 | 5 | SMA crossover ensemble | Strategy family | Cluster-FAILS | DSR median 0.431 (6/19 pass) | `findings/cluster_stability.md` |
@@ -50,8 +65,9 @@ PAPER (testnet) status in the table below = "passed the **minimal-convention** D
 | 14 | HMM 2-state regime overlay | BTC regime gate (Markov-switching) | **REJECT** | Loses 5/6 cuts to existing VolTarget; Sharpe 0.46–0.77 | `findings/hmm_regime_overlay.md` |
 
 ¹ **Blanket convention label for the whole table and every section below it.**
-Every DSR figure in the "Key metric" column, in the family sections, and in every
-"DSR median …, N of M pass" phrase is a **minimal 1/sqrt(T)-convention** number —
+Every DSR figure from here down — the "Key metric" column, the family sections,
+the overlay / portfolio / cross-section / on-chain sections, and every
+"DSR median …, N of M pass" phrase — is a **minimal 1/sqrt(T)-convention** number —
 the gate convention — *unless it is explicitly marked conservative at the point of
 use*. Row #1 is the only strategy for which conservative-deflator figures have
 been computed at all (0.037 concat-OOS, 0.0016 on the venue-verified replay
@@ -78,8 +94,8 @@ Status legend:
 * **Signal:** TSMOM ladder `{0, 0.5, 1.0}` = mean of binary `sign(28d return), sign(60d return)`. SMA(200) gate zeroes the ladder when basket close < SMA.
 * **Concatenated OOS Sharpe = +1.48** on the market-basket. Earlier revisions of this file quoted +1.81; the finding's own table says +1.48 — the finding is authoritative. This is the genuinely selection-OOS number.
 * **Venue-verified replay window Sharpe = +0.72** — **a fixed-config historical replay, NOT a second OOS result.** The frozen config (`ac8919…`) is re-run over 2022-01-21 → 2026-05-27, a window that overlaps the walk-forward OOS sample, purely to check that Binance and independently sourced Bybit prices agree (`findings/validation_multiexchange.md`). It carries no additional selection-bias protection beyond what the concat-OOS number already carries, and it is not forward data. Treat it as "does the edge survive a different venue's prices, and how much of it lives in the venue-verifiable era" — nothing more.
-* **DSR, two-layer convention (primary statement).** Under the project's own conservative deflator (pinned conservative assumption `sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366` per-period; an a-priori pool dispersion, no committed trial panel; `deflated_sharpe_ratio` compares per-period quantities), DSR = **0.037** on the concat-OOS series (Sharpe +1.48, T = 2339) and **0.0016 ≈ 0.002** on the **venue-verified replay window** (again: fixed-config historical replay, not selection-OOS) — the latter recomputed from the frozen-config backtest of `findings/validation_multiexchange.md` (+0.72, 2022-01-21 → 2026-05-27, 1588 bars), not from a slice of the stitched series. **The deploy case rests on parameter stability stated convention-free — all 7 neighbor configs land in the raw concat-OOS Sharpe band +1.37…+1.49 (one shared return stream, correlation ≥ 0.97; no lone peak) — plus the forward test**, not on a DSR headline. The "median DSR 0.736, 7/7 > 0.5" form of that stability holds only under the secondary 1/sqrt(T) convention.
-* **Secondary figure:** DSR = 0.770 at N=500 under the minimal 1/sqrt(T) deflator; neighborhood median 0.736 under the same convention. Note what "minimal" does and does not mean: the N=500 extreme-value correction **is** applied in both conventions (`deflated_sharpe_ratio` passes `sharpe_std_dev` into `expected_max_sharpe`, which scales it by the Bailey-LdP factor for 500 trials). What is minimal is the *dispersion* fed into that factor — 1/sqrt(T) ≈ 0.021, the sampling noise of a single Sharpe estimate, instead of the wider dispersion of the pool of strategies actually searched. Both figures are reproducible from the same code and from the committed return series in `docs/results/` (see below); `findings/dsr_convention_2026_08.md` has the convention decision.
+* **DSR, two-layer convention (primary statement).** Under the project's own conservative deflator (pinned conservative assumption `sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366` per-period; an a-priori pool dispersion, no committed trial panel; `deflated_sharpe_ratio` compares per-period quantities), DSR = **0.037** on the concat-OOS series (Sharpe +1.48, T = 2339) and **0.0016 ≈ 0.002** on the **venue-verified replay window** (again: fixed-config historical replay, not selection-OOS) — the latter recomputed from the frozen-config backtest of `findings/validation_multiexchange.md` (+0.72, 2022-01-21 → 2026-05-27, 1588 bars), not from a slice of the stitched series. **The deploy case rests on parameter stability stated convention-free — the deployed config plus its 6 neighbor configs (7 cluster members, not 7 independent confirmations) land in the raw concat-OOS Sharpe band +1.37…+1.49; the 6 neighbors alone span the same band, so the deployed +1.48 is inside a plateau it does not define (one shared return stream, correlation ≥ 0.97; no lone peak) — plus the forward test**, not on a DSR headline. The "median DSR 0.736, 6/6 neighbors > 0.5" form of that stability holds only under the secondary 1/sqrt(T) convention.
+* **Secondary figure:** DSR = 0.770 at N=500 under the minimal 1/sqrt(T) deflator; cluster median 0.736 under the same convention, computed over all 7 cluster members with the deployed config among them (`(30, 60)` at 0.782 is the actual cluster peak, not the deployed point). Note what "minimal" does and does not mean: the N=500 extreme-value correction **is** applied in both conventions (`deflated_sharpe_ratio` passes `sharpe_std_dev` into `expected_max_sharpe`, which scales it by the Bailey-LdP factor for 500 trials). What is minimal is the *dispersion* fed into that factor — 1/sqrt(T) ≈ 0.021, the sampling noise of a single Sharpe estimate, instead of the wider dispersion of the pool of strategies actually searched. Both figures are reproducible from the same code and from the committed return series in `docs/results/` (see below); `findings/dsr_convention_2026_08.md` has the convention decision.
 * **Survivorship caveat:** the basket is seven majors known ex post — the composition axis (which 7 coins) is untested pending the PIT diagnostic run, and the project's own cross-sectional-momentum measurement showed Sharpe 1.40 → 0.93 when moving to a PIT universe (deep review 2026-08-24).
 
 **What DSR under either convention actually says.** Both figures correct for the 500-trial selection budget with the same extreme-value machinery; they differ only in how dispersed the trial pool is assumed to be. The minimal-deflator figure (0.770) says the historical Sharpe clears the expected-max bar of 500 trials whose spread is nothing but the sampling noise of one Sharpe estimate. The conservative-deflator figure (0.037) says it does **not** clear the bar once the pool is assumed as dispersed as the project's pinned `sd ≈ 0.7`. Neither says the strategy will be profitable going forward. Backtest survival is the *previous* gate, not the *final* one.
@@ -101,10 +117,20 @@ Footnote ¹ from the table above applies to this whole section: every "median DS
 DSR-threshold *form* of cluster stability exists only under that convention —
 under the conservative deflator all of these sit at ≈ 0. For the deployed config
 the convention-free form of the same fact is the raw concat-OOS Sharpe band
-+1.37…+1.49 across its 7 neighbors.
++1.37…+1.49 across the deployed config and its 6 neighbors.
 
 ### 2. TSMOM short-ensemble (multiple lookback pairs)
-Median DSR 0.736 across 7 cluster neighbours; **7 of 7 pass** DSR > 0.5. Best individual is `(28, 60)` — the deployed strategy.
+**Counting note (applies wherever this cluster is cited).** The cluster has
+**7 members and the deployed `(28, 60)` is one of them**, so the familiar
+"7 of 7 pass" is *the deployed config plus 6 neighbours* — six confirmations,
+not seven. The deployed point cannot be evidence for itself. Stated without the
+double count: median DSR 0.736 across all 7 members; **6 of 6 neighbours pass**
+DSR > 0.5, neighbour-only median 0.726 (plain arithmetic on the per-variant
+table in `findings/cluster_stability.md` — nothing re-run, no new trials). The
+deployed config is not the family's peak either: `(30, 60)` leads on both
+metrics (Sharpe +1.49, DSR 0.782) versus `(28, 60)` at +1.48 / 0.770 — an
+earlier revision of this line called `(28, 60)` the best individual, which the
+finding's own table contradicts.
 
 ### 3. TSMOM Han single lookbacks
 Median DSR 0.702 across 6 cluster neighbours; **6 of 6 pass** DSR > 0.5. Adding the short-ensemble (combining two lookbacks) gives a small Sharpe lift over the best single lookback.
@@ -208,13 +234,15 @@ figure is secondary and must be labeled as such:
   fixed-config historical replay of the frozen config, not
   selection-OOS and not forward data — at +0.72, 1588 bars). The
   deploy case rests on
-  parameter stability stated convention-free (7 neighbor configs in
-  the raw concat-OOS Sharpe band +1.37…+1.49, one shared return
-  stream — no lone peak) plus the forward test.
+  parameter stability stated convention-free (the deployed config
+  plus 6 neighbor configs — 7 cluster members, so six confirmations
+  and not seven — in the raw concat-OOS Sharpe band +1.37…+1.49, one
+  shared return stream — no lone peak) plus the forward test.
 * **Secondary (minimal), and the gate convention:** 1/sqrt(T) null
-  sampling std → DSR 0.770 at the peak, 0.736 neighborhood median
-  (7/7 > 0.5 — the DSR-threshold form of cluster stability exists
-  only under this convention). It applies the *same* N=500
+  sampling std → DSR 0.770 for the deployed config, 0.736 cluster
+  median over its 7 members (6/6 neighbours > 0.5 — the DSR-threshold
+  form of cluster stability exists only under this convention). It
+  applies the *same* N=500
   extreme-value correction as the conservative convention; what is
   minimal is the assumed dispersion of the trial pool (the sampling
   noise of one Sharpe estimate, 1/sqrt(T) ≈ 0.021) rather than the
@@ -244,6 +272,7 @@ vintage, and the commit). Full rationale:
 `findings/dsr_convention_2026_08.md`.
 
 Last updated: 2026-08-26 (DSR two-layer convention + survivorship
-caveat + gate/reporting-convention split, replay-vs-OOS labeling, and
-committed return-series artifacts; strategy table content otherwise as
-of 2026-05-29).
+caveat + gate/reporting-convention split, replay-vs-OOS labeling,
+committed return-series artifacts, file-wide DSR convention note at
+the top, and cluster counting restated as deployed + 6 neighbours;
+strategy table content otherwise as of 2026-05-29).
