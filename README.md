@@ -558,8 +558,10 @@ implement `generate_signals(candles)`, register the class in
 ### DSR convention
 
 Every DSR figure **on this page** is a **minimal 1/sqrt(T)-convention**
-number at `PROJECT_NUM_TRIALS = 500`: the trial-pool dispersion is set
-to the sampling noise of a single Sharpe estimate. That is the
+number at `PROJECT_NUM_TRIALS = 500` *unless it is explicitly marked
+conservative* — the deployed config's 0.037 below is the one such
+figure. Under the minimal convention the trial-pool dispersion is set
+to the sampling noise of a single Sharpe estimate; that is the
 convention this project's deploy gate ("DSR > 0.5, cluster-stable") is
 defined on.
 

@@ -111,8 +111,11 @@ per-period — it compares the non-annualized daily Sharpe against
 (annualization factor 365, daily bars), so it must be de-annualized
 before use: `0.7 / sqrt(365) ≈ 0.0366` per-period. Passing raw 0.7
 would set the expected-max bar at ≈ 2.14 *per-period* (the pinned
-annualized value in the wrong unit) and return DSR = 0.0 exactly —
-a dimensional artifact, not a measurement. Sanity check: E[max] at
+annualized value in the wrong unit) and return DSR = 0.0 for both
+series measured here — a dimensional artifact, not a measurement.
+(Not a universal property of the call: a series whose per-period
+Sharpe cleared that 2.14 bar would score positive; ours do not come
+close to it.) Sanity check: E[max] at
 sd 0.0366 is 0.112 per-period = 2.14 annualized, matching the
 pinned constant.
 
