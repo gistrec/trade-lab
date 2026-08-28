@@ -434,3 +434,98 @@ def test_dry_run_records_exchange_latency_in_journal(tmp_path):
     assert lat["count"] > 0  # fetch_balance / ticker / ohlcv / markets were timed
     assert lat["errors"] == 0
     assert set(lat) >= {"count", "errors", "max_ms", "p95_ms", "by_endpoint"}
+
+
+# ---------------------------------------------------------------------------
+# Reserve cap in the operator's preview (#71): the cap's shave is metered
+# apart from sub-min drift in the live path and the journal — the dry-run
+# result and printout must show it too, or the preview hides the reserve.
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_reports_funding_cap_apart_from_submin_drift(tmp_path):
+    """Full-cash entry: the whole divergence is the 10 bp reserve, not
+    work the exchange refused. It must land in total_funding_cap_quote
+    (result AND journal) with the sub-min drift left at zero."""
+    import json
+
+    from trade_lab.execution.journal import JournalWriter
+
+    broker = Broker(_config(), _StubExchange(balance_usdt=10_000.0))
+    journal = JournalWriter(tmp_path / "cycles.jsonl")
+    result = run_dry_cycle(broker, journal=journal, candles_per_asset=400)
+
+    assert {s["reason"] for s in result.orders_skipped} == {"funding_cap"}
+    assert result.total_skipped_quote_drift == 0.0
+    assert result.total_funding_cap_quote == pytest.approx(10_000.0 * 0.001)
+
+    cycle = json.loads((tmp_path / "cycles.jsonl").read_text().splitlines()[-1])
+    assert cycle["total_funding_cap_quote"] == pytest.approx(10_000.0 * 0.001)
+    assert cycle["total_skipped_quote_drift"] == 0.0
+
+
+def _printable_result(orders_skipped, *, drift=0.0, cap=0.0) -> DryRunResult:
+    return DryRunResult(
+        asof=pd.Timestamp("2026-08-25T00:00:00Z"), signal=1.0,
+        sma_gate_open=True, total_equity=10_000.0,
+        target_allocation={"BTC": 5_000.0},
+        current_holdings_quote={"BTC": 0.0},
+        orders_planned=[], orders_skipped=orders_skipped,
+        total_skipped_quote_drift=drift, total_funding_cap_quote=cap,
+    )
+
+
+def _skip(symbol: str, reason: str, notional: float) -> dict:
+    return {
+        "symbol": symbol, "desired_side": "buy", "desired_amount": 0.1,
+        "desired_notional": notional, "reason": reason,
+    }
+
+
+def test_print_dry_run_meters_reserve_cap_apart_from_submin(capsys):
+    """One header over both classes prices the reserve's deliberate shave
+    into 'unfillable drift': the sub-min block must count only sub-min
+    skips, and the cap gets its own labelled figure."""
+    from trade_lab.execution.dry_run import print_dry_run
+
+    print_dry_run(
+        _printable_result(
+            [_skip("BTC/USDT", "notional 4.00 < min_cost 10.0", 4.0),
+             _skip("ETH/USDT", "funding_cap", 5.0)],
+            drift=4.0, cap=5.0,
+        ),
+        quote="USDT",
+    )
+    out = capsys.readouterr().out
+    assert "Sub-min divergence (1, cumulative 4.00 USDT)" in out
+    assert "Reserve cap (10 bp) (1, held back 5.00 USDT)" in out
+    assert "CAP  BUY  ETH/USDT" in out
+    # The cap entry must not be counted or listed as sub-min drift.
+    assert "SKIP BUY  ETH/USDT" not in out
+
+
+def test_print_dry_run_flags_known_preview_vs_live_cap_divergence(capsys):
+    """#70: the dry run has no order-state store, so it caps buys whose
+    same-day coid the live cycle exempts. Documented divergence — the
+    operator must read it next to the figure, not in a docstring."""
+    from trade_lab.execution.dry_run import print_dry_run
+
+    print_dry_run(
+        _printable_result([_skip("ETH/USDT", "funding_cap", 5.0)], cap=5.0),
+        quote="USDT",
+    )
+    out = capsys.readouterr().out
+    assert "preview-only figure" in out
+    assert "cap EITHER WAY" in out
+    assert "LESS when a buy" in out and "MORE when a sell" in out
+
+
+def test_print_dry_run_uncapped_cycle_says_so_without_the_caveat(capsys):
+    """No shave → an explicit zero line and no divergence note: the
+    caveat is about a figure that exists, not boilerplate."""
+    from trade_lab.execution.dry_run import print_dry_run
+
+    print_dry_run(_printable_result([]), quote="USDT")
+    out = capsys.readouterr().out
+    assert "Reserve cap (10 bp): 0.00" in out
+    assert "preview-only figure" not in out

@@ -109,6 +109,7 @@ def test_accepts_candles_at_exact_minimum(monkeypatch, tmp_path):
         asof=None, signal=1.0, sma_gate_open=True, total_equity=0.0,
         target_allocation={}, current_holdings_quote={},
         orders_planned=[], orders_skipped=[], total_skipped_quote_drift=0.0,
+        total_funding_cap_quote=0.0,
     )
     monkeypatch.setattr(
         "trade_lab.execution.run_dry_cycle",

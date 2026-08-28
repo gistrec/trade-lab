@@ -34,7 +34,10 @@ from .cycle_common import (
     skipped_dict,
     skipped_warmup_cycle,
 )
-from .delta import total_skipped_quote_drift
+from .delta import (
+    FUNDING_CAP_REASON, RESERVE_BPS, total_funding_cap_quote,
+    total_skipped_quote_drift,
+)
 from .journal import (
     Cycle, JournalWriter, get_git_commit_short, get_python_version,
     new_cycle_id,
@@ -65,6 +68,11 @@ class DryRunResult:
     orders_planned: list[dict]            # serialized OrderIntent
     orders_skipped: list[dict]            # serialized SkippedDelta
     total_skipped_quote_drift: float      # cumulative sub-min divergence
+    total_funding_cap_quote: float
+    # Quote the RESERVE_BPS cap held back, metered apart from the sub-min
+    # drift (deliberate reserve vs work the exchange refuses). Capped
+    # with no exemptions here, so for a given plan it never understates
+    # the live cycle's shave (see cycle_common.run_read_phase).
 
 
 def run_dry_cycle(
@@ -135,6 +143,7 @@ def run_dry_cycle(
             orders_planned=[intent_dict(o) for o in read.plan.orders],
             orders_skipped=[skipped_dict(s) for s in read.plan.skipped],
             total_skipped_quote_drift=total_skipped_quote_drift(read.plan),
+            total_funding_cap_quote=total_funding_cap_quote(read.plan),
         )
     except InsufficientWarmupError as exc:
         # Environment branch lives HERE (the orchestrator), never inside
@@ -237,8 +246,21 @@ def _success_cycle(
         orders_planned=list(result.orders_planned),
         orders_skipped=list(result.orders_skipped),
         total_skipped_quote_drift=result.total_skipped_quote_drift,
+        total_funding_cap_quote=result.total_funding_cap_quote,
         price_fallbacks=price_fallbacks,
     )
+
+
+# Known preview-vs-live divergence: no order-state store here, so the
+# cap cannot exempt buys today's clientOrderId already covers (the live
+# cycle does). Printed with the figure, never silently.
+_CAP_PREVIEW_CAVEAT = (
+    "  NOTE: preview-only figure — the dry run has no order-state store,\n"
+    "        so it cannot see today's clientOrderIds. The live cycle may\n"
+    "        cap EITHER WAY: LESS when a buy is already covered by its\n"
+    "        coid (exempt from the spend), MORE when a sell is already\n"
+    "        terminal (its proceeds do not fund anything)."
+)
 
 
 def print_dry_run(result: DryRunResult, *, quote: str) -> None:
@@ -263,12 +285,33 @@ def print_dry_run(result: DryRunResult, *, quote: str) -> None:
     else:
         print("Orders planned: (none — target matches current within minima)")
     print()
-    if result.orders_skipped:
-        print(f"Sub-min divergence ({len(result.orders_skipped)}, "
+    # The two divergence classes are metered apart (delta.py): work the
+    # exchange refuses vs the deliberate buy reserve. One header over
+    # both would price the cap's shave into "unfillable drift".
+    submin = [
+        s for s in result.orders_skipped if s["reason"] != FUNDING_CAP_REASON
+    ]
+    capped = [
+        s for s in result.orders_skipped if s["reason"] == FUNDING_CAP_REASON
+    ]
+    if submin:
+        print(f"Sub-min divergence ({len(submin)}, "
               f"cumulative {result.total_skipped_quote_drift:.2f} {quote}):")
-        for s in result.orders_skipped:
+        for s in submin:
             print(f"  SKIP {s['desired_side'].upper():4s} {s['symbol']:12s} "
                   f"{s['desired_amount']:.8f}  ({s['desired_notional']:.2f} "
                   f"{quote})  reason: {s['reason']}")
     else:
         print("Sub-min divergence: 0.00 — no tracking drift this cycle.")
+    print()
+    if capped:
+        print(f"Reserve cap ({RESERVE_BPS} bp) ({len(capped)}, "
+              f"held back {result.total_funding_cap_quote:.2f} {quote}):")
+        for s in capped:
+            print(f"  CAP  {s['desired_side'].upper():4s} {s['symbol']:12s} "
+                  f"{s['desired_amount']:.8f}  ({s['desired_notional']:.2f} "
+                  f"{quote})")
+        print(_CAP_PREVIEW_CAVEAT)
+    else:
+        print(f"Reserve cap ({RESERVE_BPS} bp): 0.00 — buys fit inside "
+              f"free quote.")

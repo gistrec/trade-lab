@@ -205,7 +205,7 @@ def apply_reserve_cap(
     quote_free: float,
     constraints: Mapping[str, MarketConstraints],
     fee_rate: float,
-    funded_symbols: Collection[str] = (),
+    no_flow_symbols: Collection[str] = (),
 ) -> tuple[list[OrderIntent], list[SkippedDelta]]:
     """Cap total buy spend at ``RESERVE_BPS`` under the available quote.
 
@@ -221,13 +221,14 @@ def apply_reserve_cap(
     cancels; above 10 bp the plan is underfunded even at unchanged
     prices).
 
-    ``funded_symbols`` names buys whose quote the exchange already holds
-    — a same-clientOrderId order still open from an earlier run of the
-    same day. ``quote_free`` excludes that locked quote and the caller
-    resolves the existing order instead of sending a scaled replacement,
-    so scaling such a buy only deletes the reduction while shaving the
-    buys that really do need funding. They pass through untouched and
-    stay out of the spend total.
+    ``no_flow_symbols`` names orders that move no quote this cycle — a
+    buy that draws nothing from ``quote_free``, or a sell that adds
+    nothing to it (its clientOrderId is already resolved: filled, so the
+    proceeds are inside ``quote_free`` already, or canceled/rejected, so
+    they never arrive). The caller establishes which; this module stays
+    out of clientOrderId/state semantics. Such buys pass through
+    unscaled and out of the spend total; such sells are excluded from
+    the proceeds that fund the buys.
 
     Every capped-away buy portion comes back as a ``funding_cap``
     :class:`SkippedDelta` carrying the UNSCALED gap — the cap is a real
@@ -235,12 +236,19 @@ def apply_reserve_cap(
     into zero-valued lot-step skips. It is reported apart from the sub-min
     drift metric (:func:`total_funding_cap_quote`).
     """
-    funded = frozenset(funded_symbols)
-    scalable = [o for o in orders if o.side == "buy" and o.symbol not in funded]
+    no_flow = frozenset(no_flow_symbols)
+    scalable = [o for o in orders if o.side == "buy" and o.symbol not in no_flow]
     buy_spend = sum(o.notional_quote for o in scalable)
     if buy_spend <= 0.0:
         return list(orders), []
-    gross_sells = sum(o.notional_quote for o in orders if o.side == "sell")
+    # A sell whose today-coid is already resolved brings no NEW quote:
+    # filled, its proceeds are already inside quote_free; canceled or
+    # rejected, they are never coming. Counting it either way sizes the
+    # buys against money that does not exist.
+    gross_sells = sum(
+        o.notional_quote for o in orders
+        if o.side == "sell" and o.symbol not in no_flow
+    )
     available = float(quote_free) + gross_sells * (1.0 - float(fee_rate))
     cap = max(available, 0.0) * (1.0 - RESERVE_BPS / 10_000)
     if buy_spend <= cap:
@@ -282,7 +290,7 @@ def apply_reserve_cap(
     capped: list[OrderIntent] = []
     skips: list[SkippedDelta] = []
     for o in orders:
-        if o.side != "buy" or o.symbol in funded:
+        if o.side != "buy" or o.symbol in no_flow:
             capped.append(o)
             continue
         a = amounts[o.symbol]

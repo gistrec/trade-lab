@@ -135,7 +135,15 @@ def run_read_phase(
     applies it itself AFTER pending-order filtering, so filtered pairs
     do not eat the free quote of the intents that actually go out.
     With the cap on, ``fee_rate`` is the cycle's fee — sells fund the
-    buys net of it — and omitting it raises in the planner."""
+    buys net of it — and omitting it raises in the planner.
+
+    Known divergence with ``reserve_cap=True``: the cap runs with no
+    ``no_flow_symbols`` exemptions, because a caller without the
+    order-state store (:mod:`dry_run`) cannot see today's
+    clientOrderIds. It cuts BOTH ways — the preview shaves buys the
+    live cycle sends whole (a buy its coid already covers), and counts
+    proceeds of a sell the live cycle knows is terminal. Flagged in
+    ``print_dry_run``'s reserve-cap block."""
     balance = broker.fetch_balance_snapshot()
     equity = broker.estimate_total_equity_usd(snapshot=balance)
 

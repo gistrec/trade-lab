@@ -1225,6 +1225,55 @@ def test_reserve_cap_ignores_already_funded_same_coid_buy(tmp_path):
     assert state.get(today_coid).status == "closed"
 
 
+def test_reserve_cap_ignores_buy_whose_today_coid_is_already_terminal(tmp_path):
+    """Issue #70 worked example: today's BTC coid resolved 'canceled' in
+    an earlier run, so place_order's state fast-path sends nothing for
+    it — it consumes no quote. quote_free $3k, two $5k intents: the free
+    quote must fund the ETH buy in full (less the 10 bp reserve), NOT be
+    halved by a BTC buy that never leaves."""
+    from trade_lab.execution.clientorder import make_client_order_id
+
+    state = _state(tmp_path)
+    today_coid = make_client_order_id(
+        datetime.now(timezone.utc).date(), "BTC/USDT", "buy",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state.put(OrderStateEntry(
+        client_order_id=today_coid, symbol="BTC/USDT", side="buy",
+        intended_amount=0.1, status="canceled",
+        exchange_order_id="exch-live-1",
+        placed_at=now_iso, last_seen_at=now_iso,
+    ))
+
+    stub = _LiveStub(basket=("BTC", "ETH"))
+    # Equity $10k → $5k target per asset; only $3k of the quote is free.
+    stub.balance["USDT"] = {"free": 3_000.0, "used": 7_000.0, "total": 10_000.0}
+    clock = _MockClock()
+    result = run_live_cycle(
+        _broker(stub), journal=_journal(tmp_path), state=state,
+        sleep_fn=clock.sleep, time_fn=clock.time,
+    )
+
+    # A canceled order today is a real divergence — still surfaced.
+    assert result.outcome == "partial"
+    [call] = stub.create_order_calls
+    assert call["symbol"] == "ETH/USDT"
+    # The whole free $3k less the 10 bp reserve — not ~$1.5k from a
+    # scale of 2997/10000 that counts the dead BTC intent.
+    assert call["amount"] * 50_000.0 == pytest.approx(3_000.0 * 0.999)
+    # The terminal coid is resolved from state alone: no roundtrip.
+    assert all(c["symbol"] != "BTC/USDT" for c in stub.fetch_order_calls)
+    cycle = _read_cycles(tmp_path)[-1]
+    btc = next(o for o in cycle["orders_executed"]
+               if o["symbol"] == "BTC/USDT")
+    assert btc["terminal_status"] == "canceled"
+    assert btc["filled_amount"] == 0.0
+    reasons = {s["symbol"]: s["reason"] for s in cycle["orders_skipped"]}
+    assert reasons == {"ETH/USDT": "funding_cap"}
+    assert cycle["total_skipped_quote_drift"] == 0.0
+    assert cycle["total_funding_cap_quote"] == pytest.approx(5_000.0 - 2_997.0)
+
+
 def test_day_two_rerun_after_filled_day_one_places_nothing(tmp_path, monkeypatch):
     """Day-boundary pin of the recompute-from-balance property: day 1's
     buys FILLED and the balance reflects them → a day-2 run (new coid,
@@ -1898,3 +1947,31 @@ def test_failed_cycle_before_read_phase_price_fallbacks_none(tmp_path):
     assert cycle["price_fallbacks"] is None
     # No orders were placed: None, never [] (failed-vs-empty invariant).
     assert cycle["orders_executed"] is None
+
+
+def test_live_same_coid_sell_still_funds_the_buys(monkeypatch, tmp_path):
+    """A same-coid SELL left open by reconstruction is waited for by the
+    executor before the buys go out, so its proceeds still fund them.
+    Excluding it (as a TERMINAL sell is excluded) would cap the buys away
+    and end the cycle underallocated."""
+    from trade_lab.execution.delta import OrderIntent, apply_reserve_cap
+
+    sell = OrderIntent(
+        symbol="BTC/USDT", side="sell", base_amount=0.2,
+        notional_quote=10_000.0, price_used=50_000.0, reason="delta",
+    )
+    buy = OrderIntent(
+        symbol="ETH/USDT", side="buy", base_amount=3.0,
+        notional_quote=9_000.0, price_used=3_000.0, reason="delta",
+    )
+    # Sell counted (live, still expected to settle) → the buy survives.
+    capped, _ = apply_reserve_cap(
+        [sell, buy], quote_free=0.0, constraints={}, fee_rate=0.001,
+    )
+    assert any(o.side == "buy" for o in capped)
+    # Sell excluded (terminal) → nothing funds the buy, it is capped away.
+    capped_terminal, _ = apply_reserve_cap(
+        [sell, buy], quote_free=0.0, constraints={}, fee_rate=0.001,
+        no_flow_symbols={"BTC/USDT"},
+    )
+    assert not any(o.side == "buy" for o in capped_terminal)

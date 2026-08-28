@@ -77,7 +77,7 @@ from .journal import (
     get_python_version,
     new_cycle_id,
 )
-from .order_state import OrderStateStore, utcnow_iso
+from .order_state import TERMINAL_STATUSES, OrderStateStore, utcnow_iso
 from .orders import (
     TOTAL_TIMEOUT_S,
     OrderResult,
@@ -198,6 +198,13 @@ def run_live_cycle(
     for e in open_after_recon.values():
         if e.status != "lost_track":
             pending_by_pair.setdefault(e.symbol, []).append(e)
+    # clientOrderIds already terminal AFTER reconstruction: place_order's
+    # state fast-path returns those without touching the exchange, so an
+    # intent carrying one spends nothing this cycle.
+    terminal_coids = {
+        coid for coid, e in state.all_entries().items()
+        if e.status in TERMINAL_STATUSES
+    }
 
     # Phase 2-5: Main cycle. Wrapped so any exception still gets
     # journaled, then re-raised so the cron stderr sees the traceback.
@@ -243,21 +250,35 @@ def run_live_cycle(
         # order and waits on it, which cannot duplicate.
         pending_skips: list[SkippedDelta] = []
         sendable: list = []
-        # Buys the exchange already holds quote against under THIS cycle's
-        # coid: they are funded outside balance.quote_free, and place_order
-        # resolves the existing order rather than sending a resized one, so
-        # the reserve cap must leave them alone (see apply_reserve_cap).
-        funded_symbols: set[str] = set()
+        # Buys that take nothing out of balance.quote_free under THIS
+        # cycle's coid, so the reserve cap must leave them alone (see
+        # apply_reserve_cap): either the same-coid order is still live —
+        # its quote sits in `used`, and place_order resolves that order
+        # rather than sending a resized one — or it is already terminal,
+        # and place_order's state fast-path places nothing at all.
+        # Scaling either only shrinks the buys that DO need funding.
+        no_flow_symbols: set[str] = set()
         for intent in plan.orders:
             coid = make_client_order_id(rebal_date, intent.symbol, intent.side)
             pending = pending_by_pair.get(intent.symbol, [])
             blockers = [e for e in pending if e.client_order_id != coid]
             if not blockers:
                 sendable.append(intent)
-                if intent.side == "buy" and any(
-                    e.client_order_id == coid for e in pending
-                ):
-                    funded_symbols.add(intent.symbol)
+                # A buy takes nothing from quote_free whether its coid is
+                # terminal (fast-path places nothing) or still live (the
+                # exchange already holds the quote). A SELL is different:
+                # only a TERMINAL one is known to add nothing — proceeds
+                # already inside quote_free, or never coming. A live
+                # same-coid sell is still expected to fund the buys; the
+                # executor waits for it before placing them, so excluding
+                # it would cap the buys away and underallocate the cycle.
+                same_coid_live = any(e.client_order_id == coid for e in pending)
+                if intent.side == "buy":
+                    no_flow = coid in terminal_coids or same_coid_live
+                else:
+                    no_flow = coid in terminal_coids
+                if no_flow:
+                    no_flow_symbols.add(intent.symbol)
                 continue
             logger.warning(
                 "SKIP %s %s (%.2f %s): order %s from a prior cycle is "
@@ -322,7 +343,7 @@ def run_live_cycle(
             quote_free=balance.quote_free,
             constraints=read.constraints,
             fee_rate=fee_rate,
-            funded_symbols=funded_symbols,
+            no_flow_symbols=no_flow_symbols,
         )
 
         sorted_intents = sort_orders_for_placement(sendable)
