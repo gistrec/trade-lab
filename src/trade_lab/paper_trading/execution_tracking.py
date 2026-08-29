@@ -409,8 +409,44 @@ def sim_pre_trade_equity_by_date(rows: list[HarnessLogRow]) -> dict[str, float]:
 
 
 def sim_basket_returns(rows: list[HarnessLogRow]) -> dict[str, float]:
-    """date -> the basket's own daily return, as the harness journaled it."""
-    return {r.date: as_float(r.daily_return) for r in rows}
+    """date -> the basket's own daily return, as the harness journaled it.
+
+    Two data-quality guards, both because this feeds the capital-move
+    yardstick and a WRONG yardstick suppresses a real tracking gap:
+
+    * a null / non-numeric / non-finite ``daily_return`` is corruption,
+      not a flat day — coercing it to 0.0 would erase a crash from the
+      yardstick and reclassify the divergence as a transfer;
+    * each row's ``daily_return`` spans from whatever row preceded it
+      when it was written, so compounding is only sound while journaled
+      order matches date order. A backfilled earlier row (``--asof``)
+      overlaps its successor's span and would be double-counted.
+    """
+    out: dict[str, float] = {}
+    highest = ""
+    for r in rows:
+        try:
+            value = float(r.daily_return)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"harness row {r.date}: daily_return={r.daily_return!r} is "
+                "not numeric — the basket yardstick cannot be trusted"
+            ) from None
+        if not math.isfinite(value):
+            raise ValueError(
+                f"harness row {r.date}: daily_return={value} is not finite "
+                "— the basket yardstick cannot be trusted"
+            )
+        if r.date < highest:
+            raise ValueError(
+                f"harness journal is not in date order: {r.date} follows "
+                f"{highest}. A backfilled row's return overlaps its "
+                "successor's, so spans cannot be compounded; re-sort the "
+                "journal before reconciling"
+            )
+        highest = max(highest, r.date)
+        out[r.date] = value
+    return out
 
 
 def _span_basket_return(
@@ -424,13 +460,14 @@ def _span_basket_return(
     of the move that actually happened — a multi-day drawdown then reads
     as a transfer and suppresses a real tracking gap.
     """
+    # sim_basket_returns already rejected non-finite values and
+    # out-of-order rows, so every entry here is a sound, non-overlapping
+    # link of the chain.
     growth = 1.0
     seen = False
     for d, r in basket_returns.items():
         if not prev < d <= cur:
             continue
-        if not math.isfinite(r):
-            return None      # a hole leaves the stricter floor in place
         growth *= 1.0 + r
         seen = True
     return growth - 1.0 if seen else None

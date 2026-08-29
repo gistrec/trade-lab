@@ -1883,3 +1883,42 @@ def test_mis_sized_bootstrap_order_surfaces(tmp_path, capsys, notional, ratio):
     assert "1 mis-sized" in report.advisory
     assert tracking_cli_main(_cli(real_p, sim_p)) == 0
     assert "SIZE MISMATCH" in capsys.readouterr().out
+
+
+def test_non_numeric_basket_return_is_a_tool_error(tmp_path, capsys):
+    """Codex 3877928981: as_float turned a null daily_return into 0.0 — a
+    flat yardstick. A real book in cash through a basket crash would then
+    look like an unexplained transfer and its genuine gap be suppressed."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    rows = [_sim_row(d, 10_000.0) for d in DATES]
+    lines = [_sim_line(r) for r in rows]
+    lines[1] = lines[1].replace('"daily_return": 0.0', '"daily_return": null')
+    _write_sim_raw(sim_p, lines)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    assert "daily_return" in capsys.readouterr().err
+
+
+def test_backfilled_harness_row_is_a_tool_error(tmp_path, capsys):
+    """Codex 3877928979: a row appended out of date order was written
+    against a different predecessor, so its return overlaps its
+    successor's span — compounding both double-counts the overlap."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    # DATES[2] journaled BEFORE DATES[1]: a --asof backfill.
+    _write_sim_raw(sim_p, [
+        _sim_line(_sim_row(DATES[0], 10_000.0)),
+        _sim_line(_sim_row(DATES[2], 10_200.0)),
+        _sim_line(_sim_row(DATES[1], 10_100.0)),
+    ])
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    err = capsys.readouterr().err
+    assert "not in date order" in err and DATES[1] in err
+
+
+def test_in_order_journal_still_reconciles(tmp_path):
+    """The guard must not fire on a normal ascending journal."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
