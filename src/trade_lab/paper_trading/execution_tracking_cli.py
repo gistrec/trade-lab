@@ -6,10 +6,13 @@ Typical operator invocation (manual or cron)::
 
 Exit codes — same contract as ``fingerprint_cli``: 0 — report produced
 (default even on breach: descriptive, not normative); 1 — tracking
-threshold breached AND ``--fail-on-breach`` was passed; 2 — tool error
-(missing journal, filesystem failure, corrupt mainnet journal lines, a
-malformed harness row before the end of its journal, harness-row schema
-drift; argparse exits 2 natively on invalid flag values).
+threshold breached OR an unexplained equity move suppressed the gap
+number, AND ``--fail-on-breach`` was passed (a refusal to report is not
+a pass); 2 — tool error (missing journal, filesystem failure, corrupt
+mainnet journal lines, a malformed harness row before the end of its
+journal, harness-row schema drift, a malformed capital-events file or a
+flow declared on a date the real journal has no equity reading for;
+argparse exits 2 natively on invalid flag values).
 """
 from __future__ import annotations
 
@@ -71,6 +74,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--capital-events",
+        type=Path,
+        default=None,
+        help=(
+            "JSON file declaring deposits / withdrawals: a list of "
+            '{"date": "YYYY-MM-DD", "amount_usd": <signed>, "note": ...}. '
+            "The date is the first signal date whose equity reading "
+            "already includes the transfer. Capital flows are operator "
+            "knowledge — undeclared ones suppress the gap number instead "
+            "of being reported as performance."
+        ),
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit the full TrackingReport as JSON instead of the human summary.",
@@ -79,8 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-breach",
         action="store_true",
         help=(
-            "Exit 1 when the tracking threshold is breached. Default stays "
-            "exit 0 — descriptive, not normative."
+            "Exit 1 when the tracking threshold is breached, or when an "
+            "unexplained equity move suppressed the gap number. Default "
+            "stays exit 0 — descriptive, not normative."
         ),
     )
     args = parser.parse_args(argv)
@@ -90,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             real_journal=args.real_journal,
             sim_journal=args.sim_journal,
             gap_threshold_pct=args.gap_threshold_pct,
+            capital_events_path=args.capital_events,
         )
     except OSError as exc:
         # Not just FileNotFoundError: IsADirectoryError / PermissionError must
@@ -97,15 +115,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
         return 2
     except (ValueError, TypeError) as exc:
-        # ValueError: non-positive equity, corrupt mainnet journal lines,
-        # a malformed mid-journal harness row, harness-row schema drift
-        # (incl. an unrecoverable equity phase). TypeError: a HarnessLogRow
-        # that slipped past the per-row wrap — still a tool error, never
-        # exit 1 (the breach code).
+        # ValueError: non-positive or non-numeric equity, corrupt mainnet
+        # journal lines, a malformed mid-journal harness row, harness-row
+        # schema drift (incl. an unrecoverable equity phase), a malformed
+        # or undatable capital-events declaration. TypeError: a
+        # HarnessLogRow that slipped past the per-row wrap — still a tool
+        # error, never exit 1 (the breach code).
         print(f"TRACKING ERROR: {exc}", file=sys.stderr)
         return 2
 
-    rc = 1 if (args.fail_on_breach and report.equity.breached) else 0
+    # A suppressed gap number is not a pass: the layer could not do its
+    # job, and a cron that only watches the exit code must see it.
+    flagged = report.equity.breached or bool(report.equity.unexplained_moves)
+    rc = 1 if (args.fail_on_breach and flagged) else 0
 
     if args.json:
         print(json.dumps(asdict(report), indent=2, default=str))
@@ -114,16 +136,35 @@ def main(argv: list[str] | None = None) -> int:
     eq = report.equity
     print(f"Real journal: {report.real_journal}  ({eq.n_real_days} equity days)")
     print(f"Sim journal:  {report.sim_journal}  ({eq.n_sim_days} equity days)")
-    print(f"Aligned days: {eq.n_aligned_days}  overlap={eq.overlap}\n")
+    if report.capital_events_file:
+        print(f"Capital events: {report.capital_events_file}")
+    print(f"Aligned days: {eq.n_aligned_days}  overlap={eq.overlap}")
+    print(f"Tracking starts at live coverage: {eq.tracking_start}\n")
 
     # Phase, not just date: real equity_usd is read before the date's
     # orders, so the harness value is used before its turnover cost too.
     print("  equity tracking (both curves PRE-trade: real read-phase")
     print("  equity_usd vs harness equity before its simulated cost):")
+    for f in eq.capital_flows_applied:
+        print(
+            f"    capital flow {f['amount_usd']:+.2f} USD declared on "
+            f"{f['date']} — removed from the {f['from_date']}..{f['date']} "
+            "return"
+        )
+    for m in eq.unexplained_moves:
+        print(
+            f"    UNEXPLAINED EQUITY MOVE: {m['from_date']}..{m['date']} "
+            f"real {m['real_equity_from']:.2f} → {m['real_equity']:.2f} "
+            f"({m['real_return'] * 100:+.1f}% after declared flows) while "
+            f"the sim returned {m['sim_return'] * 100:+.1f}% — a deposit or "
+            "withdrawal is not a return; declare it with --capital-events"
+        )
     if eq.cum_abs_return_diff is not None:
         print(f"    cum |Δdaily-return| = {eq.cum_abs_return_diff:.4f}")
     if eq.level_gap_pct is not None:
         print(f"    level gap = {eq.level_gap_pct:+.2f}%")
+    elif eq.unexplained_moves:
+        print("    level gap = NOT REPORTED (unexplained equity move)")
     print(f"    threshold = ±{eq.threshold_pct:.2f}%")
     print(f"    breached = {eq.breached}")
     print()
@@ -161,11 +202,27 @@ def main(argv: list[str] | None = None) -> int:
             f"{m['actual_weight_delta']:.4f} of the book, sim intended "
             f"{m['expected_weight_delta']:.4f} (x{m['ratio']:.2f})"
         )
+    for m in tr.extra_opposite_fills:
+        print(
+            f"    EXTRA OPPOSITE FILL: {m['date']} {m['symbol']} "
+            f"{m['actual_side']} {m['filled_notional_quote']:.2f} quote "
+            f"({m['client_order_id']}) beside the expected "
+            f"{m['expected_side']} — the leg was round-tripped"
+        )
     for e in tr.unexpected_orders:
         print(
             f"    UNEXPECTED ORDER: {e['date']} {e['symbol']} "
             f"{e['side']} {e['filled_notional_quote']:.2f} quote "
             f"(cycle {e['cycle_id']}) — no sim-intended trade"
+        )
+    for e in tr.bootstrap_orders:
+        # Not a mismatch: real execution's first trades catching up to a
+        # position the simulation had already stepped into.
+        print(
+            f"    BOOTSTRAP ORDER: {e['date']} {e['symbol']} {e['side']} "
+            f"{e['filled_notional_quote']:.2f} quote (cycle {e['cycle_id']}) "
+            f"— first real fills, catching up to the sim intent from "
+            f"{e['sim_intent_date']}"
         )
     for e in tr.wrong_market_fills:
         print(

@@ -1043,7 +1043,9 @@ def test_cached_rerun_record_does_not_erase_the_fill(tmp_path):
     result with zeroed fill detail; letting it win would report the
     executed trade as missing."""
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
-    coid = "tsmom_20260801_BTCUSDT_buy"
+    # The coid carries the DECISION date; the bar it acted on is the day
+    # before, i.e. signal date DATES[1].
+    coid = "tsmom_20260803_BTCUSDT_buy"
     filled = _filled_order(coid=coid)
     cached = _filled_order(
         coid=coid, intended_amount=0.0, filled_amount=0.0,
@@ -1147,3 +1149,776 @@ def test_fill_on_another_quote_market_is_not_a_match(tmp_path, capsys):
     assert "WRONG MARKET" in report.advisory
     assert tracking_cli_main(_cli(real_p, sim_p)) == 0
     assert "WRONG MARKET" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Capital flows: deposits and withdrawals are not returns (first real run)
+# ---------------------------------------------------------------------------
+
+def _capital_events_file(tmp_path, entries):
+    path = tmp_path / "capital_events.json"
+    path.write_text(json.dumps(entries), encoding="utf-8")
+    return path
+
+
+# The production journals as of the first real run: the mainnet account
+# was opened for read-only observation with dust on it, funded to ~99 the
+# day the live cron started, and topped up to ~150 later.
+OBS_DATE = "2026-07-08"
+LIVE_DATES = ["2026-08-24", "2026-08-25"]
+
+
+def test_equity_comparison_starts_at_live_coverage(tmp_path):
+    """Normalizing to the first date ANY cycle exists anchored the curve
+    on the observation phase, where the account held 0.048 USDT — the
+    funding that followed then read as a +285194% level gap."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(OBS_DATE, 0.048, 0.5, mode="dry_run"),
+        _cycle(LIVE_DATES[0], 99.0, 0.5, orders_executed=[]),
+        _cycle(LIVE_DATES[1], 99.5, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(OBS_DATE, 10_000.0),
+        _sim_row(LIVE_DATES[0], 10_000.0),
+        _sim_row(LIVE_DATES[1], 10_050.0),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    eq = report.equity
+    assert eq.tracking_start == LIVE_DATES[0]
+    assert eq.n_aligned_days == 2
+    assert eq.overlap == (LIVE_DATES[0], LIVE_DATES[1])
+    assert eq.unexplained_moves == []
+    assert eq.level_gap_pct == pytest.approx(0.0, abs=0.05)
+    assert not eq.breached
+
+
+def test_observation_only_journal_tracks_nothing(tmp_path):
+    """No live attempt and no retained fill: dry-run equity is not a
+    tracked book, so there is no gap to report at all."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(d, eq, 0.5, mode="dry_run")
+        for d, eq in zip(DATES, [0.048, 99.0, 150.0])
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
+    report = check_execution_tracking(real_p, sim_p)
+    assert report.equity.tracking_start is None
+    assert report.equity.n_aligned_days == 0
+    assert report.equity.level_gap_pct is None
+    assert not report.equity.breached
+    assert "No live-execution coverage yet" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+
+
+def test_undeclared_deposit_suppresses_the_gap_number(tmp_path, capsys):
+    """A +50% overnight step in a book holding the same basket as the sim
+    is a transfer, not performance — and the layer cannot tell. It must
+    refuse the number, loudly, instead of publishing a conflated one."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 150.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    report = check_execution_tracking(real_p, sim_p)
+    eq = report.equity
+    assert len(eq.unexplained_moves) == 1
+    move = eq.unexplained_moves[0]
+    assert (move["from_date"], move["date"]) == (DATES[0], DATES[1])
+    assert move["real_return"] == pytest.approx(0.5)
+    assert move["declared_flow_usd"] == 0.0
+    assert eq.level_gap_pct is None
+    assert eq.cum_abs_return_diff is None
+    assert not eq.breached          # no number, hence no verdict
+    assert "UNEXPLAINED EQUITY MOVE" in report.advisory
+    # A refusal to report is not a pass.
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 1
+    out = capsys.readouterr().out
+    assert "UNEXPLAINED EQUITY MOVE" in out
+    assert "level gap = NOT REPORTED" in out
+
+
+def test_declared_deposit_restores_the_gap_number(tmp_path):
+    """Declared capital is removed from the return, not from the book."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 150.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 50.0, "note": "top-up"},
+    ])
+    report = check_execution_tracking(real_p, sim_p, capital_events_path=events)
+    eq = report.equity
+    assert eq.unexplained_moves == []
+    assert eq.capital_flows_applied == [
+        {"from_date": DATES[0], "date": DATES[1], "amount_usd": 50.0}
+    ]
+    assert eq.level_gap_pct == pytest.approx(0.0, abs=1e-9)
+    assert not eq.breached
+    assert tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(events), "--fail-on-breach",
+    )) == 0
+
+
+def test_declared_flow_inside_a_skipped_step_is_removed(tmp_path):
+    """The transfer landed on a date the harness never logged; the jump
+    still sits inside the enclosing aligned step and must be removed —
+    settled at its own date, which is where the real book records it."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 150.0, 0.5, orders_executed=[]),
+        _cycle(DATES[2], 150.0, 0.5, orders_executed=[]),
+    ])
+    # No harness row for DATES[1]: the aligned step is DATES[0] -> DATES[2].
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0), _sim_row(DATES[2], 10_000.0),
+    ])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 50.0},
+    ])
+    eq = check_execution_tracking(
+        real_p, sim_p, capital_events_path=events,
+    ).equity
+    assert eq.unexplained_moves == []
+    assert eq.capital_flows_applied == [
+        {"from_date": DATES[0], "date": DATES[1], "amount_usd": 50.0}
+    ]
+    assert eq.level_gap_pct == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flow_earns_the_market_move_that_follows_it(tmp_path):
+    """Codex 3865143806: 100 USD book, +100 deposit mid-span, the enlarged
+    book then gains 10% -> 220. Netting the nominal 100 at the span end
+    reads (220 - 100)/100 - 1 = +20% and manufactures a 9.1% gap against
+    a sim that also gained 10%. The transfer earns the move that follows
+    it: (200 - 100)/100 x 220/200 - 1 = +10%, gap 0."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 200.0, 0.5, orders_executed=[]),   # deposit landed
+        _cycle(DATES[2], 220.0, 0.5, orders_executed=[]),   # +10% on 200
+    ])
+    # No harness row for DATES[1]: the aligned step is DATES[0] -> DATES[2].
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0), _sim_row(DATES[2], 11_000.0),
+    ])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 100.0},
+    ])
+    eq = check_execution_tracking(
+        real_p, sim_p, capital_events_path=events,
+    ).equity
+    assert eq.unexplained_moves == []
+    assert eq.capital_flows_applied == [
+        {"from_date": DATES[0], "date": DATES[1], "amount_usd": 100.0}
+    ]
+    assert eq.cum_abs_return_diff == pytest.approx(0.0, abs=1e-12)
+    assert eq.level_gap_pct == pytest.approx(0.0, abs=1e-9)
+    assert not eq.breached
+    assert tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(events), "--fail-on-breach",
+    )) == 0
+
+
+def test_two_flows_in_one_step_chain_at_their_own_dates(tmp_path):
+    """100 -> +100 deposit -> +10% -> +20 top-up -> +10%. Each leg is
+    measured against the book the previous transfer left behind, so the
+    real return is 1.1 x 1.1 - 1 = +21%, matching the sim exactly."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    days = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"]
+    _write_real(real_p, [
+        _cycle(days[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(days[1], 200.0, 0.5, orders_executed=[]),   # +100 deposit
+        _cycle(days[2], 240.0, 0.5, orders_executed=[]),   # 220 + 20 top-up
+        _cycle(days[3], 264.0, 0.5, orders_executed=[]),   # +10% on 240
+    ])
+    _write_sim(sim_p, [
+        _sim_row(days[0], 10_000.0), _sim_row(days[3], 12_100.0),
+    ])
+    events = _capital_events_file(tmp_path, [
+        {"date": days[1], "amount_usd": 100.0},
+        {"date": days[2], "amount_usd": 20.0},
+    ])
+    eq = check_execution_tracking(
+        real_p, sim_p, capital_events_path=events,
+    ).equity
+    assert eq.capital_flows_applied == [
+        {"from_date": days[0], "date": days[1], "amount_usd": 100.0},
+        {"from_date": days[1], "date": days[2], "amount_usd": 20.0},
+    ]
+    assert eq.unexplained_moves == []
+    assert eq.level_gap_pct == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flow_on_a_date_without_a_real_equity_reading_is_a_tool_error(
+    tmp_path, capsys,
+):
+    """The split needs the book AT the transfer. Without a reading there
+    the flow could only be netted at one end of the span — the arithmetic
+    this file exists to avoid — so the declaration is rejected."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[2], 220.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0), _sim_row(DATES[2], 11_000.0),
+    ])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 100.0},
+    ])
+    with pytest.raises(ValueError, match="no usable real equity reading"):
+        check_execution_tracking(real_p, sim_p, capital_events_path=events)
+    assert tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(events), "--fail-on-breach",
+    )) == 2
+    assert "TRACKING ERROR" in capsys.readouterr().err
+
+
+def test_mis_sized_declaration_still_surfaces(tmp_path):
+    """The detector runs on the flow-ADJUSTED return, so declaring 10 for
+    a 50 transfer cannot silence it."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 150.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 10.0},
+    ])
+    eq = check_execution_tracking(
+        real_p, sim_p, capital_events_path=events,
+    ).equity
+    assert len(eq.unexplained_moves) == 1
+    assert eq.unexplained_moves[0]["declared_flow_usd"] == 10.0
+    assert eq.level_gap_pct is None
+
+
+def test_market_crash_is_not_read_as_a_capital_event(tmp_path):
+    """The real book sits in cash while the sim is fully invested through
+    a −30% basket day. That divergence is execution reality, not a
+    transfer — the basket's own move is the plausibility yardstick."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 1.0, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0, ladder=1.0),
+        dataclasses.replace(
+            _sim_row(DATES[1], 7_000.0, ladder=1.0), daily_return=-0.30,
+        ),
+    ])
+    eq = check_execution_tracking(real_p, sim_p).equity
+    assert eq.unexplained_moves == []
+    assert eq.level_gap_pct == pytest.approx(42.857, abs=0.01)
+    assert eq.breached          # a real, reportable tracking gap
+
+
+def test_crash_across_a_skipped_span_is_not_read_as_a_capital_event(tmp_path):
+    """Codex 3865143794: the same crash spread over days the two journals
+    never intersect on. The compared returns span the whole gap, so the
+    yardstick must too: judged against the ending day's -1% the -30.7%
+    divergence clears the floor and mislabels a genuine tracking gap as
+    an undeclared transfer, suppressing the number entirely."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    days = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"]
+    # The real book sits in cash; only the endpoints have a real cycle.
+    _write_real(real_p, [
+        _cycle(days[0], 100.0, 1.0, orders_executed=[]),
+        _cycle(days[3], 100.0, 1.0, orders_executed=[]),
+    ])
+    # Sim fully invested through -20%, -12.5%, -1%: 10_000 -> 6_930.
+    _write_sim(sim_p, [
+        dataclasses.replace(
+            _sim_row(d, eq, ladder=1.0), daily_return=ret,
+        )
+        for d, eq, ret in zip(
+            days, [10_000.0, 8_000.0, 7_000.0, 6_930.0],
+            [0.0, -0.20, -0.125, -0.01],
+        )
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    eq = report.equity
+    assert eq.n_aligned_days == 2
+    assert eq.unexplained_moves == []
+    assert eq.cum_abs_return_diff == pytest.approx(0.307, abs=1e-9)
+    assert eq.level_gap_pct == pytest.approx(44.300, abs=0.01)
+    assert eq.breached
+    assert "TRACKING BREACH" in report.advisory
+    assert "UNEXPLAINED" not in report.advisory
+
+
+def test_deposit_across_a_skipped_span_still_surfaces(tmp_path):
+    """The widened yardstick is the basket's own move, not the span's
+    length: over a quiet basket a +50% step across the same gap is still
+    an undeclared transfer."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    days = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"]
+    _write_real(real_p, [
+        _cycle(days[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(days[3], 150.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in days])
+    eq = check_execution_tracking(real_p, sim_p).equity
+    assert len(eq.unexplained_moves) == 1
+    assert eq.unexplained_moves[0]["real_return"] == pytest.approx(0.5)
+    assert eq.level_gap_pct is None
+
+
+def test_withdrawal_larger_than_the_book_is_a_tool_error(tmp_path, capsys):
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 0.5, orders_executed=[]),
+    ])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    events = _capital_events_file(tmp_path, [
+        {"date": DATES[1], "amount_usd": 500.0},
+    ])
+    with pytest.raises(ValueError, match="non-positive equity"):
+        check_execution_tracking(real_p, sim_p, capital_events_path=events)
+    assert tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(events),
+    )) == 2
+    assert "TRACKING ERROR" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("entries,needle", [
+    ({"2026-08-01": 50.0}, "expected a JSON list"),
+    ([["2026-08-01", 50.0]], "expected an object"),
+    ([{"date": "01/08/2026", "amount_usd": 50.0}], "YYYY-MM-DD"),
+    ([{"amount_usd": 50.0}], "YYYY-MM-DD"),
+    ([{"date": "2026-08-01", "amount_usd": "fifty"}], "must be a number"),
+    ([{"date": "2026-08-01"}], "must be a number"),
+    ([{"date": "2026-08-01", "amount_usd": 0.0}], "finite non-zero"),
+    (
+        [{"date": "2026-08-01", "amount_usd": 50.0},
+         {"date": "2026-08-01", "amount_usd": 50.0}],
+        "duplicate date",
+    ),
+])
+def test_malformed_capital_events_file_is_a_tool_error(
+    tmp_path, capsys, entries, needle,
+):
+    """A silently ignored declaration leaves the transfer inside the
+    return series — the exact number the file exists to remove."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5, orders_executed=[])])
+    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    events = _capital_events_file(tmp_path, entries)
+    assert tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(events), "--fail-on-breach",
+    )) == 2
+    err = capsys.readouterr().err
+    assert "TRACKING ERROR" in err
+    assert needle in err
+
+
+def test_missing_capital_events_file_is_a_tool_error(tmp_path, capsys):
+    """A typo in the path must not read as 'no transfers ever happened'."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[0], 100.0, 0.5, orders_executed=[])])
+    _write_sim(sim_p, [_sim_row(DATES[0], 10_000.0)])
+    rc = tracking_cli_main(_cli(
+        real_p, sim_p, "--capital-events", str(tmp_path / "nope.json"),
+    ))
+    assert rc == 2
+    assert "capital-events file not found" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Residual #71 items on the execution_tracking cluster
+# ---------------------------------------------------------------------------
+
+def test_extra_opposite_side_fill_surfaces(tmp_path, capsys):
+    """A sell that rode along with the expected buy is invisible to every
+    other check: the intent reads as satisfied and the date+asset is not
+    'unexpected' either — the leg was round-tripped for two spreads."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5, orders_executed=[]),
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[
+            _filled_order("BTC/USDT", "buy"),
+            _filled_order("BTC/USDT", "sell"),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[0], 10_000.0),
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert len(tr.extra_opposite_fills) == 1
+    extra = tr.extra_opposite_fills[0]
+    assert extra["date"] == DATES[1]
+    assert extra["expected_side"] == "buy" and extra["actual_side"] == "sell"
+    assert tr.missing_trades == []
+    assert tr.wrong_direction_trades == []
+    assert tr.unexpected_orders == []
+    assert "extra opposite-side" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p)) == 0
+    assert "EXTRA OPPOSITE FILL" in capsys.readouterr().out
+
+
+def test_second_opposite_fill_surfaces_beside_wrong_direction(tmp_path):
+    """With no correct fill at all the first opposite fill is already the
+    wrong-direction verdict; the rest must not vanish with it."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[1], 100.0, 1.0, orders_executed=[
+            _filled_order("BTC/USDT", "sell"),
+            _filled_order("BTC/USDT", "sell"),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert len(tr.wrong_direction_trades) == 1
+    assert len(tr.extra_opposite_fills) == 1
+
+
+@pytest.mark.parametrize("bad", ['"abc"', "null"])
+def test_non_numeric_real_equity_is_a_tool_error(tmp_path, capsys, bad):
+    """Dropping the date silently shortens the compared span and hides
+    whatever divergence it carried — the same posture as non-finite."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[0], 100.0, 0.5), _cycle(DATES[1], 100.0, 0.5),
+    ])
+    lines = real_p.read_text().splitlines()
+    lines[1] = lines[1].replace(
+        '"equity_usd": 100.0', f'"equity_usd": {{"amount": {bad}}}',
+    )
+    real_p.write_text("\n".join(lines) + "\n")
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES[:2]])
+    with pytest.raises(ValueError, match=f"non-numeric equity_usd on {DATES[1]}"):
+        check_execution_tracking(real_p, sim_p)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    assert "non-numeric equity_usd" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad,needle", [
+    (float("nan"), "non-finite intended trade"),
+    (float("inf"), "non-finite intended trade"),
+    ("n/a", "non-numeric intended trade"),
+])
+def test_non_finite_intended_trade_is_a_tool_error(
+    tmp_path, capsys, bad, needle,
+):
+    """NaN fails ``abs(dw) > eps``, so the intent would drop out of the
+    expectations and a genuinely missed trade would read as clean."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(DATES[1], 100.0, 1.0, orders_executed=[])])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5,
+                 intended={"BTC": bad}),
+    ])
+    with pytest.raises(ValueError, match=needle):
+        check_execution_tracking(real_p, sim_p)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    err = capsys.readouterr().err
+    assert needle in err and DATES[1] in err
+
+
+def test_retained_fill_date_counts_as_live_coverage(tmp_path):
+    """A signal-less recovery record carries no cycle signal, but its
+    retained fill proves live execution ran for that date. Treating the
+    date as pre-live would exempt every intent on it from the check."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[2], 100.0, 1.0, outcome="failed", signal=False,
+               orders_executed=[
+                   _filled_order(coid="tsmom_20260803_BTCUSDT_buy"),
+               ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.live_coverage_start == DATES[1]
+    assert tr.pre_live_sim_trades == []      # the intent IS under coverage
+    assert tr.missing_trades == []           # ...and it was executed
+    assert tr.unexpected_orders == []
+
+
+def test_late_execution_keeps_its_original_signal_date(tmp_path):
+    """A recovery cycle days later carries its OWN fresh signal. Dating
+    the recovered fill by that signal splits it from the intent it
+    belongs to: missing on the decision date, unexpected on the recovery
+    date. The coid's embedded decision date is the authority."""
+    from trade_lab.monitoring.data_source import JournalReader
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [
+        _cycle(DATES[1], 100.0, 1.0, outcome="failed", signal=False),
+        # Live cycle on 2026-08-05 with a signal of its own, re-journaling
+        # the order decided on 2026-08-03 (signal date 2026-08-02).
+        _cycle("2026-08-05", 100.0, 1.0, outcome="reconstructed",
+               orders_executed=[
+                   _filled_order(coid="tsmom_20260803_BTCUSDT_buy"),
+               ]),
+    ])
+    _write_sim(sim_p, [
+        _sim_row(DATES[1], 10_000.0, ladder=1.0, prior=0.5, intended=BTC_BUY),
+        _sim_row("2026-08-05", 10_000.0, ladder=1.0),
+    ])
+    events = real_order_events(JournalReader(real_p).cycles(n=100))
+    assert [e["date"] for e in events] == [DATES[1]]
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.missing_trades == []
+    assert tr.unexpected_orders == []
+    assert tr.out_of_coverage_fills == []
+
+
+# ---------------------------------------------------------------------------
+# First-live catch-up orders are bootstrap, not "unexpected" (production
+# shape: the sim stepped 0 -> 1 days before the live cron existed)
+# ---------------------------------------------------------------------------
+
+def _standing_row(date_iso: str, equity: float) -> HarnessLogRow:
+    """Harness row holding the full basket, with no intent of its own."""
+    return dataclasses.replace(
+        _sim_row(date_iso, equity, ladder=1.0),
+        target_weights={a: 1.0 / 7 for a in BASKET},
+        current_weights={a: 1.0 / 7 for a in BASKET},
+    )
+
+
+# A faithful catch-up buys the sim's whole standing leg: 1/7 of a 100 book.
+STANDING_NOTIONAL = 100.0 / 7
+
+
+def test_first_live_catchup_orders_are_bootstrap(tmp_path, capsys):
+    """Production shape: the sim stepped into the basket on 2026-08-20,
+    the live cron started on 2026-08-24 without trading, and the seven
+    catch-up buys landed on 08-25. They execute an intent the simulation
+    really made — a category of their own, not seven UNEXPECTED ORDERs."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    sim_step, cron_day, live_day = "2026-08-20", "2026-08-24", "2026-08-25"
+    _write_real(real_p, [
+        _cycle(cron_day, 100.0, 1.0, orders_executed=[]),
+        _cycle(live_day, 100.0, 1.0, orders_executed=[
+            _filled_order(f"{a}/USDT", "buy",
+                          filled_notional_quote=STANDING_NOTIONAL)
+            for a in BASKET
+        ]),
+    ])
+    _write_sim(sim_p, [
+        dataclasses.replace(
+            _sim_row(sim_step, 10_000.0, ladder=1.0, prior=0.0,
+                     intended={a: 1.0 / 7 for a in BASKET}),
+            target_weights={a: 1.0 / 7 for a in BASKET},
+            current_weights={},
+        ),
+        _standing_row(cron_day, 10_000.0),
+        _standing_row(live_day, 10_000.0),
+    ])
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert tr.unexpected_orders == []
+    assert len(tr.bootstrap_orders) == 7
+    # Complete and correctly sized — the exemption applies to the date only.
+    assert tr.partial_fills == []
+    assert tr.size_mismatches == []
+    assert {e["symbol"] for e in tr.bootstrap_orders} == {
+        f"{a}/USDT" for a in BASKET
+    }
+    assert {e["sim_intent_date"] for e in tr.bootstrap_orders} == {sim_step}
+    assert {e["date"] for e in tr.bootstrap_orders} == {live_day}
+    assert tr.live_coverage_start == cron_day
+    assert "BOOTSTRAP" in report.advisory
+    assert "Trade mismatches" not in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
+    out = capsys.readouterr().out
+    assert "BOOTSTRAP ORDER" in out
+    assert "UNEXPECTED ORDER" not in out
+
+
+def test_buy_after_the_bootstrap_date_stays_unexpected(tmp_path):
+    """The exemption is one date wide: once the book is established, a
+    fill the simulation never intended is a genuine surprise."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    sim_step, live_day, next_day = "2026-08-20", "2026-08-25", "2026-08-26"
+    _write_real(real_p, [
+        _cycle(live_day, 100.0, 1.0, orders_executed=[
+            _filled_order(f"{a}/USDT", "buy",
+                          filled_notional_quote=STANDING_NOTIONAL)
+            for a in BASKET
+        ]),
+        _cycle(next_day, 100.0, 1.0, orders_executed=[
+            _filled_order("BTC/USDT", "buy"),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        dataclasses.replace(
+            _sim_row(sim_step, 10_000.0, ladder=1.0, prior=0.0,
+                     intended={a: 1.0 / 7 for a in BASKET}),
+            target_weights={a: 1.0 / 7 for a in BASKET},
+        ),
+        _standing_row(live_day, 10_000.0),
+        _standing_row(next_day, 10_000.0),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert len(tr.bootstrap_orders) == 7
+    assert [e["date"] for e in tr.unexpected_orders] == [next_day]
+
+
+def test_first_fill_sell_without_intent_stays_unexpected(tmp_path):
+    """Same journal as the bootstrap case except the side: nothing was
+    bought before the bootstrap date for a sell to unwind."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    sim_step, live_day = "2026-08-20", "2026-08-25"
+    _write_real(real_p, [
+        _cycle(live_day, 100.0, 1.0, orders_executed=[
+            _filled_order("BTC/USDT", "sell"),
+        ]),
+    ])
+    _write_sim(sim_p, [
+        dataclasses.replace(
+            _sim_row(sim_step, 10_000.0, ladder=1.0, prior=0.0,
+                     intended={a: 1.0 / 7 for a in BASKET}),
+            target_weights={a: 1.0 / 7 for a in BASKET},
+        ),
+        _standing_row(live_day, 10_000.0),
+    ])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.bootstrap_orders == []
+    assert [e["symbol"] for e in tr.unexpected_orders] == ["BTC/USDT"]
+
+
+def test_first_fill_without_an_earlier_intent_stays_unexpected(tmp_path):
+    """A standing weight alone is not evidence of a delayed intent: with
+    no earlier sim row that wanted to buy the asset, the first real fill
+    is an order the simulation never asked for."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    live_day = "2026-08-25"
+    _write_real(real_p, [
+        _cycle(live_day, 100.0, 1.0, orders_executed=[
+            _filled_order("BTC/USDT", "buy"),
+        ]),
+    ])
+    _write_sim(sim_p, [_standing_row(live_day, 10_000.0)])
+    tr = check_execution_tracking(real_p, sim_p).transitions
+    assert tr.bootstrap_orders == []
+    assert [e["symbol"] for e in tr.unexpected_orders] == ["BTC/USDT"]
+
+
+# ---------------------------------------------------------------------------
+# ...but bootstrap excuses the DATE only, never the fill quality
+# (Codex 3865143784)
+# ---------------------------------------------------------------------------
+
+def _bootstrap_journals(tmp_path, btc_order: dict):
+    """The production bootstrap shape with BTC's catch-up fill swapped out."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    sim_step, live_day = "2026-08-20", "2026-08-25"
+    _write_real(real_p, [
+        _cycle(live_day, 100.0, 1.0, orders_executed=[btc_order] + [
+            _filled_order(f"{a}/USDT", "buy",
+                          filled_notional_quote=STANDING_NOTIONAL)
+            for a in BASKET if a != "BTC"
+        ]),
+    ])
+    _write_sim(sim_p, [
+        dataclasses.replace(
+            _sim_row(sim_step, 10_000.0, ladder=1.0, prior=0.0,
+                     intended={a: 1.0 / 7 for a in BASKET}),
+            target_weights={a: 1.0 / 7 for a in BASKET},
+            current_weights={},
+        ),
+        _standing_row(live_day, 10_000.0),
+    ])
+    return real_p, sim_p
+
+
+def test_partially_filled_bootstrap_order_surfaces(tmp_path, capsys):
+    """A catch-up that filled 90% of its order is still classified as
+    bootstrap — and must still be reported as partial: the real book
+    holds less than the position the simulation stands in."""
+    real_p, sim_p = _bootstrap_journals(tmp_path, _filled_order(
+        "BTC/USDT", "buy", terminal_status="partial",
+        intended_amount=0.001, filled_amount=0.0009,
+        filled_notional_quote=STANDING_NOTIONAL * 0.9,
+    ))
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert len(tr.bootstrap_orders) == 7      # still not "unexpected"
+    assert tr.unexpected_orders == []
+    assert len(tr.partial_fills) == 1
+    assert tr.partial_fills[0]["symbol"] == "BTC/USDT"
+    assert tr.partial_fills[0]["date"] == "2026-08-25"
+    assert tr.size_mismatches == []           # 90% is inside the size band
+    assert "1 partial" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p)) == 0
+    assert "PARTIAL FILL" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("notional,ratio", [
+    (1.0, 0.07),                        # dust where a seventh was due
+    (100.0, 7.0),                       # the whole book into one leg
+])
+def test_mis_sized_bootstrap_order_surfaces(tmp_path, capsys, notional, ratio):
+    """A complete catch-up fill of the wrong SIZE reads as clean on every
+    other axis: it is not missing, not wrong-direction, not partial, and
+    the bootstrap category exempted it from 'unexpected'."""
+    real_p, sim_p = _bootstrap_journals(tmp_path, _filled_order(
+        "BTC/USDT", "buy", filled_notional_quote=notional,
+    ))
+    report = check_execution_tracking(real_p, sim_p)
+    tr = report.transitions
+    assert len(tr.bootstrap_orders) == 7
+    assert tr.unexpected_orders == []
+    assert tr.partial_fills == []
+    assert len(tr.size_mismatches) == 1
+    m = tr.size_mismatches[0]
+    assert m["symbol"] == "BTC" and m["side"] == "buy"
+    assert m["expected_weight_delta"] == pytest.approx(1.0 / 7)
+    assert m["ratio"] == pytest.approx(ratio, abs=0.01)
+    assert "1 mis-sized" in report.advisory
+    assert tracking_cli_main(_cli(real_p, sim_p)) == 0
+    assert "SIZE MISMATCH" in capsys.readouterr().out
+
+
+def test_non_numeric_basket_return_is_a_tool_error(tmp_path, capsys):
+    """Codex 3877928981: as_float turned a null daily_return into 0.0 — a
+    flat yardstick. A real book in cash through a basket crash would then
+    look like an unexplained transfer and its genuine gap be suppressed."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    rows = [_sim_row(d, 10_000.0) for d in DATES]
+    lines = [_sim_line(r) for r in rows]
+    lines[1] = lines[1].replace('"daily_return": 0.0', '"daily_return": null')
+    _write_sim_raw(sim_p, lines)
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    assert "daily_return" in capsys.readouterr().err
+
+
+def test_backfilled_harness_row_is_a_tool_error(tmp_path, capsys):
+    """Codex 3877928979: a row appended out of date order was written
+    against a different predecessor, so its return overlaps its
+    successor's span — compounding both double-counts the overlap."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    # DATES[2] journaled BEFORE DATES[1]: a --asof backfill.
+    _write_sim_raw(sim_p, [
+        _sim_line(_sim_row(DATES[0], 10_000.0)),
+        _sim_line(_sim_row(DATES[2], 10_200.0)),
+        _sim_line(_sim_row(DATES[1], 10_100.0)),
+    ])
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 2
+    err = capsys.readouterr().err
+    assert "not in date order" in err and DATES[1] in err
+
+
+def test_in_order_journal_still_reconciles(tmp_path):
+    """The guard must not fire on a normal ascending journal."""
+    real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
+    _write_real(real_p, [_cycle(d, 100.0, 0.5) for d in DATES])
+    _write_sim(sim_p, [_sim_row(d, 10_000.0) for d in DATES])
+    assert tracking_cli_main(_cli(real_p, sim_p, "--fail-on-breach")) == 0
