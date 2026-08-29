@@ -520,12 +520,27 @@ def test_print_dry_run_flags_known_preview_vs_live_cap_divergence(capsys):
     assert "LESS when a buy" in out and "MORE when a sell" in out
 
 
-def test_print_dry_run_uncapped_cycle_says_so_without_the_caveat(capsys):
-    """No shave → an explicit zero line and no divergence note: the
-    caveat is about a figure that exists, not boilerplate."""
+def test_print_dry_run_uncapped_cycle_prints_the_zero_line(capsys):
+    """No shave → an explicit zero line, and the two-way wording that
+    only makes sense next to a nonzero figure stays out of it."""
     from trade_lab.execution.dry_run import print_dry_run
 
     print_dry_run(_printable_result([]), quote="USDT")
     out = capsys.readouterr().out
     assert "Reserve cap (10 bp): 0.00" in out
-    assert "preview-only figure" not in out
+    assert "cap EITHER WAY" not in out
+
+
+def test_print_dry_run_zero_cap_still_warns_of_a_live_only_cap(capsys):
+    """A zero preview cap is not a promise. Net exit — terminal same-coid
+    sell, thin free quote, buys under that sell's apparent proceeds — the
+    dry run counts the sell, so the buys fit and nothing is shaved here,
+    while the live cycle drops those proceeds and can cap hard. Without a
+    note at zero the operator sees neither the live cap nor a warning."""
+    from trade_lab.execution.dry_run import print_dry_run
+
+    print_dry_run(_printable_result([]), quote="USDT")
+    out = capsys.readouterr().out
+    assert "preview-only zero" in out
+    assert "already terminal" in out
+    assert "may cap" in out

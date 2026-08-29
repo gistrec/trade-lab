@@ -7,19 +7,39 @@ quoted is **net of cost** and **OOS** unless explicitly marked
 otherwise. `PROJECT_NUM_TRIALS = 500` (pinned, see CLAUDE.md).
 
 **DSR convention — read this before any DSR number in this file.**
-Every DSR quoted below — in the strategy table, in the family
-sections, in the overlay / portfolio / cross-section sections — is a
-**minimal 1/sqrt(T)-convention** figure at N=500, *unless it is marked
-"conservative" at the point of use*. That is the project's **gate**
-convention. The deployed config (#1) is the only one ever recomputed
-under the primary **conservative** deflator (pinned
-`sd_trial_sharpes ≈ 0.7` annualized → `0.7/sqrt(365) ≈ 0.0366`
-per-period): 0.037 on the concat-OOS series, 0.0016 on the
-venue-verified replay window. Under that deflator every other DSR in
-this file would read ≈ 0 — none of them has been recomputed, and none
-is claimed conservative. This paragraph is the file-wide label;
-footnote ¹ under the table repeats it, and the policy plus its scope
-live in "DSR reporting convention" at the bottom.
+There is **no single convention across this file**. Earlier revisions
+of this paragraph claimed one and were wrong. The list below is the
+label, row by row, and it is exhaustive over the DSR figures quoted
+here:
+
+* **Minimal `1/sqrt(T)` at N=500 — the project's *gate* convention.**
+  Rows **#2, #3, #4, #5, #6, #8, #9**; the *secondary* figures of row
+  **#1** (0.770, cluster median 0.736, peak 0.782, neighbour-only
+  0.726); every "DSR median …, N of M pass" phrase; and every
+  "DSR > 0.5" used as a status or a threshold. All of these come out
+  of `walk_forward_v2.aggregate_walk_forward` or `ensemble.py`, which
+  hardcode `sharpe_std_dev = 1/sqrt(T)`.
+* **Conservative pooled `sd_trial_sharpes = 0.7` — the project's
+  primary *reported* convention.** Row **#1's headline** (0.037 on the
+  concat-OOS series, 0.0016 on the venue-verified replay window,
+  computed with the de-annualized `0.7/sqrt(365) ≈ 0.0366` per-period)
+  **and rows #12 (CTREND), #13 (MVRV), #14 (HMM)** — those three
+  verdicts were argued in their own findings against the pooled-0.7
+  bar `E[max Sharpe over 500 trials] ≈ 2.14` (annualized), and were
+  **never** computed under `1/sqrt(T)`:
+  `findings/ctrend_proxy_price_only.md` § DSR,
+  `findings/mvrv_overlay.md` § DSR,
+  `findings/hmm_regime_overlay.md` § DSR, and
+  `findings/strategy_test_session_2026_05_29.md` § 6.
+* **No convention stated by the source.** Row **#10**
+  (cross-sectional reversal, DSR 0.001):
+  `findings/cross_sectional_reversal.md` records the number with no
+  deflator named, and its reproduction block computes no DSR at all.
+  Read it as unlabelled — not as minimal.
+
+Rows #7 and #11 quote no DSR. Footnote ¹ under the table repeats this
+split; the policy and its scope live in "DSR reporting convention" at
+the bottom.
 
 One standing exception to the "OOS unless marked" rule, marked at
 every use below: the **venue-verified replay window** figures
@@ -58,25 +78,26 @@ PAPER (testnet) status in the table below = "passed the **minimal-convention** D
 | 7 | VolatilityTargetWrapper | Overlay (any strategy) | Asset-conditional | Helps ETH/SOL on Sharpe; hurts BTC on Calmar | `findings/vol_targeting_regime_gate.md` |
 | 8 | Breadth filter (`GatedStrategy`) | Overlay (sequence count) | Does NOT improve on SMA200 | Basket DSR identical to SMA200 | `findings/breadth_filter.md` |
 | 9 | 21-sleeve ensemble portfolio (3 strats × 7 assets) | Portfolio aggregation | Below threshold | DSR 0.425 (below 0.5; DD halved but DSR lowered) | `findings/ensemble_portfolio.md` |
-| 10 | Cross-sectional one-day reversal | Cross-section rotation | REJECT | Sharpe +0.01, DSR 0.001 | `findings/cross_sectional_reversal.md` |
+| 10 | Cross-sectional one-day reversal | Cross-section rotation | REJECT | Sharpe +0.01, DSR 0.001 (deflator convention not stated by the finding) | `findings/cross_sectional_reversal.md` |
 | 11 | Cross-sectional momentum (rotation top-K) | Cross-section rotation | Available, used as benchmark | Sharpe 0.70–0.95 on 24-coin universe (benchmark in CTREND test) | (no standalone finding; lives in `backtest/cross_sectional.py`) |
 | 12 | CTREND-proxy (price-only) | Cross-section ML ranker | **REJECT** | Sharpe 0.32–0.50; underperforms BH-BTC and CSM | `findings/ctrend_proxy_price_only.md` |
 | 13 | MVRV-ratio overlay | BTC weekly tilt (on-chain) | **INCONCLUSIVE** (REJECT-leaning) | Sharpe 0.58–0.93 vs BH 0.65–1.11 | `findings/mvrv_overlay.md` |
 | 14 | HMM 2-state regime overlay | BTC regime gate (Markov-switching) | **REJECT** | Loses 5/6 cuts to existing VolTarget; Sharpe 0.46–0.77 | `findings/hmm_regime_overlay.md` |
 
-¹ **Blanket convention label for the whole table and every section below it.**
-Every DSR figure from here down — the "Key metric" column, the family sections,
-the overlay / portfolio / cross-section / on-chain sections, and every
-"DSR median …, N of M pass" phrase — is a **minimal 1/sqrt(T)-convention** number —
-the gate convention — *unless it is explicitly marked conservative at the point of
-use*. Row #1 is the only strategy for which conservative-deflator figures have
-been computed at all (0.037 concat-OOS, 0.0016 on the venue-verified replay
-window); the rest have never been recomputed under that deflator. This one
-sentence is the label — treat it as a footnote attached to each of those numbers
-rather than expecting a per-row repeat. Under the conservative deflator this table
-would read ≈ 0 nearly everywhere, which is exactly why the rows are kept on the
-gate convention instead of silently mixing the two. Full statement of the policy
-and its scope: "DSR reporting convention" at the bottom of this file.
+¹ **Convention label for the table and every section below it — the per-row
+split is spelled out in "DSR convention" at the top of this file.** Short form,
+and it is deliberately *not* a blanket, because a blanket would be false:
+rows #2–#6, #8 and #9, row #1's secondary figures, and every
+"DSR median …, N of M pass" phrase are **minimal 1/sqrt(T)** numbers at N=500
+(the gate convention). Row #1's headline (0.037 / 0.0016) and rows **#12, #13
+and #14** are **conservative pooled `sd_trial_sharpes = 0.7`** figures — the
+last three were never computed under 1/sqrt(T). Row #10's DSR 0.001 names no
+convention in its source. Treat this as a footnote attached to each of those
+numbers rather than expecting a per-row repeat; the minimal rows have never been
+recomputed conservatively, and under that deflator they would read ≈ 0, which is
+why they are kept on the gate convention instead of silently mixing the two.
+Full statement of the policy and its scope: "DSR reporting convention" at the
+bottom of this file.
 
 Status legend:
 * **PAPER (Binance testnet)** — passes DSR > 0.5 at N=500 **under the minimal 1/sqrt(T) deflator (the gate convention — NOT the primary reporting convention, under which this same config scores 0.037 ≈ 0)**, cluster-stable, currently being validated through `paper-place-orders` on Binance testnet. NOT cleared for real money. See "What PAPER status actually means" above.
@@ -171,27 +192,27 @@ Adds a "breadth ≥ K%" filter on top of the SMA200 regime gate. **Does NOT impr
 ## Cross-sectional rotation strategies
 
 ### 10. Cross-sectional one-day reversal
-**REJECT.** Annualized Sharpe +0.01, DSR @ N=500 = 0.001. The literature exists (Zaremba 2021, Bianchi 2022) but does not survive on Binance majors with realistic costs and our universe. Critical failure mode: "buy losers" → strategy keeps buying LUNA / FTT / UST as they fall to zero. Documented as a verdict that prevents future re-attempts of the same shape. Finding: `findings/cross_sectional_reversal.md`.
+**REJECT.** Annualized Sharpe +0.01, DSR @ N=500 = 0.001 — **the finding names no deflator convention** and its reproduction block computes no DSR, so this figure is unlabelled, neither minimal nor conservative. The verdict does not turn on it: +0.01 Sharpe fails under any deflator. The literature exists (Zaremba 2021, Bianchi 2022) but does not survive on Binance majors with realistic costs and our universe. Critical failure mode: "buy losers" → strategy keeps buying LUNA / FTT / UST as they fall to zero. Documented as a verdict that prevents future re-attempts of the same shape. Finding: `findings/cross_sectional_reversal.md`.
 
 ### 11. Cross-sectional momentum (top-K rotation by past return)
 Implemented in `backtest/cross_sectional.py` (`run_cross_sectional_momentum`). Used as a benchmark in CTREND-proxy test on the 24-coin coinmetrics universe: Sharpe 0.70–0.95 across (cost × subperiod) cuts. **Not deployed standalone** — the basket-level TSMOM (#1) outperforms with simpler operations.
 
 ### 12. CTREND-proxy (price-only) — Fieberg et al. JFQA 2024
-**REJECT.** Pooled Ridge on 6 price MA-ratio features at 6 windows, weekly top-quintile, 730-day train. Underperforms BH-BTC and existing CSM on every subperiod × cost cut. Kraken net-negative (CAGR −3.3% full). DSR ≈ 0 at N=500. **Important asymmetry caveat:** rejection is of the proxy, not the paper — volume half omitted (Coin Metrics community has only reported volume; trusted volume paid-tier), and pooled Ridge is not Fieberg's Fama-MacBeth estimator. Faithful V2 would need paid data + FMB. Finding: `findings/ctrend_proxy_price_only.md`.
+**REJECT.** Pooled Ridge on 6 price MA-ratio features at 6 windows, weekly top-quintile, 730-day train. Underperforms BH-BTC and existing CSM on every subperiod × cost cut. Kraken net-negative (CAGR −3.3% full). DSR ≈ 0 at N=500 **under the conservative pooled `sd_trial_sharpes = 0.7`** (Sharpes 0.27–0.50 against the annualized bar `E[max] ≈ 2.14`, `findings/ctrend_proxy_price_only.md` § DSR) — **not** the minimal 1/sqrt(T) gate convention, under which this row was never computed. **Important asymmetry caveat:** rejection is of the proxy, not the paper — volume half omitted (Coin Metrics community has only reported volume; trusted volume paid-tier), and pooled Ridge is not Fieberg's Fama-MacBeth estimator. Faithful V2 would need paid data + FMB. Finding: `findings/ctrend_proxy_price_only.md`.
 
 ---
 
 ## On-chain overlays
 
 ### 13. MVRV-ratio overlay (weekly BTC tilt)
-**INCONCLUSIVE** (empirically tilting REJECT). Underperforms BH-BTC on Sharpe / Calmar / CAGR on every subperiod × cost. DD reduction is real (−64% vs BTC's −84% pre-ETF) but disproportionately costs return. DSR ≈ 0 at N=500; ~2–3 BTC market cycles in available data is too small for a confident hard REJECT. Compass-artifact prior of INCONCLUSIVE confirmed. **Important caveats:** ratio thresholds approximate the canonical Z-score (paid-tier `CapMVRVZ` / `CapRealUSD` not available on community tier); a faithful Z-score implementation might find different thresholds, but the binding constraint is sample size. Finding: `findings/mvrv_overlay.md`.
+**INCONCLUSIVE** (empirically tilting REJECT). Underperforms BH-BTC on Sharpe / Calmar / CAGR on every subperiod × cost. DD reduction is real (−64% vs BTC's −84% pre-ETF) but disproportionately costs return. DSR ≈ 0 at N=500 **under the conservative pooled `sd_trial_sharpes = 0.7`** (Sharpes 0.58–0.93 against the annualized bar `E[max] ≈ 2.14`, `findings/mvrv_overlay.md` § DSR) — **not** the minimal 1/sqrt(T) gate convention, under which this row was never computed; ~2–3 BTC market cycles in available data is too small for a confident hard REJECT. Compass-artifact prior of INCONCLUSIVE confirmed. **Important caveats:** ratio thresholds approximate the canonical Z-score (paid-tier `CapMVRVZ` / `CapRealUSD` not available on community tier); a faithful Z-score implementation might find different thresholds, but the binding constraint is sample size. Finding: `findings/mvrv_overlay.md`.
 
 ---
 
 ## Regime-switching overlays
 
 ### 14. HMM 2-state regime overlay
-**REJECT.** Gaussian HMM on daily log-returns, refit weekly on trailing 730d, long when **filtered** (not smoothed) P(bull) > 0.5 else cash. Per the user's operative decision rule for this candidate ("must beat existing VolTarget — duplicate test"), HMM loses 5 of 6 (cost × subperiod) cuts. The one HMM win is Binance-only / post-ETF-only (2.4y, Sharpe 0.77 vs VolTarget 0.49) but vanishes on Kraken (HMM ties VolTarget at 0.46) and falls below DSR threshold at N=500. **Critical implementation invariant**: uses forward-only `_hmmc.forward_log(...)` for filtered probabilities; never `predict_proba` (which is smoothed and uses future data). Finding: `findings/hmm_regime_overlay.md`.
+**REJECT.** Gaussian HMM on daily log-returns, refit weekly on trailing 730d, long when **filtered** (not smoothed) P(bull) > 0.5 else cash. Per the user's operative decision rule for this candidate ("must beat existing VolTarget — duplicate test"), HMM loses 5 of 6 (cost × subperiod) cuts. The one HMM win is Binance-only / post-ETF-only (2.4y, Sharpe 0.77 vs VolTarget 0.49) but vanishes on Kraken (HMM ties VolTarget at 0.46) and falls below the DSR bar at N=500 **under the conservative pooled `sd_trial_sharpes = 0.7`** (Sharpes 0.46–0.77 against the annualized bar `E[max] ≈ 2.14`, `findings/hmm_regime_overlay.md` § DSR). That bar is **not** the minimal-convention "DSR > 0.5" gate used elsewhere in this file: this row was never computed under 1/sqrt(T). **Critical implementation invariant**: uses forward-only `_hmmc.forward_log(...)` for filtered probabilities; never `predict_proba` (which is smoothed and uses future data). Finding: `findings/hmm_regime_overlay.md`.
 
 ---
 
@@ -248,15 +269,23 @@ figure is secondary and must be labeled as such:
   noise of one Sharpe estimate, 1/sqrt(T) ≈ 0.021) rather than the
   wider dispersion of the strategies actually searched.
 
-**Scope of the labeling rule.** "Label the minimal figure" binds every
+**Scope of the labeling rule.** "Label the convention" binds every
 place this file speaks about the **deployed config** (#1) and every
 place a **gate or threshold** is defined — those are the statements the
-project acts on. It does *not* require rewriting the historical
-per-strategy rows: footnote ¹ under the strategy table is the single
-blanket label covering rows #2–#14 and the family sections, all of
-which are minimal-convention figures that have never been recomputed
-conservatively. One scoping sentence plus that footnote, not dozens of
-per-row edits — but no bare, unscoped DSR is left anywhere.
+project acts on. It does *not* require re-deriving the historical
+per-strategy rows; it does require that their label be *correct*, and
+the correct label is not one blanket. Rows #2–#6, #8 and #9 are
+minimal-convention figures never recomputed conservatively; rows
+**#12–#14 are conservative pooled-0.7 figures never computed under
+1/sqrt(T)**; row #10 states no convention at all. The enumerated split
+in "DSR convention" at the top of this file is the label, and it is
+repeated at the point of use for the three exceptions — no bare,
+unscoped DSR is left anywhere.
+
+`findings/dsr_convention_2026_08.md` § "Scope of that labeling rule"
+predates this correction and calls the whole #2–#14 block
+minimal-convention. On rows #12–#14 it is superseded by the split
+above; that file is a dated artifact and is not rewritten.
 
 Both figures stay reproducible from `walk_forward_v2.py` (computation
 unchanged) on the concat-OOS series; the venue-verified replay figure
@@ -271,8 +300,11 @@ carries a `#` provenance header naming the frozen-config hash, the data
 vintage, and the commit). Full rationale:
 `findings/dsr_convention_2026_08.md`.
 
-Last updated: 2026-08-26 (DSR two-layer convention + survivorship
-caveat + gate/reporting-convention split, replay-vs-OOS labeling,
-committed return-series artifacts, file-wide DSR convention note at
-the top, and cluster counting restated as deployed + 6 neighbours;
-strategy table content otherwise as of 2026-05-29).
+Last updated: 2026-08-30 (the file-wide "everything is minimal
+1/sqrt(T)" DSR label replaced with an enumerated per-row split —
+rows #12–#14 are conservative pooled-0.7 figures, row #10 is
+unlabelled). Previously 2026-08-26 (DSR two-layer convention +
+survivorship caveat + gate/reporting-convention split, replay-vs-OOS
+labeling, committed return-series artifacts, and cluster counting
+restated as deployed + 6 neighbours; strategy table content otherwise
+as of 2026-05-29).
