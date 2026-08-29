@@ -440,6 +440,35 @@ DSR(verified_window, N=500, sd=0.7)   ≈ 0.000
 Per-period SR of 0.038 (annualized 0.72) is well below the
 expected-max bar. DSR floors to zero.
 
+**Correction added 2026-08-30, extending the 2026-08-26 note above —
+the three paragraphs below are superseded on cause, not on verdict.**
+They attribute the
+0.770-vs-0.000 gap to a difference of *samples* and close with "Both
+are honest." Both of those statements are wrong as written:
+
+* **The 0.000 measures nothing.** It is the unit-mismatched call
+  flagged at the top of this section — annualized `sd = 0.7` handed to
+  a per-period `deflated_sharpe_ratio`. A dimensional artifact, not an
+  honest reading of the venue-verified sample. Corrected, that same
+  window scores **0.0016**.
+* **The comparison switches deflator convention as well, not only
+  sample.** 0.770 is the *minimal* `1/sqrt(T)` deflator; every figure
+  built on `sd = 0.7` is the *conservative* pinned assumption. Held at
+  one convention: concat-OOS 0.770 (minimal) / **0.037**
+  (conservative); venue-verified window 0.061 (minimal) / **0.0016**
+  (conservative).
+* **The sample difference is real, but it is not what produced the
+  zero** — and the venue-verified window is a fixed-config historical
+  *replay* of the already-frozen config, so it is not a second
+  out-of-sample reading either.
+
+What survives: under the conservative deflator both series sit at
+DSR ≈ 0, so the section's closing point — stating DSR ≈ 0 next to the
++0.72 Sharpe is more honest than stating either alone — still holds.
+What does not survive is the "different samples, both honest"
+account of how the two numbers relate.
+See `findings/dsr_convention_2026_08.md`.
+
 This is not a contradiction with the original 0.770. The two
 numbers measure different things:
 

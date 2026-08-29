@@ -252,14 +252,27 @@ def _success_cycle(
 
 
 # Known preview-vs-live divergence: no order-state store here, so the
-# cap cannot exempt buys today's clientOrderId already covers (the live
-# cycle does). Printed with the figure, never silently.
+# cap cannot exempt buys today's clientOrderId already covers, nor drop
+# the proceeds of an already-terminal sell (the live cycle does both).
+# Printed with the figure, never silently.
 _CAP_PREVIEW_CAVEAT = (
     "  NOTE: preview-only figure — the dry run has no order-state store,\n"
     "        so it cannot see today's clientOrderIds. The live cycle may\n"
     "        cap EITHER WAY: LESS when a buy is already covered by its\n"
     "        coid (exempt from the spend), MORE when a sell is already\n"
     "        terminal (its proceeds do not fund anything)."
+)
+
+# A zero cap is the same divergence, not the absence of one: a net exit
+# (terminal same-coid sell, thin free quote, buys under that sell's
+# apparent proceeds) fits inside the preview's funding and gets capped
+# hard live. "LESS" is vacuous at zero, so the note states the one
+# direction that can still bite.
+_CAP_PREVIEW_ZERO_CAVEAT = (
+    "  NOTE: preview-only zero — the dry run has no order-state store, so\n"
+    "        it counts every planned sell as funding. The live cycle drops\n"
+    "        the proceeds of a sell that is already terminal, so it may cap\n"
+    "        the buys even though this preview shows no shave."
 )
 
 
@@ -313,5 +326,6 @@ def print_dry_run(result: DryRunResult, *, quote: str) -> None:
                   f"{quote})")
         print(_CAP_PREVIEW_CAVEAT)
     else:
-        print(f"Reserve cap ({RESERVE_BPS} bp): 0.00 — buys fit inside "
-              f"free quote.")
+        print(f"Reserve cap ({RESERVE_BPS} bp): 0.00 — planned buys fit "
+              f"inside the previewed free quote.")
+        print(_CAP_PREVIEW_ZERO_CAVEAT)

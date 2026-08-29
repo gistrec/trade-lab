@@ -404,9 +404,14 @@ Notes on reading that table against the historical one above:
 * The **full-sample row (3070 bars, +1.377) has not been recomputed**
   — no derived series for that window is committed. Its literal
   "≈ 0.000" came from the same raw-0.7 call, so treat it as
-  unquantified rather than measured. Its direction is not in doubt:
-  +1.377 annualized sits below the 2.137 annualized expected-max bar,
-  so its DSR is < 0.5 and in the same ≈ 0 neighborhood.
+  unquantified rather than measured. Only the *direction* follows from
+  what is known: +1.377 annualized sits below the 2.137 annualized
+  expected-max bar, so `SR_hat - SR_0 < 0` and its DSR is **< 0.5**.
+  No magnitude is claimed. `deflated_sharpe_ratio` scales that gap and
+  then divides it by a term in the series' own skew and kurtosis before
+  the normal CDF; that series is exactly what is unavailable here, so
+  *how far* below 0.5 the value lands does not follow from the two
+  numbers in the table. "< 0.5", not "≈ 0".
 * **"0.770 (different DSR convention)"** in § "Deployable Sharpe
   expectation" is, precisely: the **minimal 1/sqrt(T)** convention on
   the walk-forward concat-OOS series (T = 2339). Same code, same
