@@ -167,10 +167,18 @@ def _gate_label(gate_open) -> str:
     absent field as CLOSED fabricates a reading — and CLOSED is the
     flat-position state, so the fabrication points at "we were out of
     the market" for a bar whose gate nobody recorded.
+
+    Only the literal booleans are gate observations. Journal rows are
+    external input, and a schema-drifted falsy value (``0``, ``""``,
+    ``[]``) is an unknown reading, not a closed gate — a truthiness test
+    would fabricate CLOSED for exactly the corrupt rows that deserve a
+    dash.
     """
-    if gate_open is None:
-        return "—"
-    return "OPEN" if gate_open else "CLOSED"
+    if gate_open is True:
+        return "OPEN"
+    if gate_open is False:
+        return "CLOSED"
+    return "—"
 
 
 def _config_gate_state(runtime_hash: str) -> tuple[bool, str]:

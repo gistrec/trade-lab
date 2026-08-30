@@ -1718,6 +1718,17 @@ def test_gate_label_three_valued():
     assert _gate_label(None) == "—"
 
 
+def test_gate_label_treats_falsy_non_booleans_as_unknown():
+    """Only JSON true/false are gate observations. A schema-drifted 0 /
+    "" / [] is an unknown reading — a truthiness test would fabricate
+    CLOSED (the flat-position state) for exactly the corrupt rows that
+    deserve a dash."""
+    from trade_lab.monitoring.app import _gate_label
+
+    for drifted in (0, "", [], {}, 0.0, "false", 1, "true", ["x"]):
+        assert _gate_label(drifted) == "—", drifted
+
+
 def test_recent_cycles_row_does_not_fabricate_closed_for_missing_gate():
     """The Recent-cycles table used to render an absent sma_gate_open as
     CLOSED — a fabricated flat-position reading for a bar whose gate was
