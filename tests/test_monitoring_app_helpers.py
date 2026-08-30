@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 
 from trade_lab.monitoring.app import (
     _collapse_signal_rows, _humanize_iso, _humanize_relative,
@@ -1844,3 +1845,180 @@ def test_submin_notice_does_not_claim_no_live_cron_when_live_cycles_exist(
     assert len(submin) == 1, infos
     assert "no live order cron has run yet" not in submin[0], submin[0]
     assert "cumulative skipped drift across live cycles" in submin[0]
+
+
+# ---------------------------------------------------------------------------
+# _equity_prev_day_delta + the KPI row above the tabs
+# ---------------------------------------------------------------------------
+
+
+def _first_metric(app, label):
+    """First metric carrying ``label``, in document order.
+
+    The KPI row renders above the tabs, and the Portfolio tab reuses
+    ``Equity ({quote})`` for the same number — a plain label→metric dict
+    would silently return the Portfolio tile instead.
+    """
+    for m in app.metric:
+        if m.label == label:
+            return m
+    raise AssertionError(
+        f"no metric labelled {label!r}; saw {[m.label for m in app.metric]}"
+    )
+
+
+def _equity_reader(points):
+    """Reader whose cycles carry (ended_at, equity) successful readings."""
+    cycles = [
+        {"outcome": "success", "ended_at": ts, "equity_usd": eq,
+         "context": {"quote_currency": "USDT"}}
+        for ts, eq in points
+    ]
+
+    class _R:
+        def cycles(self, n=20):
+            return cycles[-n:]
+
+    return _R()
+
+
+def test_equity_delta_none_without_two_distinct_days():
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    assert _equity_prev_day_delta(_equity_reader([])) == (None, None)
+    one_day = _equity_reader([
+        ("2026-08-25T06:00:00+00:00", 100.0),
+        ("2026-08-25T18:00:00+00:00", 101.0),
+    ])
+    assert _equity_prev_day_delta(one_day) == (101.0, None)
+
+
+def test_equity_delta_compares_last_of_day_not_consecutive_cycles():
+    """Four dry-runs a day: an intraday repeat must not read as a change."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    reader = _equity_reader([
+        ("2026-08-24T00:00:00+00:00", 100.0),
+        ("2026-08-24T06:00:00+00:00", 101.0),
+        ("2026-08-24T18:00:00+00:00", 102.0),   # last of 08-24
+        ("2026-08-25T00:00:00+00:00", 105.0),
+        ("2026-08-25T12:00:00+00:00", 110.0),   # last of 08-25
+    ])
+    latest, delta = _equity_prev_day_delta(reader)
+    assert latest == 110.0
+    assert delta == pytest.approx(8.0)          # 110 − 102, not 110 − 105
+
+
+def test_kpi_row_renders_money_and_state_above_the_tabs(tmp_path, monkeypatch):
+    """Runtime verify: the first screen carries equity, ladder, gate and
+    last-LIVE without a tap. Also pins the honesty choice — the equity
+    delta is NOT painted as performance, because deposits move it too."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, *, equity, ladder, gate, executed):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": "success", "error": None,
+            "git_commit": "aaaa111", "python_version": "3.11.0",
+            "context": {"mode": "live", "exchange": "binance",
+                        "sandbox": False, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": {"asof": ended.date().isoformat(),
+                       "ladder_value": ladder, "sma_gate_open": gate,
+                       "basket_close": 100.0, "sma_value": 90.0},
+            "basket_close_series": None, "balance": None,
+            "equity_usd": equity, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": 0.0,
+            "orders_executed": executed, "schema_version": 2,
+        }
+
+    filled = [{"symbol": "BTC/USDT", "side": "buy",
+               "client_order_id": "tl-2026-08-24-BTC-buy",
+               "terminal_status": "closed", "intended_amount": 1.0,
+               "filled_amount": 1.0, "filled_notional_quote": 13.18}]
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        _cycle("d1", now - timedelta(days=1), equity=100.0, ladder=1.0,
+               gate=True, executed=filled),
+        _cycle("d2", now, equity=110.5, ladder=1.0, gate=True,
+               executed=filled),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    equity = _first_metric(app, "Equity (USDT)")
+    assert equity.value == "110.50"
+    assert equity.delta == "+10.50 vs prior day"
+    # The honesty pin: a deposit would move this the same way, so the tile
+    # must not dress the change as profit. GRAY is what delta_color='off'
+    # renders as; GREEN here would mean the dashboard called a top-up a gain.
+    from streamlit.proto.Metric_pb2 import Metric as _MetricProto
+    assert equity.proto.color == _MetricProto.MetricColor.GRAY, \
+        _MetricProto.MetricColor.Name(equity.proto.color)
+    assert _first_metric(app, "Ladder").value == "1.00"
+    assert _first_metric(app, "SMA(200) gate").value == "OPEN"
+    assert _first_metric(app, "Last LIVE").delta == "SUCCESS"
+
+
+def test_kpi_row_shows_dashes_rather_than_fabricating_a_flat_book(
+    tmp_path, monkeypatch,
+):
+    """An empty-signal journal must render '—', not '0.00' ladder and
+    'CLOSED' gate — both of which are real states the strategy can be in."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc).isoformat()
+    cycle = {
+        "cycle_id": "c1", "started_at": now, "ended_at": now,
+        "duration_ms": 5000, "outcome": "success", "error": None,
+        "git_commit": None, "python_version": "3.11.0",
+        "context": {"mode": "dry_run", "exchange": "binance",
+                    "sandbox": True, "quote_currency": "USDT",
+                    "basket": ["BTC"]},
+        "signal": None, "basket_close_series": None, "balance": None,
+        "equity_usd": None, "target_allocation": None,
+        "current_holdings_quote": None, "orders_planned": [],
+        "orders_skipped": [], "total_skipped_quote_drift": 0.0,
+        "orders_executed": None, "schema_version": 2,
+    }
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text(json.dumps(cycle) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    assert _first_metric(app, "Equity (USDT)").value == "—"
+    assert _first_metric(app, "Ladder").value == "—"
+    assert _first_metric(app, "SMA(200) gate").value == "—"
+    assert _first_metric(app, "Last LIVE").value == "—"
+    # Same journal, same claim in the Portfolio tab: an unread equity is
+    # unknown, not zero. Both tiles for that label must agree.
+    assert [m.value for m in app.metric if m.label == "Equity (USDT)"] == \
+        ["—", "—"]

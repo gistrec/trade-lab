@@ -1,4 +1,4 @@
-"""Streamlit monitoring dashboard for the paper-trading bot.
+"""Streamlit monitoring dashboard for the live trading bot.
 
 Read-only by construction. Reads ``JournalReader`` and displays
 status, signal, portfolio drift, and recent cycles. There are no
@@ -990,6 +990,78 @@ def _ladder_prev_day_delta(reader: JournalReader) -> Optional[float]:
     return by_day[days[-1]] - by_day[days[-2]]
 
 
+def _equity_prev_day_delta(
+    reader: JournalReader,
+) -> tuple[Optional[float], Optional[float]]:
+    """``(latest equity, change vs the previous distinct day)``.
+
+    Last-of-day like :func:`_ladder_prev_day_delta`: ~24 dry-run cycles a
+    day would otherwise make an intraday repeat read as a change. Keyed on
+    ``ended_at``, since ``equity_usd`` is stamped when the cycle read the
+    exchange, not on the signal bar it acts upon.
+    """
+    by_day: dict = {}
+    for dt, eq in equity_series(reader.cycles(n=500)):
+        by_day[dt.date()] = eq
+    if not by_day:
+        return None, None
+    days = sorted(by_day)
+    latest = by_day[days[-1]]
+    if len(days) < 2:
+        return latest, None
+    return latest, latest - by_day[days[-2]]
+
+
+def _render_kpi_row(reader: JournalReader) -> None:
+    """The four numbers worth a phone glance, above the tabs.
+
+    Everything above this row is environment chrome — which source, is the
+    bot alive — and the money lived two taps away in Portfolio / Signal.
+    Pure journal display: no computation the tabs do not already do.
+    """
+    latest = reader.latest_cycle()
+    sig = (latest or {}).get("signal") or {}
+    quote = _cycle_context(latest).get("quote_currency") or "USD"
+    equity, eq_delta = _equity_prev_day_delta(reader)
+    gate_state, gate_days = _gate_state_duration_days(reader)
+    live = reader.latest_live_cycle()
+
+    cols = st.columns(4)
+    cols[0].metric(
+        f"Equity ({quote})",
+        f"{equity:,.2f}" if equity is not None else "—",
+        delta=(f"{eq_delta:+,.2f} vs prior day"
+               if eq_delta is not None else None),
+        # 'off', never 'normal': equity moves on deposits and withdrawals
+        # too, so a green delta would sell a capital top-up as profit —
+        # the exact conflation the execution-tracking layer refuses to
+        # make. This tile reports a level change, not a return.
+        delta_color="off",
+    )
+    ladder = sig.get("ladder_value")
+    ladder_delta = _ladder_prev_day_delta(reader)
+    cols[1].metric(
+        "Ladder",
+        f"{as_float(ladder):.2f}" if ladder is not None else "—",
+        delta=(f"{ladder_delta:+.2f} vs prior day"
+               if ladder_delta is not None else None),
+        delta_color="normal" if ladder_delta else "off",
+    )
+    cols[2].metric(
+        "SMA(200) gate",
+        _gate_label(sig.get("sma_gate_open")),
+        delta=(None if gate_days is None else f"{gate_days}d {gate_state}"),
+        delta_color="off",
+    )
+    cols[3].metric(
+        "Last LIVE",
+        _humanize_relative((live or {}).get("ended_at")),
+        delta=(str(live.get("outcome") or "?").upper()
+               if live is not None else None),
+        delta_color="off",
+    )
+
+
 def _distinct_commits(cycles: list) -> list:
     """Distinct git_commit values across the window, in first-seen order."""
     seen: list = []
@@ -1353,7 +1425,14 @@ def _render_portfolio(reader: JournalReader) -> None:
     )
 
     cols = st.columns(3)
-    cols[0].metric(f"Equity ({quote})", f"{equity:,.2f}")
+    # Display '—', not the 0.0 the arithmetic falls back to: a cycle that
+    # never read the exchange has UNKNOWN equity, and rendering that as
+    # "0.00" on a real-money page claims the book is empty. The numeric
+    # fallback stays — the drift-% math below already guards equity > 0.
+    cols[0].metric(
+        f"Equity ({quote})",
+        f"{equity:,.2f}" if latest.get("equity_usd") is not None else "—",
+    )
     cols[1].metric(f"Total target ({quote})", f"{total_target:,.2f}")
     cols[2].metric(
         f"Total drift ({quote})",
@@ -1959,8 +2038,10 @@ def _about_dialog() -> None:
         "**trade-lab** backtests crypto-spot strategies with a **layered-"
         "honesty** stack — every edge is shown net-of-cost, then out-of-"
         "sample, then as a Deflated Sharpe Ratio at a fixed budget (N=500). "
-        "One strategy survived every layer and is **paper-trading live on "
-        "Binance testnet** — that is what this dashboard shows.\n\n"
+        "One strategy survived every layer and has been **trading live on "
+        "Binance mainnet since 2026-08-24 with capped capital**; the "
+        "testnet source remains the paper environment. Both journals feed "
+        "this dashboard — pick the source in the sidebar.\n\n"
         "Below is the master results index; full writeups are in the "
         "**Research** tab."
     )
@@ -2132,6 +2213,7 @@ def _render_dashboard() -> None:
                 f"TRADE_LAB_MONITORING_JOURNAL_PATH*."
             )
     _render_tab_safely("Health", lambda: _render_health_line(reader))
+    _render_tab_safely("KPI row", lambda: _render_kpi_row(reader))
 
     (tab_status, tab_signal, tab_portfolio, tab_cycles,
      tab_validation, tab_research) = st.tabs(
@@ -2203,7 +2285,8 @@ def main() -> None:
             _about_dialog()
     # Three tight lines (trailing double-space = markdown hard break).
     st.caption(
-        "Read-only dashboard for gistrec's paper-trading bot.  \n"
+        "Read-only monitoring for a live TSMOM strategy — Binance mainnet "
+        "(real money, capped) + testnet paper environment.  \n"
         "See the **Research** tab for all findings & results.  \n"
         f"Auto-refreshes every {REFRESH_SECONDS}s."
     )

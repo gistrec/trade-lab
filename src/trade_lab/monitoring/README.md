@@ -1,6 +1,8 @@
 # trade-lab monitoring
 
-Read-only dashboard for the paper-trading bot. Reads the bot's
+Read-only dashboard for the live trading bot — Binance mainnet (real
+money, capped) since 2026-08-24, plus the testnet paper environment as a
+second source. Reads the bot's
 append-only journal and exposes status, signal, portfolio drift, and
 recent cycles. **No control buttons, no exchange access, no API
 credentials.** The bot writes; this UI reads.
@@ -270,7 +272,7 @@ image from the repo:
     proxy_set_header Accept-Encoding "";
     sub_filter_once on;
     sub_filter '<title>Streamlit</title>' '<title>trade-lab monitoring</title>';
-    sub_filter '</head>' '<meta property="og:type" content="website"/><meta property="og:site_name" content="trade-lab"/><meta property="og:title" content="trade-lab monitoring"/><meta property="og:description" content="Live paper-trading monitor for a TSMOM crypto strategy — signal, portfolio, cycle journal and execution health on Binance testnet and mainnet."/><meta property="og:url" content="https://trade-lab.gistrec.cloud/"/><meta property="og:image" content="https://trade-lab.gistrec.cloud/og-image.png"/><meta property="og:image:width" content="1200"/><meta property="og:image:height" content="630"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="Live paper-trading monitor for a TSMOM crypto strategy."/></head>';
+    sub_filter '</head>' '<meta property="og:type" content="website"/><meta property="og:site_name" content="trade-lab"/><meta property="og:title" content="trade-lab monitoring"/><meta property="og:description" content="Live monitor for a TSMOM crypto strategy — signal, portfolio, cycle journal and execution health on Binance mainnet (real money, capped) and the testnet paper environment."/><meta property="og:url" content="https://trade-lab.gistrec.cloud/"/><meta property="og:image" content="https://trade-lab.gistrec.cloud/og-image.png"/><meta property="og:image:width" content="1200"/><meta property="og:image:height" content="630"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="Live monitor for a TSMOM crypto strategy on Binance mainnet."/></head>';
 ```
 
 Behind basic auth this is pointless: crawlers get 401 and render no
