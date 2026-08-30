@@ -1695,10 +1695,15 @@ STANDING_NOTIONAL = 100.0 / 7
 
 
 def test_first_live_catchup_orders_are_bootstrap(tmp_path, capsys):
-    """Production shape: the sim stepped into the basket on 2026-08-20,
-    the live cron started on 2026-08-24 without trading, and the seven
-    catch-up buys landed on 08-25. They execute an intent the simulation
-    really made — a category of their own, not seven UNEXPECTED ORDERs."""
+    """Catch-up shape, with dates chosen for the scenario — NOT a record
+    of production. (Production's first live cycle ended 2026-08-24 and
+    filled all seven legs at once; this fixture deliberately splits the
+    cron's first run from the fills to exercise the harder case.)
+
+    The sim steps into the basket, the live cron then starts without
+    trading, and the catch-up buys land a day later. They execute an
+    intent the simulation really made — a category of their own, not
+    seven UNEXPECTED ORDERs."""
     real_p, sim_p = tmp_path / "real.jsonl", tmp_path / "sim.jsonl"
     sim_step, cron_day, live_day = "2026-08-20", "2026-08-24", "2026-08-25"
     _write_real(real_p, [
