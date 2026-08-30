@@ -128,7 +128,9 @@ def test_read_log_refuses_a_corrupt_line_in_the_middle(tmp_path):
     lines[1] = '{"date": "2026-05-30", "ladd'          # corrupted in place
     log.write_text("\n".join(lines) + "\n")
 
-    with pytest.raises(ValueError, match="line 2 of 3"):
+    from trade_lab.paper_trading.journal import JournalCorruptionError
+
+    with pytest.raises(JournalCorruptionError, match="line 2 of 3"):
         read_log(log)
 
 

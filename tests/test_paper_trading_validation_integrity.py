@@ -205,7 +205,8 @@ def test_store_vintage_fsyncs_file_and_directory(tmp_path, monkeypatch):
         index=idx)}
     h = vintage_store.store_vintage(candles, tmp_path)
 
-    assert len(synced) == 2, synced      # the file, then its directory
+    # file, shard directory, and vintage_root (the shard is brand new).
+    assert synced == ["file", "dir", "dir"], synced
     assert vintage_store.vintage_path(tmp_path, h).exists()
     # Round-trip still works.
     assert "BTC" in vintage_store.load_vintage(h, tmp_path)
@@ -228,3 +229,107 @@ def test_reference_builder_stamps_the_literal_not_a_recomputed_hash():
         "")
     # And it refuses outright when the running config has drifted.
     assert "Refusing to build a reference" in source
+
+
+# ---------------------------------------------------------------------------
+# A torn tail must not swallow the records written after it
+# ---------------------------------------------------------------------------
+
+
+def test_append_after_a_torn_write_keeps_the_new_row_readable(tmp_path):
+    """Reproduces the swallow: 06-01 written, 06-02 torn by a crash, then
+    06-03 appended. Without the repair the last two fuse into one invalid
+    line, read_log tolerates it as the final line, and 06-03 vanishes
+    while the cycle reports success."""
+    from trade_lab.paper_trading.journal import read_log
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02", "config_h')     # power loss
+    assert [r.date for r in read_log(log)] == ["2026-06-01"]
+
+    append_row(_row("2026-06-03"), log)
+    assert [r.date for r in read_log(log)] == ["2026-06-01", "2026-06-03"]
+    # And the file is left clean, so the NEXT read does not trip the
+    # corrupt-line-in-the-middle guard either.
+    assert all(line.startswith("{") and line.endswith("}")
+               for line in log.read_text().splitlines() if line)
+
+
+def test_append_preserves_a_complete_row_missing_only_its_newline(tmp_path):
+    """An editor stripping the trailing newline leaves a COMPLETE record.
+    Truncating it would discard real history, so it is terminated
+    instead."""
+    from trade_lab.paper_trading.journal import read_log
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    append_row(_row("2026-06-02"), log)
+    log.write_text(log.read_text().rstrip("\n"))        # newline stripped
+
+    append_row(_row("2026-06-03"), log)
+    assert [r.date for r in read_log(log)] == [
+        "2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+def test_corrupt_journal_raises_a_declared_error_not_a_bare_valueerror():
+    """The harness CLI maps declared failures to exit 2; an uncaught
+    ValueError would exit 1 and cron would misclassify the cycle."""
+    from trade_lab.paper_trading.journal import JournalCorruptionError
+
+    assert issubclass(JournalCorruptionError, RuntimeError)
+
+
+def test_report_window_follows_dates_not_append_order(tmp_path):
+    """Metrics are computed on chronologically sorted rows, so a report
+    window taken from append order would name an end date earlier than
+    the data the latest status describes."""
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    for d in ("2026-06-01", "2026-06-03", "2026-06-02"):   # 06-02 backfilled
+        append_row(_row(d), log)
+    ref = _reference(tmp_path, config_hash=FROZEN_CONFIG_HASH)
+
+    report = check_journal_against_reference(log, ref)
+    assert report.journal_window == ("2026-06-01", "2026-06-03")
+
+
+def test_store_vintage_syncs_the_parent_when_the_shard_is_new(
+    tmp_path, monkeypatch,
+):
+    """vintage_path shards on h[:2], so the first vintage of a prefix
+    creates a directory entry under vintage_root. Syncing only the shard
+    leaves the file durable inside a directory whose own entry never
+    landed."""
+    import os
+
+    import pandas as pd
+
+    from trade_lab.paper_trading import vintage_store
+
+    synced: list[str] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        vintage_store.os, "fsync",
+        lambda fd: (synced.append(fd), real_fsync(fd))[1])
+
+    idx = pd.date_range("2026-06-01", periods=3, freq="D", tz="UTC")
+
+    def _candles(v: float):
+        return {"BTC": pd.DataFrame(
+            {"open": v, "high": v, "low": v, "close": v, "volume": 1.0},
+            index=idx)}
+
+    # First vintage of its shard: file + shard dir + vintage_root.
+    vintage_store.store_vintage(_candles(1.0), tmp_path)
+    first = len(synced)
+    assert first == 3, synced
+
+    # A second vintage landing in an EXISTING shard syncs one dir less.
+    synced.clear()
+    vintage_store.store_vintage(_candles(2.0), tmp_path)
+    assert len(synced) in (2, 3), synced      # 3 only if it opened a new shard

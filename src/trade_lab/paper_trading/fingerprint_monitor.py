@@ -265,7 +265,12 @@ def check_journal_against_reference(
 
     journal_window: Optional[tuple] = None
     if rows:
-        journal_window = (rows[0].date, rows[-1].date)
+        # By DATE, not by append order — the metrics below are computed on
+        # the chronologically sorted rows, so a backfilled day would
+        # otherwise have the report claim a window ending before the data
+        # the latest status actually describes.
+        dates = sorted(r.date for r in rows)
+        journal_window = (dates[0], dates[-1])
 
     live = compute_live_metrics_from_journal(
         rows,
