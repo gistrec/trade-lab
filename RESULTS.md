@@ -55,6 +55,11 @@ result.
 
 ## What "LIVE" status actually means (and what it does not)
 
+> Renamed 2026-08-30. This section was called **"What PAPER status
+> actually means"** while strategy #1 was on testnet; `findings/` entries
+> written before that date still point at the old title and are left
+> untouched as immutable history.
+
 A strategy that reaches LIVE status has cleared the backtest-side gates and the rollout ladder. It has **not** cleared the forward test — that one is running. Specifically:
 
 * **The deploy gate is "DSR > 0.5 at N=500, cluster-stable" evaluated UNDER THE MINIMAL 1/sqrt(T) DEFLATOR CONVENTION.** That is the convention every gate decision in this repo was made under, and it is still the gate. Read literally, passing it means: after correcting for the project's effective multiple-testing budget (500 trials) with a trial dispersion set to the sampling noise of one Sharpe estimate, the strategy's Sharpe is unlikely to be pure selection noise. **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact under that convention.**

@@ -22,7 +22,7 @@ flattering number. See [RESULTS.md](RESULTS.md).
 | Layer | What it does | Where |
 |---|---|---|
 | Research | fetch → strategies → backtest → walk-forward → DSR → ensemble | this README |
-| Forward harness | daily paper clock, frozen-config gate, vintage store, look-ahead detector, behavioural fingerprint monitor | `src/trade_lab/paper_trading/` |
+| Forward harness | daily paper clock, frozen-config gate, vintage store, look-ahead detector, behavioural fingerprint monitor | [`paper_trading/README.md`](paper_trading/README.md) |
 | Execution | live order placement on Binance: signal → allocator → delta plan → idempotent orders → journal | [`src/trade_lab/execution/README.md`](src/trade_lab/execution/README.md) |
 | Monitoring | read-only Streamlit dashboard + health endpoints + alerting | [`src/trade_lab/monitoring/README.md`](src/trade_lab/monitoring/README.md) |
 
@@ -59,10 +59,11 @@ What lives in this repo today:
 - **Walk-forward** runner with warmup-feed, optional purge gap, and
   per-fold + concatenated-OOS Deflated Sharpe Ratio (Bailey & López de
   Prado 2014). `PROJECT_NUM_TRIALS = 500` is pinned in code with a census
-  comment — it does not move retroactively. Every DSR in this README is
-  the **minimal 1/sqrt(T)** convention — read "DSR convention" below
-  before comparing any of these numbers with the deployed config's
-  reported figure.
+  comment — it does not move retroactively. **Convention:** every DSR in
+  this README is the **minimal 1/sqrt(T)** one, with a single stated
+  exception — the deployed config's headline **0.037** at the top of this
+  file is the *conservative* deflator. The two are never the same number;
+  read "DSR convention" below before comparing any of them.
 - A **21-sleeve equal-weight portfolio runner** (3 strategies × 7 assets,
   per-asset vol-target picks, dynamic 1/N_active with rebalance-on-
   universe-change costing) that aggregates everything above into a single
@@ -71,9 +72,12 @@ What lives in this repo today:
 - A **live execution layer** (`src/trade_lab/execution/`) that turns the
   signal into real orders: drifted-weight allocator, min-notional delta
   planner, deterministic `clientOrderId` idempotency, order-state
-  reconstruction, wait-for-ack, and an fsynced JSONL journal. Exchange-
-  agnostic through ccxt; the exchange is the single source of truth and
-  balances are never cached across cycles.
+  reconstruction, wait-for-ack, and an fsynced JSONL journal. Built on
+  ccxt, but deliberately **Binance-only at runtime**: `VERIFIED_EXCHANGES`
+  gates `Broker.connect`, because the idempotency parameters are
+  venue-specific and an unverified venue must not be reached by accident.
+  The exchange is the single source of truth — balances are never cached
+  across cycles.
 - A **read-only monitoring dashboard** (`src/trade_lab/monitoring/`) plus
   health endpoints and Prometheus metrics for alerting. It never writes,
   never touches the exchange, and holds no credentials.
@@ -538,9 +542,6 @@ src/trade_lab/
   cli.py                argparse entry point.
 ops/                    pm2 ecosystems, health apps, netdata alarm
                         definitions, static assets.
-constraints.txt         Pinned dependency set — CI and the server
-                        install through it, so the tested versions
-                        are the trading versions.
 ```
 
 ## Tests
@@ -553,8 +554,7 @@ pytest
 the execution path (mocked exchange — never the live API), the forward
 harness, and the monitoring layer. CI runs the suite on a **Python
 3.11 / 3.12 / 3.13 matrix** with `--cov-fail-under=70`, plus a `ruff`
-lint job, and installs through `constraints.txt` so it tests the same
-versions the server runs.
+lint job.
 
 Execution tests include deliberately defensive stubs — fakes that omit
 dangerous methods so an accidental live call raises immediately rather
