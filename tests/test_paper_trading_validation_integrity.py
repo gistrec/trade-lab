@@ -462,3 +462,61 @@ def test_store_vintage_syncs_every_newly_created_ancestor(tmp_path):
     assert str(root) in synced, synced
     assert str(tmp_path / "does" / "not") in synced, synced
     assert str(tmp_path / "does") in synced, synced
+
+
+def test_tail_forgiveness_follows_the_line_not_the_file(tmp_path):
+    """`{bad}\\n   ` ends without a newline while the corrupt line above
+    it is perfectly terminated. A file-level test forgives it; the
+    property belongs to the record."""
+    from trade_lab.paper_trading.journal import (
+        JournalCorruptionError, read_log,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02", "conf\n   ')    # terminated + blank
+
+    with pytest.raises(JournalCorruptionError):
+        read_log(log)
+
+
+def test_journal_lock_degrades_where_flock_is_unavailable(tmp_path,
+                                                          monkeypatch):
+    """Importing fcntl at module level broke every reader on Windows —
+    harness, monitor, detector and dashboard alike. The lock is a
+    hardening, so its absence must cost the lock, not the module."""
+    from trade_lab.paper_trading import journal as journal_mod
+
+    monkeypatch.setattr(journal_mod, "fcntl", None)
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    append_row(_row("2026-06-02"), log)
+    assert [r.date for r in journal_mod.read_log(log)] == [
+        "2026-06-01", "2026-06-02"]
+
+
+def test_store_vintage_completes_syncs_on_the_existing_path(tmp_path):
+    """A process killed between rename() and the directory syncs leaves a
+    readable but non-durable entry. The retry must finish the job rather
+    than return early on p.exists()."""
+    import pandas as pd
+
+    from trade_lab.paper_trading import vintage_store
+
+    idx = pd.date_range("2026-06-01", periods=2, freq="D", tz="UTC")
+    candles = {"BTC": pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+        index=idx)}
+    h = vintage_store.store_vintage(candles, tmp_path)
+
+    synced: list[str] = []
+    orig = vintage_store._fsync_dir
+    vintage_store._fsync_dir = lambda p: (synced.append(str(p)), orig(p))[1]
+    try:
+        again = vintage_store.store_vintage(candles, tmp_path)
+    finally:
+        vintage_store._fsync_dir = orig
+
+    assert again == h                      # still idempotent
+    assert synced, "the retry returned without syncing anything"

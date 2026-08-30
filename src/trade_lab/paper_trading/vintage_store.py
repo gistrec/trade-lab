@@ -124,6 +124,13 @@ def store_vintage(
     h = content_hash(payload)
     p = vintage_path(vintage_root, h)
     if p.exists():
+        # Do NOT assume a visible path is a durable one. A process killed
+        # between rename() and the directory syncs below leaves exactly
+        # this state: the entry is readable, and a power loss can still
+        # take it. The retry is the only chance to finish the job, so it
+        # completes the syncs instead of returning early.
+        _fsync_dir(p.parent)
+        _fsync_dir(p.parent.parent)
         return h
     # Every ancestor mkdir may create is a directory ENTRY that has to be
     # made durable in ITS parent. Stopping at the shard (or at

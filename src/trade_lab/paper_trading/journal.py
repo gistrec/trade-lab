@@ -44,7 +44,6 @@ Row schema (v1)
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from contextlib import contextmanager
@@ -134,6 +133,12 @@ def _repair_unterminated_tail(log_path: Path) -> None:
         os.fsync(f.fileno())
 
 
+try:
+    import fcntl                     # POSIX only
+except ImportError:                  # pragma: no cover - Windows
+    fcntl = None                     # type: ignore[assignment]
+
+
 @contextmanager
 def _journal_lock(log_path: Path):
     """Serialize repair+append across processes.
@@ -146,6 +151,9 @@ def _journal_lock(log_path: Path):
     Advisory ``flock`` on a sidecar file — a lock on the journal itself
     would have to be taken before deciding whether to open it ``r+b``.
     """
+    if fcntl is None:                # platform without flock: no worse than
+        yield                        # before this guard existed
+        return
     lock_path = log_path.with_suffix(log_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
@@ -193,22 +201,29 @@ def read_log(log_path: Path) -> list[HarnessLogRow]:
         return []
     text = log_path.read_text(encoding="utf-8")
     # A torn append cannot have written its own terminator, so a malformed
-    # last line is only forgivable when the file does NOT end on a line
-    # boundary. Malformed AND newline-terminated means the write finished
-    # and the bytes rotted afterwards — that is corruption, not a crash.
-    unterminated_tail = bool(text) and not text.endswith("\n")
-    raw = [
-        (n, s) for n, s in
-        ((n, line.strip()) for n, line in enumerate(
-            text.splitlines(), start=1))
-        if s
-    ]
+    # last record is only forgivable when THAT RECORD is unterminated.
+    # The property belongs to the line, not to the file: `{bad}\n   `
+    # ends without a newline while the corrupt line above it is perfectly
+    # terminated, and a file-level test would forgive it.
+    lines = text.split("\n")
+    trailing_newline = len(lines) > 1 and lines[-1] == ""
+    if trailing_newline:
+        lines = lines[:-1]
+    raw: list[tuple[int, str, bool]] = []
+    for n, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Terminated unless it is the physically last line of a file that
+        # does not end in a newline.
+        terminated = trailing_newline or n < len(lines)
+        raw.append((n, stripped, terminated))
     rows: list[HarnessLogRow] = []
-    for idx, (lineno, line) in enumerate(raw):
+    for idx, (lineno, line, terminated) in enumerate(raw):
         try:
             data = json.loads(line)
         except json.JSONDecodeError as exc:
-            if idx == len(raw) - 1 and unterminated_tail:
+            if idx == len(raw) - 1 and not terminated:
                 continue          # truncated final append; never completed
             raise JournalCorruptionError(
                 f"{log_path}: line {lineno} of {len(raw)} is not valid JSON "
