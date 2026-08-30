@@ -92,7 +92,11 @@ sudo -u botuser bash <<'EOF'
 cd /opt/trade-lab
 git clone <repo-url> .
 python3 -m venv .venv
-.venv/bin/pip install -e ".[monitoring]"
+# Through the tracked installer, NOT a bare pip: it applies
+# constraints.txt, so a host rebuilt from this recipe gets the same
+# dependency set CI ran the suite against. This command also pulls the
+# base runtime (ccxt included), which is exactly what must not drift.
+scripts/install_runtime.sh .venv monitoring
 EOF
 ```
 

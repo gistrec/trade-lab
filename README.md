@@ -41,6 +41,7 @@ without touching strategy code.
 
 ```bash
 python3 -m venv .venv
+source .venv/bin/activate                       # the commands below assume this
 scripts/install_runtime.sh .venv dev            # constrained install
 ```
 
