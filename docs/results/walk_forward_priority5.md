@@ -98,6 +98,20 @@ preferring slower trend-following. Pattern is plausible, but it means
 
 ### tsmom
 
+> **Correction note (2026-08-30).** The numbers in this section were
+> produced with `warmup_days=90` for `tsmom_short_30_60_90`, while that
+> variant carries an SMA(200) regime filter. The runner doubles warmup
+> internally (180 bars), still short of 200, so the filter stayed NaN and
+> the gate — which reads NaN as closed — forced the variant flat over the
+> head of every train and test window. The bias runs **against**
+> `tsmom_short`, which nevertheless won 10 of 13 folds, so the conclusion
+> below is unaffected; the individual Sharpe and return figures are
+> understated by an unmeasured amount. The grid now sizes warmup from
+> `Strategy.required_warmup` and `ParamGridSpec` refuses an under-sized
+> value, so a re-run would produce different (higher) numbers for this
+> variant. This table is kept as the historical record of what was
+> actually run, not re-generated.
+
 |  Fold | Selected                       | Train SR | OOS SR | OOS ret |
 |------|--------------------------------|----------|--------|---------|
 | 0    | tsmom_short_30_60_90           |  +1.39   |  -0.86 |   -7%   |

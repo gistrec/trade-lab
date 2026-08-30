@@ -115,13 +115,31 @@ class ParamGridSpec:
     the same variant on train and then test.
 
     ``warmup_days`` tells the runner how much pre-window candle data
-    the strategy needs before its signal becomes valid. Set it >= the
-    longest rolling lookback inside the strategy.
+    the strategy needs before its signal becomes valid. Prefer
+    ``factory().required_warmup`` over a hand-typed number — the longest
+    window is often the regime filter, not the headline lookback.
     """
 
     label: str
     factory: Callable[[], Strategy]
     warmup_days: int
+
+    def __post_init__(self) -> None:
+        # The docstring's contract, enforced. A hand-typed warmup shorter
+        # than the strategy's longest rolling window leaves that indicator
+        # NaN over the head of EVERY train and test window, so the variant
+        # is systematically understated in the grid — it loses on a data
+        # artifact, not on its edge. Silent understatement is exactly the
+        # cold-start bias walk_forward_v2 exists to remove, so refuse.
+        required = getattr(self.factory(), "required_warmup", 0)
+        if self.warmup_days < required:
+            raise ValueError(
+                f"{self.label}: warmup_days={self.warmup_days} is shorter "
+                f"than the strategy's longest rolling window "
+                f"({required}). The indicator would stay NaN over the "
+                f"head of every window. Pass "
+                f"warmup_days=factory().required_warmup."
+            )
 
 
 @dataclass(frozen=True)

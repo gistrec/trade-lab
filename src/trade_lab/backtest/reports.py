@@ -49,7 +49,9 @@ def trades_to_dataframe(
     fields. ``entry_time`` / ``exit_time`` are execution candles;
     ``entry_signal_time`` / ``exit_signal_time`` are the bars where the
     decision was made (one bar earlier). ``entry_execution_price`` and
-    ``exit_execution_price`` are slippage-adjusted (``close * (1 ± rate)``).
+    ``exit_execution_price`` are slippage-adjusted (``close * (1 ± rate)``)
+    closes of those SIGNAL bars — the fill the engine's P&L implies, so
+    ``exit / entry`` reconstructs the trade's gross return.
 
     The ``candles`` parameter is kept for API compatibility but no longer
     needed — all the data comes from ``result.trades``.

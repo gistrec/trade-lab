@@ -14,9 +14,13 @@ class Trade:
     """A round-trip long trade with detailed cost breakdown.
 
     Time fields are split between the *signal* candle (where the strategy
-    decided) and the *execution* candle (the next bar, where the engine
-    actually held the position). Prices are slippage-adjusted to reflect
-    what the strategy effectively paid / received.
+    decided) and the *execution* candle (the next bar, the first the engine
+    holds the position through). The prices belong to the SIGNAL bar: the
+    engine's math (``positions = signals.shift(1)`` over close-to-close
+    returns) implies a fill at the close that produced the signal, so a
+    trade's ``exit / entry`` ratio reconstructs its gross return. Prices
+    are slippage-adjusted to reflect what the strategy effectively paid /
+    received.
     """
 
     # Execution timing (when the position was actually held).
@@ -198,7 +202,8 @@ def execution_bars(positions: pd.Series) -> tuple[List[int], List[int]]:
 
     Entries / exits are the *execution candles* — the bars where the engine
     actually holds (or first stops holding) a position. A signal at bar N
-    becomes a position at bar N+1; this helper returns N+1, not N.
+    becomes a position at bar N+1; this helper returns N+1, not N. The
+    implied fill price, though, is ``close[N]`` — see :class:`Trade`.
     """
     entries: List[int] = []
     exits: List[int] = []
@@ -275,8 +280,18 @@ def _build_trade(
         None if open_at_end else positions.index[exit_idx - 1]
     )
 
-    raw_entry_close = float(close.iloc[entry_idx])
-    raw_exit_close = float(close.iloc[exit_idx])
+    # The engine's IMPLIED fill is the close of the signal bar, not of the
+    # bar the position is first held through. positions = signals.shift(1)
+    # and returns = close.pct_change(), so the position decided at bar N-1
+    # earns close[N-1] → close[N]: entering at close[N] would be a bar too
+    # late and make the reported prices contradict the reported return.
+    # exit_idx is the first FLAT bar, so the last held close is exit_idx-1
+    # — except for a trade still open at the end, which is marked at the
+    # last close in the window (exit_idx = n_bars - 1, still held).
+    raw_entry_close = float(close.iloc[entry_idx - 1])
+    raw_exit_close = float(
+        close.iloc[exit_idx if open_at_end else exit_idx - 1]
+    )
 
     entry_execution_price = raw_entry_close * (1 + slippage_rate)
     exit_execution_price = raw_exit_close * (1 - slippage_rate)
