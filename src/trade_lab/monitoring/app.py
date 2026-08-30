@@ -863,11 +863,11 @@ def _render_signal(reader: JournalReader) -> None:
     # as_float, not .get(default): a present JSON-null ladder_value makes
     # .get return None and f"{None:.2f}" raise — the data layer is hardened
     # against this (signal_history), the top metric was the bypass.
-    ladder_delta = _ladder_prev_day_delta(reader)
+    ladder_delta, ladder_gap = _ladder_prev_day_delta(reader)
     cols[0].metric(
         "Ladder value",
         f"{as_float(sig.get('ladder_value')):.2f}",
-        delta=(f"{ladder_delta:+.2f} vs prior day"
+        delta=(f"{ladder_delta:+.2f} {_interval_label(ladder_gap)}"
                if ladder_delta is not None else None),
         delta_color="normal" if ladder_delta else "off",
     )
@@ -1046,24 +1046,44 @@ def _latest_ladder_by_day(reader: JournalReader) -> dict:
     return by_day
 
 
-def _ladder_prev_day_delta(reader: JournalReader) -> Optional[float]:
-    """Change in the (per-day) ladder vs the previous distinct signal day.
+def _interval_label(gap_days: Optional[int]) -> str:
+    """Name the interval a delta actually spans.
+
+    "vs prior day" is a claim, not a decoration: after missed cycles the
+    two most recent readings can be far apart, and a multi-day move
+    presented as an overnight one misstates the number beside it.
+    """
+    if gap_days is None:
+        return ""
+    return "vs prior day" if gap_days == 1 else f"over {gap_days}d"
+
+
+def _ladder_prev_day_delta(
+    reader: JournalReader,
+) -> tuple[Optional[float], Optional[int]]:
+    """``(change vs the previous signal day, days apart)``.
 
     The key signal-stability event is 'did deployed exposure flip today?';
     intraday dry-run repeats must not read as a change, so this compares the
-    last-of-day values, not consecutive cycles.
+    last-of-day values, not consecutive cycles. The gap is returned rather
+    than assumed to be one — see :func:`_interval_label`.
     """
     by_day = _latest_ladder_by_day(reader)
     if len(by_day) < 2:
-        return None
+        return None, None
     days = sorted(by_day)
-    return by_day[days[-1]] - by_day[days[-2]]
+    return by_day[days[-1]] - by_day[days[-2]], (days[-1] - days[-2]).days
 
 
 def _equity_prev_day_delta(
     reader: JournalReader,
-) -> tuple[Optional[float], Optional[float], Optional[int]]:
-    """``(latest equity, change vs the previous reading, days apart)``.
+) -> tuple[Optional[float], Optional[str], Optional[float], Optional[int]]:
+    """``(latest equity, its quote, change vs the previous reading, gap)``.
+
+    The quote travels WITH the reading. The newest cycle may have failed
+    before reading a balance, so the displayed equity can come from an
+    older cycle — labelling it with the newest cycle's currency would
+    stamp a USDT balance as USDC.
 
     Last-of-day like :func:`_ladder_prev_day_delta`: ~24 dry-run cycles a
     day would otherwise make an intraday repeat read as a change. Keyed on
@@ -1091,15 +1111,15 @@ def _equity_prev_day_delta(
             continue
         by_day[dt.date()] = (eq, _cycle_context(c).get("quote_currency"))
     if not by_day:
-        return None, None, None
+        return None, None, None, None
     days = sorted(by_day)
     latest, latest_quote = by_day[days[-1]]
     if len(days) < 2:
-        return latest, None, None
+        return latest, latest_quote, None, None
     prev, prev_quote = by_day[days[-2]]
     if prev_quote != latest_quote:
-        return latest, None, None
-    return latest, latest - prev, (days[-1] - days[-2]).days
+        return latest, latest_quote, None, None
+    return latest, latest_quote, latest - prev, (days[-1] - days[-2]).days
 
 
 def _render_kpi_row(reader: JournalReader) -> None:
@@ -1111,8 +1131,11 @@ def _render_kpi_row(reader: JournalReader) -> None:
     """
     latest = reader.latest_cycle()
     sig = (latest or {}).get("signal") or {}
-    quote = _cycle_context(latest).get("quote_currency") or "USD"
-    equity, eq_delta, eq_gap = _equity_prev_day_delta(reader)
+    equity, eq_quote, eq_delta, eq_gap = _equity_prev_day_delta(reader)
+    # The reading's own currency, falling back to the latest cycle only
+    # when there is no reading to label.
+    quote = (eq_quote or _cycle_context(latest).get("quote_currency")
+             or "USD")
     gate_state, gate_days = _gate_state_duration_days(reader)
     live = reader.latest_live_cycle()
 
@@ -1120,13 +1143,10 @@ def _render_kpi_row(reader: JournalReader) -> None:
     # Name the actual interval. The previous reading is only yesterday's
     # when the cron did not miss a day; after a gap this tile would
     # otherwise present a ten-day move as an overnight one.
-    eq_since = (
-        "vs prior day" if eq_gap == 1 else f"over {eq_gap}d"
-    ) if eq_gap is not None else ""
     cols[0].metric(
         f"Equity ({quote})",
         f"{equity:,.2f}" if equity is not None else "—",
-        delta=(f"{eq_delta:+,.2f} {eq_since}"
+        delta=(f"{eq_delta:+,.2f} {_interval_label(eq_gap)}"
                if eq_delta is not None else None),
         # 'off', never 'normal': equity moves on deposits and withdrawals
         # too, so a green delta would sell a capital top-up as profit —
@@ -1139,11 +1159,13 @@ def _render_kpi_row(reader: JournalReader) -> None:
     # would describe a movement of a quantity the tile just admitted it
     # cannot read.
     ladder = _numeric(sig.get("ladder_value"))
-    ladder_delta = _ladder_prev_day_delta(reader) if ladder is not None else None
+    ladder_delta, ladder_gap = (
+        _ladder_prev_day_delta(reader) if ladder is not None else (None, None)
+    )
     cols[1].metric(
         "Ladder",
         f"{ladder:.2f}" if ladder is not None else "—",
-        delta=(f"{ladder_delta:+.2f} vs prior day"
+        delta=(f"{ladder_delta:+.2f} {_interval_label(ladder_gap)}"
                if ladder_delta is not None else None),
         delta_color="normal" if ladder_delta else "off",
     )

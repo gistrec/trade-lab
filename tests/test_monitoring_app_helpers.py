@@ -770,7 +770,7 @@ def test_ladder_prev_day_delta_dedups_by_day():
         cycles.append({"signal": {"asof": f"2026-06-11T{h:02d}:00:00+00:00",
                                    "ladder_value": 0.5}})
     # 1.0 → 0.5 across the day boundary; intraday repeats do not count.
-    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) == -0.5
+    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) == (-0.5, 1)
 
 
 def test_ladder_prev_day_delta_none_with_one_day():
@@ -778,7 +778,7 @@ def test_ladder_prev_day_delta_none_with_one_day():
 
     cycles = [{"signal": {"asof": "2026-06-10T00:00:00+00:00",
                           "ladder_value": 1.0}}]
-    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) is None
+    assert _ladder_prev_day_delta(_LiveReader(cycles=cycles)) == (None, None)
 
 
 def test_distinct_commits_first_seen_order():
@@ -1896,12 +1896,12 @@ def _equity_reader(points):
 def test_equity_delta_none_without_two_distinct_days():
     from trade_lab.monitoring.app import _equity_prev_day_delta
 
-    assert _equity_prev_day_delta(_equity_reader([])) == (None, None, None)
+    assert _equity_prev_day_delta(_equity_reader([])) == (None, None, None, None)
     one_day = _equity_reader([
         ("2026-08-25T06:00:00+00:00", 100.0),
         ("2026-08-25T18:00:00+00:00", 101.0),
     ])
-    assert _equity_prev_day_delta(one_day) == (101.0, None, None)
+    assert _equity_prev_day_delta(one_day) == (101.0, "USDT", None, None)
 
 
 def test_equity_delta_compares_last_of_day_not_consecutive_cycles():
@@ -1915,7 +1915,7 @@ def test_equity_delta_compares_last_of_day_not_consecutive_cycles():
         ("2026-08-25T00:00:00+00:00", 105.0),
         ("2026-08-25T12:00:00+00:00", 110.0),   # last of 08-25
     ])
-    latest, delta, gap = _equity_prev_day_delta(reader)
+    latest, _q, delta, gap = _equity_prev_day_delta(reader)
     assert latest == 110.0
     assert delta == pytest.approx(8.0)          # 110 − 102, not 110 − 105
     assert gap == 1
@@ -2069,7 +2069,7 @@ def test_ladder_day_series_drops_corrupt_readings_instead_of_zeroing_them():
             ]
 
     # Only one usable day remains -> no delta, rather than a fake -1.00.
-    assert _ladder_prev_day_delta(_R()) is None
+    assert _ladder_prev_day_delta(_R()) == (None, None)
 
 
 def test_environment_copy_follows_the_configured_sources(monkeypatch):
@@ -2303,7 +2303,7 @@ def test_equity_delta_reports_the_real_gap_not_an_assumed_day():
         ("2026-08-15T12:00:00+00:00", 100.0),
         ("2026-08-25T12:00:00+00:00", 150.0),
     ])
-    latest, delta, gap = _equity_prev_day_delta(reader)
+    latest, _q, delta, gap = _equity_prev_day_delta(reader)
     assert (latest, delta, gap) == (150.0, 50.0, 10)
 
 
@@ -2316,7 +2316,7 @@ def test_equity_delta_refuses_non_finite_readings():
         ("2026-08-24T12:00:00+00:00", 100.0),
         ("2026-08-25T12:00:00+00:00", float("nan")),
     ])
-    latest, delta, gap = _equity_prev_day_delta(reader)
+    latest, _q, delta, gap = _equity_prev_day_delta(reader)
     assert latest == 100.0        # the corrupt day is dropped, not shown
     assert delta is None and gap is None
 
@@ -2331,7 +2331,7 @@ def test_equity_delta_refuses_to_subtract_across_quote_currencies():
         ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
         ("2026-08-25T12:00:00+00:00", 95.0, "USDC"),
     ])
-    latest, delta, gap = _equity_prev_day_delta(reader)
+    latest, _q, delta, gap = _equity_prev_day_delta(reader)
     assert latest == 95.0
     assert delta is None and gap is None
     # Same currency on both sides still compares.
@@ -2339,4 +2339,40 @@ def test_equity_delta_refuses_to_subtract_across_quote_currencies():
         ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
         ("2026-08-25T12:00:00+00:00", 95.0, "USDT"),
     ])
-    assert _equity_prev_day_delta(same) == (95.0, pytest.approx(-5.0), 1)
+    assert _equity_prev_day_delta(same) == (95.0, "USDT", pytest.approx(-5.0), 1)
+
+
+def test_equity_label_uses_the_readings_own_currency():
+    """The newest cycle may have failed before reading a balance, so the
+    displayed equity can come from an older one. Labelling it with the
+    newest cycle's currency would stamp a USDT balance as USDC."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    reader = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
+    ])
+    equity, quote, delta, gap = _equity_prev_day_delta(reader)
+    assert (equity, quote) == (100.0, "USDT")
+    assert delta is None and gap is None
+
+
+def test_ladder_delta_reports_its_gap_like_equity_does():
+    """Symmetry with the equity tile: a ladder change spanning missed
+    days must not be labelled 'vs prior day'."""
+    from trade_lab.monitoring.app import _interval_label, _ladder_prev_day_delta
+
+    class _R:
+        def cycles(self, n=20):
+            return [
+                {"signal": {"asof": "2026-08-15T00:00:00+00:00",
+                            "ladder_value": 0.0}},
+                {"signal": {"asof": "2026-08-25T00:00:00+00:00",
+                            "ladder_value": 1.0}},
+            ]
+
+    delta, gap = _ladder_prev_day_delta(_R())
+    assert delta == pytest.approx(1.0)
+    assert gap == 10
+    assert _interval_label(gap) == "over 10d"
+    assert _interval_label(1) == "vs prior day"
+    assert _interval_label(None) == ""
