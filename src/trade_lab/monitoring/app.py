@@ -1,4 +1,4 @@
-"""Streamlit monitoring dashboard for the paper-trading bot.
+"""Streamlit monitoring dashboard for the live trading bot.
 
 Read-only by construction. Reads ``JournalReader`` and displays
 status, signal, portfolio drift, and recent cycles. There are no
@@ -32,6 +32,7 @@ an option — a full page reload throws away the active tab and session state.
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -179,6 +180,57 @@ def _gate_label(gate_open) -> str:
     if gate_open is False:
         return "CLOSED"
     return "—"
+
+
+def _numeric(value) -> Optional[float]:
+    """Journal field → float, or ``None`` when it is not a number.
+
+    Deliberately NOT :func:`as_float`, whose ``0.0`` fallback is right for
+    arithmetic and wrong for display: ``0.00`` is a real ladder rung (the
+    flat state), so a corrupt field must not borrow it. Booleans are
+    rejected too — ``float(True)`` is 1.0, a full-exposure reading
+    conjured out of a schema drift.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _environment_copy() -> tuple[str, str]:
+    """``(caption, modal clause)`` describing what THIS deployment reads.
+
+    Generated from :data:`JOURNAL_SOURCES`, the same dict that builds the
+    switcher. Hard-coding "mainnet + testnet" would make a testnet-only
+    deployment — the explicitly supported single-source configuration —
+    advertise a real-money account it cannot see, which is the #23 defect
+    with the environments swapped.
+    """
+    if len(JOURNAL_SOURCES) > 1:
+        return (
+            "Read-only monitoring for a live TSMOM strategy — Binance "
+            "mainnet (real money, capped) + testnet paper environment.",
+            "has been **trading live on Binance mainnet since 2026-08-24 "
+            "with capped capital**; the testnet source remains the paper "
+            "environment. Both journals feed this dashboard — switch with "
+            "the Environment control above the tabs.",
+        )
+    # Single source: stay environment-NEUTRAL. The lone key is always
+    # "testnet" (the base path is registered unconditionally), and that
+    # key is a default label, not a claim — the bot behind it can be
+    # pointed at mainnet. The top banner derives the environment from
+    # journal CONTENT (context.sandbox), so naming one here could put
+    # this copy in direct contradiction with a red REAL MONEY warning.
+    return (
+        "Read-only monitoring for a live TSMOM strategy — reads one "
+        "configured journal; the banner above states which environment "
+        "that journal actually reports.",
+        "is the one this deployment is configured to read — the banner "
+        "above names the environment its cycles actually report.",
+    )
 
 
 def _config_gate_state(runtime_hash: str) -> tuple[bool, str]:
@@ -809,11 +861,11 @@ def _render_signal(reader: JournalReader) -> None:
     # as_float, not .get(default): a present JSON-null ladder_value makes
     # .get return None and f"{None:.2f}" raise — the data layer is hardened
     # against this (signal_history), the top metric was the bypass.
-    ladder_delta = _ladder_prev_day_delta(reader)
+    ladder_delta, ladder_gap = _ladder_prev_day_delta(reader)
     cols[0].metric(
         "Ladder value",
         f"{as_float(sig.get('ladder_value')):.2f}",
-        delta=(f"{ladder_delta:+.2f} vs prior day"
+        delta=(f"{ladder_delta:+.2f} {_interval_label(ladder_gap)}"
                if ladder_delta is not None else None),
         delta_color="normal" if ladder_delta else "off",
     )
@@ -982,25 +1034,186 @@ def _latest_ladder_by_day(reader: JournalReader) -> dict:
     for c in reader.cycles(n=500):
         sig = c.get("signal") or {}
         dt = parse_iso(sig.get("asof"))
-        lv = sig.get("ladder_value")
+        # _numeric, not as_float: a corrupt ladder field would otherwise
+        # enter the series as a real 0.0 rung and manufacture a flip in
+        # the day-over-day delta.
+        lv = _numeric(sig.get("ladder_value"))
         if dt is None or lv is None:
             continue
-        by_day[dt.date()] = as_float(lv)
+        by_day[dt.astimezone(timezone.utc).date()] = lv   # UTC, see above
     return by_day
 
 
-def _ladder_prev_day_delta(reader: JournalReader) -> Optional[float]:
-    """Change in the (per-day) ladder vs the previous distinct signal day.
+def _interval_label(gap_days: Optional[int]) -> str:
+    """Name the interval a delta actually spans.
+
+    "vs prior day" is a claim, not a decoration: after missed cycles the
+    two most recent readings can be far apart, and a multi-day move
+    presented as an overnight one misstates the number beside it.
+    """
+    if gap_days is None:
+        return ""
+    return "vs prior day" if gap_days == 1 else f"over {gap_days}d"
+
+
+def _ladder_prev_day_delta(
+    reader: JournalReader,
+) -> tuple[Optional[float], Optional[int]]:
+    """``(change vs the previous signal day, days apart)``.
 
     The key signal-stability event is 'did deployed exposure flip today?';
     intraday dry-run repeats must not read as a change, so this compares the
-    last-of-day values, not consecutive cycles.
+    last-of-day values, not consecutive cycles. The gap is returned rather
+    than assumed to be one — see :func:`_interval_label`.
     """
     by_day = _latest_ladder_by_day(reader)
     if len(by_day) < 2:
-        return None
+        return None, None
     days = sorted(by_day)
-    return by_day[days[-1]] - by_day[days[-2]]
+    return by_day[days[-1]] - by_day[days[-2]], (days[-1] - days[-2]).days
+
+
+def _equity_prev_day_delta(
+    reader: JournalReader,
+) -> tuple[Optional[float], Optional[str], Optional[float], Optional[int]]:
+    """``(latest equity, its quote, change vs the previous reading, gap)``.
+
+    The quote travels WITH the reading. The newest cycle may have failed
+    before reading a balance, so the displayed equity can come from an
+    older cycle — labelling it with the newest cycle's currency would
+    stamp a USDT balance as USDC.
+
+    Last-of-day like :func:`_ladder_prev_day_delta`: ~24 dry-run cycles a
+    day would otherwise make an intraday repeat read as a change. Keyed on
+    ``ended_at``, since ``equity_usd`` is stamped when the cycle read the
+    exchange, not on the signal bar it acts upon.
+
+    Three things are refused rather than compared:
+
+    * non-finite readings — a journalled ``NaN`` / ``inf`` would render as
+      ``nan`` and poison the delta (``equity_series`` passes them through);
+    * a currency switch — subtracting a USDC balance from an earlier USDT
+      one produces a number with no meaning, and the environment guard
+      only validates exchange and sandbox, not the quote;
+    * the gap is returned, not assumed — after missed cycles the two most
+      recent dates can be ten days apart, and the caller must not label
+      that "vs prior day".
+    """
+    by_day: dict = {}
+    for c in reader.cycles(n=500):
+        if c.get("outcome") != "success":
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        eq = _numeric(c.get("equity_usd"))
+        if dt is None or eq is None:
+            continue
+        # astimezone before .date(): parse_iso preserves the written
+        # offset, so a non-UTC timestamp (the cron once ran on MSK) would
+        # bucket by its LOCAL calendar day. Around midnight that either
+        # splits one UTC day in two or merges two into one, and the gap
+        # label built from these keys would be wrong either way.
+        by_day[dt.astimezone(timezone.utc).date()] = (
+            eq, _cycle_context(c).get("quote_currency"))
+    if not by_day:
+        return None, None, None, None
+    days = sorted(by_day)
+    latest, latest_quote = by_day[days[-1]]
+    if len(days) < 2:
+        return latest, latest_quote, None, None
+    prev, prev_quote = by_day[days[-2]]
+    # Both sides must be KNOWN and equal. `None == None` would call two
+    # undenominated readings comparable, which is the cross-currency
+    # subtraction this guard exists to refuse — just undetected.
+    if not latest_quote or not prev_quote or prev_quote != latest_quote:
+        return latest, latest_quote, None, None
+    return latest, latest_quote, latest - prev, (days[-1] - days[-2]).days
+
+
+def _render_kpi_row(reader: JournalReader) -> None:
+    """The four numbers worth a phone glance, above the tabs.
+
+    Everything above this row is environment chrome — which source, is the
+    bot alive — and the money lived two taps away in Portfolio / Signal.
+    Pure journal display: no computation the tabs do not already do.
+    """
+    latest = reader.latest_cycle()
+    sig = (latest or {}).get("signal") or {}
+    equity, eq_quote, eq_delta, eq_gap = _equity_prev_day_delta(reader)
+    # The reading's own currency. The latest cycle is consulted only when
+    # there is NO reading to label — a reading whose own quote is missing
+    # is undenominated, and borrowing the newest cycle's currency would
+    # stamp a denomination onto a number that has none.
+    if equity is None:
+        quote = _cycle_context(latest).get("quote_currency") or "USD"
+    else:
+        quote = eq_quote or "?"
+    gate_state, gate_days = _gate_state_duration_days(reader)
+    live = reader.latest_live_cycle()
+    # Both signal deltas come from the DATED day series, which drops any
+    # cycle whose `asof` is missing or unparseable. The value can be
+    # perfectly readable while its timestamp is not — and then the tile
+    # would show today's reading beside a change computed entirely from
+    # older rows. Require the current signal to be the newest dated point.
+    sig_dt = parse_iso(sig.get("asof"))
+    sig_day = sig_dt.astimezone(timezone.utc).date() if sig_dt else None
+    ladder_days = _latest_ladder_by_day(reader)
+    signal_is_dated = (
+        sig_day is not None and bool(ladder_days)
+        and max(ladder_days) == sig_day
+    )
+
+    cols = st.columns(4)
+    # Name the actual interval. The previous reading is only yesterday's
+    # when the cron did not miss a day; after a gap this tile would
+    # otherwise present a ten-day move as an overnight one.
+    cols[0].metric(
+        f"Equity ({quote})",
+        f"{equity:,.2f}" if equity is not None else "—",
+        delta=(f"{eq_delta:+,.2f} {_interval_label(eq_gap)}"
+               if eq_delta is not None else None),
+        # 'off', never 'normal': equity moves on deposits and withdrawals
+        # too, so a green delta would sell a capital top-up as profit —
+        # the exact conflation the execution-tracking layer refuses to
+        # make. This tile reports a level change, not a return.
+        delta_color="off",
+    )
+    # A delta is only shown beside a KNOWN value. Pairing "—" with a
+    # historical change (latest cycle failed, older signal rows remain)
+    # would describe a movement of a quantity the tile just admitted it
+    # cannot read.
+    ladder = _numeric(sig.get("ladder_value"))
+    ladder_delta, ladder_gap = (
+        _ladder_prev_day_delta(reader)
+        if ladder is not None and signal_is_dated else (None, None)
+    )
+    cols[1].metric(
+        "Ladder",
+        f"{ladder:.2f}" if ladder is not None else "—",
+        delta=(f"{ladder_delta:+.2f} {_interval_label(ladder_gap)}"
+               if ladder_delta is not None else None),
+        delta_color="normal" if ladder_delta else "off",
+    )
+    gate_label = _gate_label(sig.get("sma_gate_open"))
+    cols[2].metric(
+        "SMA(200) gate",
+        gate_label,
+        delta=(f"{gate_days}d {gate_state}"
+               if gate_days is not None and gate_label != "—"
+               and signal_is_dated else None),
+        delta_color="off",
+        # State, not magnitude: without this Streamlit paints an upward
+        # arrow beside "12d OPEN" and categorical state reads as a
+        # numeric improvement.
+        delta_arrow="off",
+    )
+    cols[3].metric(
+        "Last LIVE",
+        _humanize_relative((live or {}).get("ended_at")),
+        delta=(str(live.get("outcome") or "?").upper()
+               if live is not None else None),
+        delta_color="off",
+        delta_arrow="off",
+    )
 
 
 def _distinct_commits(cycles: list) -> list:
@@ -1366,7 +1579,14 @@ def _render_portfolio(reader: JournalReader) -> None:
     )
 
     cols = st.columns(3)
-    cols[0].metric(f"Equity ({quote})", f"{equity:,.2f}")
+    # Display '—', not the 0.0 the arithmetic falls back to: a cycle that
+    # never read the exchange has UNKNOWN equity, and rendering that as
+    # "0.00" on a real-money page claims the book is empty. The numeric
+    # fallback stays — the drift-% math below already guards equity > 0.
+    cols[0].metric(
+        f"Equity ({quote})",
+        f"{equity:,.2f}" if latest.get("equity_usd") is not None else "—",
+    )
     cols[1].metric(f"Total target ({quote})", f"{total_target:,.2f}")
     cols[2].metric(
         f"Total drift ({quote})",
@@ -1980,8 +2200,7 @@ def _about_dialog() -> None:
         "**trade-lab** backtests crypto-spot strategies with a **layered-"
         "honesty** stack — every edge is shown net-of-cost, then out-of-"
         "sample, then as a Deflated Sharpe Ratio at a fixed budget (N=500). "
-        "One strategy survived every layer and is **paper-trading live on "
-        "Binance testnet** — that is what this dashboard shows.\n\n"
+        f"One strategy survived every layer and {_environment_copy()[1]}\n\n"
         "Below is the master results index; full writeups are in the "
         "**Research** tab."
     )
@@ -2153,6 +2372,7 @@ def _render_dashboard() -> None:
                 f"TRADE_LAB_MONITORING_JOURNAL_PATH*."
             )
     _render_tab_safely("Health", lambda: _render_health_line(reader))
+    _render_tab_safely("KPI row", lambda: _render_kpi_row(reader))
 
     (tab_status, tab_signal, tab_portfolio, tab_cycles,
      tab_validation, tab_research) = st.tabs(
@@ -2224,7 +2444,7 @@ def main() -> None:
             _about_dialog()
     # Three tight lines (trailing double-space = markdown hard break).
     st.caption(
-        "Read-only dashboard for gistrec's paper-trading bot.  \n"
+        f"{_environment_copy()[0]}  \n"
         "See the **Research** tab for all findings & results.  \n"
         f"Auto-refreshes every {REFRESH_SECONDS}s."
     )
