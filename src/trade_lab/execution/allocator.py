@@ -20,13 +20,44 @@ fully invested at the index's current weights, ``s = 0.5`` → half of each
 (the backtest's pro-rata semantics).
 
 Sizing to ``w_i`` — not flat ``1/N`` — is what makes live execution
-replicate the backtest. Between monthly rebalances the drifted-weight
-target tracks the drifted holdings, so the per-asset deltas fall below
-the exchange minimums and no orders fire; real orders only fire at the
-month-start weight reset and on signal changes — the same turnover
-profile the backtest measured. Flat ``1/N`` would instead force a
-full rebalance every daily cycle, adding turnover the backtest never
-paid (C3 / Option B).
+replicate the backtest. Flat ``1/N`` would force a full rebalance every
+daily cycle, adding turnover the backtest never paid (C3 / Option B).
+
+**The quiet-between-rebalances claim holds only at ``s ∈ {0, 1}``.**
+There the drifted-weight target tracks the drifted holdings exactly, the
+per-asset deltas fall below the exchange minimums, and no orders fire —
+real orders come only from the month-start weight reset and from signal
+changes. At a partial rung the target is ``s × equity``, which moves
+*slower* than the holdings it is compared against:
+
+    target / holding = (1 + s·r_b) / (1 + r_b)  ≠  1   for  r_b ≠ 0
+
+so each cycle leaves a **relever residual** of ``(1 - s)·r_b / (1 + r_b)``
+of the invested notional — a sell in an up-move, a buy in a down-move.
+At ``s = 0.5`` on a basket up 10% that is 4.5% of the held notional.
+Verified against this module and ``compute_delta_plan``: a 10 000 USDT
+book at ``s = 0.5``, basket +10%, weights and signal both unchanged,
+produces 7 SELL intents totalling 250 USDT.
+
+The residual is not a bug and must not be "fixed": re-levering to
+``s × equity`` IS the backtest's exposure model, which holds
+``position = 0.5`` and charges turnover only on ``|Δposition|`` — free
+by construction on those bars. The divergence is in the *costs*, and it
+lands in one of two places depending on book size:
+
+* large enough book — the residual trades, paying fees the DSR model
+  never charged (~0.15% of a few percent of the book per trending month);
+* today's book (~150 USDT) — every residual is sub-minimum, so it
+  accumulates in ``total_skipped_quote_drift`` instead, and live exposure
+  compounds away from the rung (52.4% rather than 50% after a +10% move).
+
+The ladder spends real time at 0.5 (half the lookbacks agreeing), so
+this is a live regime, not a hypothetical. When reconciling live against
+the backtest, treat this term as an EXPECTED, attributable source of
+divergence — otherwise it masks genuine execution bugs. This function
+cannot tag it mechanically: telling a relever residual from a real
+signal change needs the previous cycle's signal, which a pure
+target-from-signal calculation does not have.
 
 Target quantity per asset:
 
