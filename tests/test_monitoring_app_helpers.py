@@ -2085,16 +2085,17 @@ def test_environment_copy_follows_the_configured_sources(monkeypatch):
     assert "Environment control above the tabs" in modal
     assert "sidebar" not in modal            # there is no sidebar control
 
+    # Single source: the lone key is always "testnet" (the base path is
+    # registered unconditionally) and it is a DEFAULT LABEL, not a claim —
+    # the bot behind it can be pointed at mainnet. The banner derives the
+    # environment from journal content, so this copy must name neither.
     monkeypatch.setattr(app, "JOURNAL_SOURCES", {"testnet": "t.jsonl"})
     caption, modal = app._environment_copy()
-    assert "real money" not in caption, caption
-    assert "mainnet" not in caption.lower(), caption
-    assert "testnet" in modal
-
-    monkeypatch.setattr(app, "JOURNAL_SOURCES", {"mainnet": "m.jsonl"})
-    caption, modal = app._environment_copy()
-    assert "mainnet (real money, capped)" in caption
-    assert "testnet" not in caption.lower(), caption
+    for text in (caption, modal):
+        assert "mainnet" not in text.lower(), text
+        assert "testnet" not in text.lower(), text
+        assert "paper" not in text.lower(), text
+    assert "banner above" in caption and "banner above" in modal
 
 
 def test_kpi_state_deltas_carry_no_direction_arrow(tmp_path, monkeypatch):
@@ -2376,3 +2377,35 @@ def test_ladder_delta_reports_its_gap_like_equity_does():
     assert _interval_label(gap) == "over 10d"
     assert _interval_label(1) == "vs prior day"
     assert _interval_label(None) == ""
+
+
+def test_day_buckets_use_utc_not_the_written_offset():
+    """parse_iso preserves the offset, so .date() on a non-UTC timestamp
+    (the cron once ran on MSK) buckets by the LOCAL calendar day. Around
+    midnight that splits one UTC day in two — and the gap label built
+    from these keys would then be wrong."""
+    from trade_lab.monitoring.app import (
+        _equity_prev_day_delta, _ladder_prev_day_delta,
+    )
+
+    # Both instants are 2026-08-25 in UTC (21:00Z and 22:30Z), but the
+    # first is written as 2026-08-26 00:00 +03:00 (MSK).
+    reader = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
+        ("2026-08-26T00:00:00+03:00", 110.0, "USDT"),   # = 08-25 21:00Z
+    ])
+    equity, _q, delta, gap = _equity_prev_day_delta(reader)
+    assert equity == 110.0
+    assert gap == 1, gap        # 08-24 -> 08-25 in UTC, not 08-24 -> 08-26
+
+    class _R:
+        def cycles(self, n=20):
+            return [
+                {"signal": {"asof": "2026-08-24T12:00:00+00:00",
+                            "ladder_value": 0.0}},
+                {"signal": {"asof": "2026-08-26T00:00:00+03:00",
+                            "ladder_value": 1.0}},
+            ]
+
+    _delta, ladder_gap = _ladder_prev_day_delta(_R())
+    assert ladder_gap == 1, ladder_gap

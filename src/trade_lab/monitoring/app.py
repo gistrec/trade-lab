@@ -209,9 +209,7 @@ def _environment_copy() -> tuple[str, str]:
     advertise a real-money account it cannot see, which is the #23 defect
     with the environments swapped.
     """
-    has_main = "mainnet" in JOURNAL_SOURCES
-    has_test = "testnet" in JOURNAL_SOURCES
-    if has_main and has_test:
+    if len(JOURNAL_SOURCES) > 1:
         return (
             "Read-only monitoring for a live TSMOM strategy — Binance "
             "mainnet (real money, capped) + testnet paper environment.",
@@ -220,18 +218,18 @@ def _environment_copy() -> tuple[str, str]:
             "environment. Both journals feed this dashboard — switch with "
             "the Environment control above the tabs.",
         )
-    if has_main:
-        return (
-            "Read-only monitoring for a live TSMOM strategy — Binance "
-            "mainnet (real money, capped).",
-            "has been **trading live on Binance mainnet since 2026-08-24 "
-            "with capped capital** — that is the journal this page reads.",
-        )
+    # Single source: stay environment-NEUTRAL. The lone key is always
+    # "testnet" (the base path is registered unconditionally), and that
+    # key is a default label, not a claim — the bot behind it can be
+    # pointed at mainnet. The top banner derives the environment from
+    # journal CONTENT (context.sandbox), so naming one here could put
+    # this copy in direct contradiction with a red REAL MONEY warning.
     return (
-        "Read-only monitoring for a TSMOM strategy — Binance testnet "
-        "paper environment.",
-        "is paper-trading on the **Binance testnet** — that is the journal "
-        "this deployment is configured to read.",
+        "Read-only monitoring for a live TSMOM strategy — reads one "
+        "configured journal; the banner above states which environment "
+        "that journal actually reports.",
+        "is the one this deployment is configured to read — the banner "
+        "above names the environment its cycles actually report.",
     )
 
 
@@ -1042,7 +1040,7 @@ def _latest_ladder_by_day(reader: JournalReader) -> dict:
         lv = _numeric(sig.get("ladder_value"))
         if dt is None or lv is None:
             continue
-        by_day[dt.date()] = lv
+        by_day[dt.astimezone(timezone.utc).date()] = lv   # UTC, see above
     return by_day
 
 
@@ -1109,7 +1107,13 @@ def _equity_prev_day_delta(
         eq = _numeric(c.get("equity_usd"))
         if dt is None or eq is None:
             continue
-        by_day[dt.date()] = (eq, _cycle_context(c).get("quote_currency"))
+        # astimezone before .date(): parse_iso preserves the written
+        # offset, so a non-UTC timestamp (the cron once ran on MSK) would
+        # bucket by its LOCAL calendar day. Around midnight that either
+        # splits one UTC day in two or merges two into one, and the gap
+        # label built from these keys would be wrong either way.
+        by_day[dt.astimezone(timezone.utc).date()] = (
+            eq, _cycle_context(c).get("quote_currency"))
     if not by_day:
         return None, None, None, None
     days = sorted(by_day)
