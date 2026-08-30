@@ -1896,12 +1896,12 @@ def _equity_reader(points):
 def test_equity_delta_none_without_two_distinct_days():
     from trade_lab.monitoring.app import _equity_prev_day_delta
 
-    assert _equity_prev_day_delta(_equity_reader([])) == (None, None)
+    assert _equity_prev_day_delta(_equity_reader([])) == (None, None, None)
     one_day = _equity_reader([
         ("2026-08-25T06:00:00+00:00", 100.0),
         ("2026-08-25T18:00:00+00:00", 101.0),
     ])
-    assert _equity_prev_day_delta(one_day) == (101.0, None)
+    assert _equity_prev_day_delta(one_day) == (101.0, None, None)
 
 
 def test_equity_delta_compares_last_of_day_not_consecutive_cycles():
@@ -1915,9 +1915,10 @@ def test_equity_delta_compares_last_of_day_not_consecutive_cycles():
         ("2026-08-25T00:00:00+00:00", 105.0),
         ("2026-08-25T12:00:00+00:00", 110.0),   # last of 08-25
     ])
-    latest, delta = _equity_prev_day_delta(reader)
+    latest, delta, gap = _equity_prev_day_delta(reader)
     assert latest == 110.0
     assert delta == pytest.approx(8.0)          # 110 − 102, not 110 − 105
+    assert gap == 1
 
 
 def test_kpi_row_renders_money_and_state_above_the_tabs(tmp_path, monkeypatch):
@@ -2275,3 +2276,67 @@ def test_config_hash_is_not_cached_across_a_config_change(monkeypatch):
     monkeypatch.setattr(config, "production_config_hash",
                         lambda *_a, **_k: "f" * 64)
     assert _cached_config_hash() == "f" * 64 != before
+
+
+def _equity_reader_q(points):
+    """Like _equity_reader but each point carries its own quote currency."""
+    cycles = [
+        {"outcome": "success", "ended_at": ts, "equity_usd": eq,
+         "context": {"quote_currency": q}}
+        for ts, eq, q in points
+    ]
+
+    class _R:
+        def cycles(self, n=20):
+            return cycles[-n:]
+
+    return _R()
+
+
+def test_equity_delta_reports_the_real_gap_not_an_assumed_day():
+    """After missed cycles the two most recent readings can be far apart.
+    Presenting a ten-day move as an overnight one would misstate the only
+    money number on the first screen."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    reader = _equity_reader([
+        ("2026-08-15T12:00:00+00:00", 100.0),
+        ("2026-08-25T12:00:00+00:00", 150.0),
+    ])
+    latest, delta, gap = _equity_prev_day_delta(reader)
+    assert (latest, delta, gap) == (150.0, 50.0, 10)
+
+
+def test_equity_delta_refuses_non_finite_readings():
+    """equity_series passes NaN/inf through float(); the tile would then
+    render 'nan' and produce a '+nan' delta."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    reader = _equity_reader([
+        ("2026-08-24T12:00:00+00:00", 100.0),
+        ("2026-08-25T12:00:00+00:00", float("nan")),
+    ])
+    latest, delta, gap = _equity_prev_day_delta(reader)
+    assert latest == 100.0        # the corrupt day is dropped, not shown
+    assert delta is None and gap is None
+
+
+def test_equity_delta_refuses_to_subtract_across_quote_currencies():
+    """The environment guard validates exchange and sandbox, not the
+    quote. Subtracting a USDT balance from a USDC one yields a number
+    with no meaning — and the tile labels it with the latest currency."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    reader = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
+        ("2026-08-25T12:00:00+00:00", 95.0, "USDC"),
+    ])
+    latest, delta, gap = _equity_prev_day_delta(reader)
+    assert latest == 95.0
+    assert delta is None and gap is None
+    # Same currency on both sides still compares.
+    same = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
+        ("2026-08-25T12:00:00+00:00", 95.0, "USDT"),
+    ])
+    assert _equity_prev_day_delta(same) == (95.0, pytest.approx(-5.0), 1)

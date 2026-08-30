@@ -1062,24 +1062,44 @@ def _ladder_prev_day_delta(reader: JournalReader) -> Optional[float]:
 
 def _equity_prev_day_delta(
     reader: JournalReader,
-) -> tuple[Optional[float], Optional[float]]:
-    """``(latest equity, change vs the previous distinct day)``.
+) -> tuple[Optional[float], Optional[float], Optional[int]]:
+    """``(latest equity, change vs the previous reading, days apart)``.
 
     Last-of-day like :func:`_ladder_prev_day_delta`: ~24 dry-run cycles a
     day would otherwise make an intraday repeat read as a change. Keyed on
     ``ended_at``, since ``equity_usd`` is stamped when the cycle read the
     exchange, not on the signal bar it acts upon.
+
+    Three things are refused rather than compared:
+
+    * non-finite readings — a journalled ``NaN`` / ``inf`` would render as
+      ``nan`` and poison the delta (``equity_series`` passes them through);
+    * a currency switch — subtracting a USDC balance from an earlier USDT
+      one produces a number with no meaning, and the environment guard
+      only validates exchange and sandbox, not the quote;
+    * the gap is returned, not assumed — after missed cycles the two most
+      recent dates can be ten days apart, and the caller must not label
+      that "vs prior day".
     """
     by_day: dict = {}
-    for dt, eq in equity_series(reader.cycles(n=500)):
-        by_day[dt.date()] = eq
+    for c in reader.cycles(n=500):
+        if c.get("outcome") != "success":
+            continue
+        dt = parse_iso(c.get("ended_at"))
+        eq = _numeric(c.get("equity_usd"))
+        if dt is None or eq is None:
+            continue
+        by_day[dt.date()] = (eq, _cycle_context(c).get("quote_currency"))
     if not by_day:
-        return None, None
+        return None, None, None
     days = sorted(by_day)
-    latest = by_day[days[-1]]
+    latest, latest_quote = by_day[days[-1]]
     if len(days) < 2:
-        return latest, None
-    return latest, latest - by_day[days[-2]]
+        return latest, None, None
+    prev, prev_quote = by_day[days[-2]]
+    if prev_quote != latest_quote:
+        return latest, None, None
+    return latest, latest - prev, (days[-1] - days[-2]).days
 
 
 def _render_kpi_row(reader: JournalReader) -> None:
@@ -1092,15 +1112,21 @@ def _render_kpi_row(reader: JournalReader) -> None:
     latest = reader.latest_cycle()
     sig = (latest or {}).get("signal") or {}
     quote = _cycle_context(latest).get("quote_currency") or "USD"
-    equity, eq_delta = _equity_prev_day_delta(reader)
+    equity, eq_delta, eq_gap = _equity_prev_day_delta(reader)
     gate_state, gate_days = _gate_state_duration_days(reader)
     live = reader.latest_live_cycle()
 
     cols = st.columns(4)
+    # Name the actual interval. The previous reading is only yesterday's
+    # when the cron did not miss a day; after a gap this tile would
+    # otherwise present a ten-day move as an overnight one.
+    eq_since = (
+        "vs prior day" if eq_gap == 1 else f"over {eq_gap}d"
+    ) if eq_gap is not None else ""
     cols[0].metric(
         f"Equity ({quote})",
         f"{equity:,.2f}" if equity is not None else "—",
-        delta=(f"{eq_delta:+,.2f} vs prior day"
+        delta=(f"{eq_delta:+,.2f} {eq_since}"
                if eq_delta is not None else None),
         # 'off', never 'normal': equity moves on deposits and withdrawals
         # too, so a green delta would sell a capital top-up as profit —

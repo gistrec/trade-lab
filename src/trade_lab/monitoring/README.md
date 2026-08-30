@@ -1,11 +1,18 @@
 # trade-lab monitoring
 
-Read-only dashboard for the live trading bot — Binance mainnet (real
-money, capped) since 2026-08-24, plus the testnet paper environment as a
-second source. Reads the bot's
+Read-only dashboard for the trading bot. Reads the bot's
 append-only journal and exposes status, signal, portfolio drift, and
 recent cycles. **No control buttons, no exchange access, no API
 credentials.** The bot writes; this UI reads.
+
+Which environment it monitors depends on configuration, and the page copy
+follows it: `TRADE_LAB_MONITORING_JOURNAL_PATH` alone gives a
+single-source dashboard (the setup below configures the testnet
+`cycles.jsonl`), while additionally setting the optional
+`TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET` adds the mainnet journal —
+real money, capped, live since 2026-08-24 — and grows the environment
+switcher. The deployed instance at
+[trade-lab.gistrec.cloud](https://trade-lab.gistrec.cloud/) runs both.
 
 ## Architecture
 
