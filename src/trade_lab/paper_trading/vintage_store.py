@@ -18,9 +18,12 @@ revisions:
 * Loading by hash verifies the file contents still hash to the same
   value — a bit-flip on disk or an editor accidentally rewriting the
   file is loud at read time.
-* Writes are atomic (tmpfile + rename), so a crash mid-write cannot
-  produce a partially-written snapshot whose hash mismatches its
-  filename.
+* Writes are atomic AND durable (tmpfile + fsync + rename + directory
+  fsync), so neither a crash mid-write nor a power loss just after it
+  can produce a partially-written snapshot whose hash mismatches its
+  filename. Durability matters more here than for most caches: a
+  vintage is the evidence of what the exchange returned that day, and
+  the look-ahead detector cannot re-derive it.
 
 Serialization is canonical text (not parquet) for two reasons:
 parquet's byte representation is not stable across pyarrow versions
@@ -30,6 +33,7 @@ needs to be able to read it.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -111,8 +115,23 @@ def store_vintage(
         return h
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_bytes(payload)
+    # fsync the file AND its directory before/after the rename. rename() is
+    # atomic with respect to other readers, but on its own it is not durable:
+    # after a power loss the entry can land pointing at a file whose bytes
+    # never reached the platter, leaving an empty snapshot under a hash-named
+    # path. load_vintage would catch that loudly — but the evidence of what
+    # the exchange actually returned that day is gone for good, and unlike
+    # the journal (which IS fsynced) it cannot be re-derived.
+    with open(tmp, "wb") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.rename(p)
+    dir_fd = os.open(p.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
     return h
 
 

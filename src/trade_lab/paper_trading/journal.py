@@ -92,25 +92,39 @@ def append_row(row: HarnessLogRow, log_path: Path) -> None:
 
 
 def read_log(log_path: Path) -> list[HarnessLogRow]:
-    """Read the journal and return rows. Partial / corrupted final
-    line is skipped silently (see crash-safety note in
-    :func:`append_row`).
+    """Read the journal and return rows.
+
+    Only a corrupt FINAL line is tolerated — that is the crash-mid-write
+    case :func:`append_row` documents, and the row was never completed.
+    A corrupt line anywhere else means bytes were lost from history
+    (disk fault, a merge conflict, an editor), and dropping it silently
+    is worse than failing: the fingerprint monitor would compute flip
+    and drawdown streaks over a series with an invisible hole, and the
+    look-ahead detector would simply never replay the missing days.
     """
     log_path = Path(log_path)
     if not log_path.exists():
         return []
+    raw = [
+        (n, s) for n, s in
+        ((n, line.strip()) for n, line in enumerate(
+            log_path.read_text(encoding="utf-8").splitlines(), start=1))
+        if s
+    ]
     rows: list[HarnessLogRow] = []
-    with open(log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                # Last line truncated by a crash mid-write; drop it.
-                continue
-            rows.append(HarnessLogRow(**data))
+    for idx, (lineno, line) in enumerate(raw):
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if idx == len(raw) - 1:
+                continue          # truncated final append; never completed
+            raise ValueError(
+                f"{log_path}: line {lineno} of {len(raw)} is not valid JSON "
+                f"({exc}). This is NOT the crash-mid-write case — a corrupt "
+                f"line in the middle means history was lost. Repair the "
+                f"journal; the monitors must not run on a holed series."
+            ) from exc
+        rows.append(HarnessLogRow(**data))
     return rows
 
 

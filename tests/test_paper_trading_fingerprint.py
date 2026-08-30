@@ -15,6 +15,7 @@ from trade_lab.paper_trading.fingerprint import (
     save_reference,
 )
 from trade_lab.paper_trading.fingerprint_cli import main as fingerprint_cli_main
+from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
 from trade_lab.paper_trading.fingerprint_monitor import (
     DEFAULT_MULTI_METRIC_THRESHOLD,
     check_journal_against_reference,
@@ -124,11 +125,19 @@ def test_fingerprint_load_raises_on_hash_mismatch(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _ref_to_tmp(tmp_path, **kwargs):
+    """Reference the MONITOR will accept.
+
+    The monitor now refuses a fingerprint built for another config, so a
+    usable reference must carry the pinned literal — an arbitrary hash
+    here would test the guard rather than the metric logic. The pure
+    fingerprint tests above keep using placeholder hashes: they never go
+    through the monitor.
+    """
     close, pos, equity, sma, idx = _synthetic_series()
     fp = compute_reference_fingerprint(
         basket_close=close, positions=pos, equity=equity, sma_series=sma,
         window_start=idx[0], window_end=idx[-1],
-        frozen_config_hash="x" * 64,
+        frozen_config_hash=FROZEN_CONFIG_HASH,
         **kwargs,
     )
     p = tmp_path / "ref.json"
@@ -153,7 +162,10 @@ def _journal_row(date_iso: str, ladder: float, equity: float, sma_open: bool = T
 
 def test_monitor_empty_journal(tmp_path):
     ref_p, _ = _ref_to_tmp(tmp_path)
+    # The file must EXIST and be empty: a missing path is now a hard
+    # error, because it is indistinguishable from a typo'd --log-path.
     log_p = tmp_path / "log.jsonl"
+    log_p.write_text("")
     report = check_journal_against_reference(log_p, ref_p)
     assert report.journal_n_rows == 0
     assert "empty" in report.advisory.lower()
@@ -290,7 +302,10 @@ def test_monitor_handles_corrupted_reference_loud(tmp_path):
     data = json.loads(ref_p.read_text())
     data["n_bars"] = 99999
     ref_p.write_text(json.dumps(data, indent=2))
+    # Give it a real (empty) journal: the missing-path guard fires first
+    # and would mask the reference error this test is about.
     log_p = tmp_path / "log.jsonl"
+    log_p.write_text("")
     with pytest.raises(ValueError, match="content-hash mismatch"):
         check_journal_against_reference(log_p, ref_p)
 

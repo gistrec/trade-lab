@@ -1,0 +1,230 @@
+"""Целостность валидационного слоя: сортировка, гейты, durability."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
+from trade_lab.paper_trading.journal import HarnessLogRow, append_row
+
+
+def _row(date: str, *, ladder: float = 0.5, equity: float = 10_000.0) -> HarnessLogRow:
+    return HarnessLogRow(
+        date=date,
+        config_hash="abc123",
+        vintage_content_hash="def456",
+        ladder_state=ladder,
+        sma_gate_open=True,
+        basket_close=100.0,
+        sma_value=90.0,
+        prior_ladder_state=ladder,
+        per_lookback_states={"28": 1, "60": 0},
+        per_lookback_returns={"28": 0.01, "60": -0.01},
+        target_weights={},
+        current_weights={},
+        intended_trades={},
+        portfolio_equity=equity,
+        daily_return=0.0,
+        gross_position_return=0.0,
+        net_position_return=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backfill: positional metrics over file order
+# ---------------------------------------------------------------------------
+
+
+def test_live_metrics_sort_by_date_not_file_order():
+    """The harness supports backfilling a missed day, which appends an
+    EARLIER date after later ones. diff()/cummax()/rolling() are all
+    positional, so file order silently corrupts flip and drawdown."""
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        compute_live_metrics_from_journal,
+    )
+
+    # Equity peaks on 06-02 and falls on 06-03; the 06-02 row is BACKFILLED
+    # afterwards, so in file order the peak arrives last.
+    in_order = [_row("2026-06-01", equity=10_000.0),
+                _row("2026-06-02", equity=12_000.0),
+                _row("2026-06-03", equity=9_000.0)]
+    backfilled = [_row("2026-06-01", equity=10_000.0),
+                  _row("2026-06-03", equity=9_000.0),
+                  _row("2026-06-02", equity=12_000.0)]
+
+    a = compute_live_metrics_from_journal(
+        in_order, rolling_window_days=30, annualization_factor=365)
+    b = compute_live_metrics_from_journal(
+        backfilled, rolling_window_days=30, annualization_factor=365)
+
+    assert list(a["drawdown"].index) == list(b["drawdown"].index)
+    assert a["drawdown"].tolist() == pytest.approx(b["drawdown"].tolist())
+    # The real drawdown is 9000 vs the 12000 peak = -25%.
+    assert a["drawdown"].min() == pytest.approx(-0.25)
+
+
+def test_live_metrics_backfill_does_not_manufacture_flips():
+    """A ladder that never moved must report no rebalance events, even
+    when a backfilled row lands out of order."""
+    import pandas as pd
+
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        compute_live_metrics_from_journal,
+    )
+
+    # The ladder moves exactly ONCE, on 06-03. With 06-02 backfilled after
+    # 06-03, file order reads 0 -> 1 -> 0 and reports TWO events.
+    rows = [_row("2026-06-01", ladder=0.0),
+            _row("2026-06-03", ladder=1.0),
+            _row("2026-06-02", ladder=0.0)]     # backfilled last
+    live = compute_live_metrics_from_journal(
+        rows, rolling_window_days=30, annualization_factor=365)
+    assert len(live["rebalance_events"]) == 1
+    assert live["rebalance_events"].index[0] == pd.Timestamp(
+        "2026-06-03", tz="UTC")
+
+
+# ---------------------------------------------------------------------------
+# Two gates that could not fire
+# ---------------------------------------------------------------------------
+
+
+def _reference(tmp_path: Path, *, config_hash: str) -> Path:
+    """Reference built on the same synthetic series the fingerprint tests
+    use — enough structure that the bands are non-degenerate."""
+    import numpy as np
+    import pandas as pd
+
+    from trade_lab.paper_trading.fingerprint import (
+        compute_reference_fingerprint, save_reference,
+    )
+
+    n = 1000
+    idx = pd.date_range("2022-01-21", periods=n, freq="D", tz="UTC")
+    rng = np.random.default_rng(0)
+    close = pd.Series(
+        100.0 * np.exp(np.cumsum(rng.normal(0.0005, 0.03, size=n))), index=idx)
+    pos = pd.Series(0.0, index=idx)
+    for i in range(n):
+        if i % 30 == 0:
+            pos.iloc[i:] = rng.choice([0.0, 0.5, 1.0])
+    port_ret = pos.shift(1).fillna(0.0) * close.pct_change().fillna(0.0)
+    equity = (1.0 + port_ret).cumprod() * 10_000.0
+
+    fp = compute_reference_fingerprint(
+        basket_close=close, positions=pos, equity=equity,
+        sma_series=close.rolling(200).mean(),
+        window_start=idx[0], window_end=idx[-1],
+        frozen_config_hash=config_hash,
+    )
+    out = tmp_path / "reference.json"
+    save_reference(fp, out)
+    return out
+
+
+def test_monitor_refuses_a_reference_built_for_another_config(tmp_path):
+    """Nothing checked reference.frozen_config_hash, so a fingerprint
+    generated for a DIFFERENT strategy config would silently supply the
+    bands every live cycle is judged against."""
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    ref = _reference(tmp_path, config_hash="0" * 64)
+
+    with pytest.raises(ValueError, match="built for config"):
+        check_journal_against_reference(log, ref)
+
+
+def test_monitor_accepts_a_reference_for_the_pinned_config(tmp_path):
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    ref = _reference(tmp_path, config_hash=FROZEN_CONFIG_HASH)
+    report = check_journal_against_reference(log, ref)
+    assert report is not None
+
+
+def test_monitor_refuses_a_missing_journal_instead_of_bootstrapping(tmp_path):
+    """read_log returns [] for a path that does not exist, so a typo in
+    --log-path or a cron in the wrong cwd (both CLI defaults are relative)
+    left the monitor printing 'no live data yet' and exiting 0 forever —
+    the shape of a healthy system with no monitoring at all."""
+    from trade_lab.paper_trading.fingerprint_monitor import (
+        check_journal_against_reference,
+    )
+
+    ref = _reference(tmp_path, config_hash=FROZEN_CONFIG_HASH)
+    with pytest.raises(FileNotFoundError, match="not an empty one"):
+        check_journal_against_reference(tmp_path / "typo.jsonl", ref)
+
+    # A genuinely empty file is still the bootstrap case: the file was
+    # found, there is simply nothing in it yet.
+    empty = tmp_path / "journal.jsonl"
+    empty.write_text("")
+    report = check_journal_against_reference(empty, ref)
+    assert report.journal_window is None
+
+
+# ---------------------------------------------------------------------------
+# Vintage durability: the evidence cannot be re-derived
+# ---------------------------------------------------------------------------
+
+
+def test_store_vintage_fsyncs_file_and_directory(tmp_path, monkeypatch):
+    """rename() is atomic for readers but not durable on its own: after a
+    power loss the entry can point at bytes that never reached the disk.
+    Unlike the journal, a vintage cannot be re-derived."""
+    import os
+
+    import pandas as pd
+
+    from trade_lab.paper_trading import vintage_store
+
+    synced: list[str] = []
+    real_fsync = os.fsync
+
+    def _tracking_fsync(fd):
+        try:
+            synced.append("dir" if os.path.isdir(f"/dev/fd/{fd}") else "file")
+        except OSError:                      # platform without /dev/fd
+            synced.append("fd")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(vintage_store.os, "fsync", _tracking_fsync)
+
+    idx = pd.date_range("2026-06-01", periods=3, freq="D", tz="UTC")
+    candles = {"BTC": pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+        index=idx)}
+    h = vintage_store.store_vintage(candles, tmp_path)
+
+    assert len(synced) == 2, synced      # the file, then its directory
+    assert vintage_store.vintage_path(tmp_path, h).exists()
+    # Round-trip still works.
+    assert "BTC" in vintage_store.load_vintage(h, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The reference builder must not stamp a recomputed hash
+# ---------------------------------------------------------------------------
+
+
+def test_reference_builder_stamps_the_literal_not_a_recomputed_hash():
+    """It used to write frozen_config_hash=CANONICAL_HASH — recomputed
+    from the very config object it was describing. On a machine with a
+    hotfixed config that generates a fingerprint FOR the edited strategy
+    and labels it 'frozen', with no warning."""
+    source = Path("scripts/build_reference_fingerprint.py").read_text()
+    assert "frozen_config_hash=FROZEN_CONFIG_HASH" in source
+    assert "CANONICAL_HASH" not in source.replace(
+        "# one. This script used to stamp the reference with CANONICAL_HASH,",
+        "")
+    # And it refuses outright when the running config has drifted.
+    assert "Refusing to build a reference" in source

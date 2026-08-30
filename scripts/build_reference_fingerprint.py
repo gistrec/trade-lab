@@ -20,13 +20,14 @@ import pandas as pd
 
 from trade_lab.backtest.engine import run_backtest
 from trade_lab.backtest.market_index import build_crypto_market_index
-from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG
+from trade_lab.config import PRODUCTION_CONFIG, production_config_hash
 from trade_lab.paper_trading.fingerprint import (
     compute_reference_fingerprint,
     fingerprint_content_hash,
     load_reference,
     save_reference,
 )
+from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
 from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
 
 VERIFIED_START = pd.Timestamp("2022-01-21", tz="UTC")
@@ -36,6 +37,23 @@ OUT_PATH = Path("paper_trading/fingerprint/reference_fingerprint.json")
 
 def main() -> int:
     cfg = PRODUCTION_CONFIG
+    # Refuse before doing any work if the running config is not the pinned
+    # one. This script used to stamp the reference with CANONICAL_HASH,
+    # recomputed from this very object — so on a machine with a hotfixed
+    # config it would happily generate a fingerprint FOR the edited
+    # strategy and label it "frozen", with no warning. The literal is the
+    # only reference that does not move with the thing it describes.
+    runtime_hash = production_config_hash(cfg)
+    if runtime_hash != FROZEN_CONFIG_HASH:
+        print(
+            f"FATAL: config hash drift — runtime={runtime_hash}, "
+            f"frozen={FROZEN_CONFIG_HASH}. Refusing to build a reference "
+            f"fingerprint for a config the harness itself would reject. "
+            f"If the drift is intentional, follow the new-research-cycle "
+            f"procedure in tests/test_production_config.py first.",
+            file=sys.stderr,
+        )
+        return 2
     asset_candles: dict[str, pd.DataFrame] = {}
     for sym in cfg.assets:
         p = Path(f"data/binance_{sym}_USDT_1d.parquet")
@@ -75,7 +93,7 @@ def main() -> int:
         sma_series=sma_series,
         window_start=VERIFIED_START,
         window_end=VERIFIED_END,
-        frozen_config_hash=CANONICAL_HASH,
+        frozen_config_hash=FROZEN_CONFIG_HASH,
     )
 
     save_reference(fp, OUT_PATH)
