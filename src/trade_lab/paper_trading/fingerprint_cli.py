@@ -25,6 +25,7 @@ from .fingerprint_monitor import (
     DEFAULT_MULTI_METRIC_THRESHOLD,
     check_journal_against_reference,
 )
+from .journal import JournalCorruptionError
 
 
 def _positive_int(value: str) -> int:
@@ -93,8 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         # exit 2 too, or they'd surface as 1 — the --fail-on-breach code.
         print(f"MONITOR ERROR: {exc}", file=sys.stderr)
         return 2
-    except ValueError as exc:
-        # content-hash mismatch on reference, etc.
+    except (ValueError, JournalCorruptionError) as exc:
+        # content-hash mismatch on reference, a reference built for another
+        # config, a corrupt journal line. All are tool errors the operator
+        # must repair — JournalCorruptionError is a RuntimeError, so without
+        # naming it here it would escape as a traceback and exit 1, which is
+        # also the --fail-on-breach code.
         print(f"MONITOR ERROR: {exc}", file=sys.stderr)
         return 2
 

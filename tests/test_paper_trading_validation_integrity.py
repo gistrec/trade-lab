@@ -333,3 +333,22 @@ def test_store_vintage_syncs_the_parent_when_the_shard_is_new(
     synced.clear()
     vintage_store.store_vintage(_candles(2.0), tmp_path)
     assert len(synced) in (2, 3), synced      # 3 only if it opened a new shard
+
+
+def test_monitor_cli_maps_journal_corruption_to_exit_2(tmp_path, capsys):
+    """JournalCorruptionError is a RuntimeError, so without naming it the
+    monitor CLI would emit a traceback and exit 1 — which is also the
+    documented --fail-on-breach code."""
+    from trade_lab.paper_trading.fingerprint_cli import main as monitor_main
+
+    log = tmp_path / "journal.jsonl"
+    for d in ("2026-06-01", "2026-06-02", "2026-06-03"):
+        append_row(_row(d), log)
+    lines = log.read_text().splitlines()
+    lines[1] = '{"date": "2026-06-02", "conf'          # corrupt, mid-file
+    log.write_text("\n".join(lines) + "\n")
+    ref = _reference(tmp_path, config_hash=FROZEN_CONFIG_HASH)
+
+    code = monitor_main(["--log-path", str(log), "--reference-path", str(ref)])
+    assert code == 2
+    assert "MONITOR ERROR" in capsys.readouterr().err
