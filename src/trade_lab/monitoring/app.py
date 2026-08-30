@@ -1121,7 +1121,10 @@ def _equity_prev_day_delta(
     if len(days) < 2:
         return latest, latest_quote, None, None
     prev, prev_quote = by_day[days[-2]]
-    if prev_quote != latest_quote:
+    # Both sides must be KNOWN and equal. `None == None` would call two
+    # undenominated readings comparable, which is the cross-currency
+    # subtraction this guard exists to refuse — just undetected.
+    if not latest_quote or not prev_quote or prev_quote != latest_quote:
         return latest, latest_quote, None, None
     return latest, latest_quote, latest - prev, (days[-1] - days[-2]).days
 
@@ -1136,12 +1139,28 @@ def _render_kpi_row(reader: JournalReader) -> None:
     latest = reader.latest_cycle()
     sig = (latest or {}).get("signal") or {}
     equity, eq_quote, eq_delta, eq_gap = _equity_prev_day_delta(reader)
-    # The reading's own currency, falling back to the latest cycle only
-    # when there is no reading to label.
-    quote = (eq_quote or _cycle_context(latest).get("quote_currency")
-             or "USD")
+    # The reading's own currency. The latest cycle is consulted only when
+    # there is NO reading to label — a reading whose own quote is missing
+    # is undenominated, and borrowing the newest cycle's currency would
+    # stamp a denomination onto a number that has none.
+    if equity is None:
+        quote = _cycle_context(latest).get("quote_currency") or "USD"
+    else:
+        quote = eq_quote or "?"
     gate_state, gate_days = _gate_state_duration_days(reader)
     live = reader.latest_live_cycle()
+    # Both signal deltas come from the DATED day series, which drops any
+    # cycle whose `asof` is missing or unparseable. The value can be
+    # perfectly readable while its timestamp is not — and then the tile
+    # would show today's reading beside a change computed entirely from
+    # older rows. Require the current signal to be the newest dated point.
+    sig_dt = parse_iso(sig.get("asof"))
+    sig_day = sig_dt.astimezone(timezone.utc).date() if sig_dt else None
+    ladder_days = _latest_ladder_by_day(reader)
+    signal_is_dated = (
+        sig_day is not None and bool(ladder_days)
+        and max(ladder_days) == sig_day
+    )
 
     cols = st.columns(4)
     # Name the actual interval. The previous reading is only yesterday's
@@ -1164,7 +1183,8 @@ def _render_kpi_row(reader: JournalReader) -> None:
     # cannot read.
     ladder = _numeric(sig.get("ladder_value"))
     ladder_delta, ladder_gap = (
-        _ladder_prev_day_delta(reader) if ladder is not None else (None, None)
+        _ladder_prev_day_delta(reader)
+        if ladder is not None and signal_is_dated else (None, None)
     )
     cols[1].metric(
         "Ladder",
@@ -1178,7 +1198,8 @@ def _render_kpi_row(reader: JournalReader) -> None:
         "SMA(200) gate",
         gate_label,
         delta=(f"{gate_days}d {gate_state}"
-               if gate_days is not None and gate_label != "—" else None),
+               if gate_days is not None and gate_label != "—"
+               and signal_is_dated else None),
         delta_color="off",
         # State, not magnitude: without this Streamlit paints an upward
         # arrow beside "12d OPEN" and categorical state reads as a

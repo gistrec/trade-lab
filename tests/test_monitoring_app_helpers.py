@@ -2409,3 +2409,145 @@ def test_day_buckets_use_utc_not_the_written_offset():
 
     _delta, ladder_gap = _ladder_prev_day_delta(_R())
     assert ladder_gap == 1, ladder_gap
+
+
+def test_equity_delta_requires_both_currencies_to_be_known():
+    """`None == None` would call two undenominated readings comparable —
+    the cross-currency subtraction the guard exists to refuse, merely
+    undetected."""
+    from trade_lab.monitoring.app import _equity_prev_day_delta
+
+    both_unknown = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, None),
+        ("2026-08-25T12:00:00+00:00", 110.0, None),
+    ])
+    equity, quote, delta, gap = _equity_prev_day_delta(both_unknown)
+    assert equity == 110.0 and quote is None
+    assert delta is None and gap is None
+
+    newest_unknown = _equity_reader_q([
+        ("2026-08-24T12:00:00+00:00", 100.0, "USDT"),
+        ("2026-08-25T12:00:00+00:00", 110.0, ""),
+    ])
+    assert _equity_prev_day_delta(newest_unknown)[2] is None
+
+
+def test_kpi_does_not_borrow_a_currency_for_an_undenominated_reading(
+    tmp_path, monkeypatch,
+):
+    """The reading's own quote is missing, but the newest cycle has one.
+    Labelling it 'Equity (USDT)' would stamp a denomination onto a number
+    that has none."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, *, equity, quote, outcome="success"):
+        iso = ended.isoformat()
+        ctx = {"mode": "dry_run", "exchange": "binance", "sandbox": True,
+               "basket": ["BTC"]}
+        if quote is not None:
+            ctx["quote_currency"] = quote
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": outcome, "error": None,
+            "git_commit": None, "python_version": "3.11.0",
+            "context": ctx, "signal": None, "basket_close_series": None,
+            "balance": None, "equity_usd": equity,
+            "target_allocation": None, "current_holdings_quote": None,
+            "orders_planned": [], "orders_skipped": [],
+            "total_skipped_quote_drift": 0.0, "orders_executed": None,
+            "schema_version": 2,
+        }
+
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        # Newest successful equity reading carries NO quote currency...
+        _cycle("c1", now - timedelta(days=1), equity=100.0, quote=None),
+        # ...while the newest cycle (no equity) does.
+        _cycle("c2", now, equity=None, quote="USDT"),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    # The KPI row renders first; the Portfolio tab has its own equity tile
+    # labelled from its own cycle, which is self-consistent and untouched.
+    kpi_equity = next((m for m in app.metric
+                       if str(m.label).startswith("Equity (")), None)
+    assert kpi_equity is not None, [m.label for m in app.metric]
+    assert kpi_equity.label == "Equity (?)", kpi_equity.label
+    assert kpi_equity.value == "100.00"
+
+
+def test_kpi_suppresses_signal_deltas_when_the_current_asof_is_unusable(
+    tmp_path, monkeypatch,
+):
+    """The ladder value can be perfectly readable while its timestamp is
+    not. The day series drops that cycle, so the delta would describe
+    older rows entirely — beside a value labelled as current."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, signal):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": "success", "error": None,
+            "git_commit": None, "python_version": "3.11.0",
+            "context": {"mode": "live", "exchange": "binance",
+                        "sandbox": False, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": signal, "basket_close_series": None, "balance": None,
+            "equity_usd": 100.0, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": 0.0,
+            "orders_executed": None, "schema_version": 2,
+        }
+
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        _cycle("d1", now - timedelta(days=2),
+               {"asof": (now - timedelta(days=2)).date().isoformat(),
+                "ladder_value": 0.0, "sma_gate_open": False}),
+        _cycle("d2", now - timedelta(days=1),
+               {"asof": (now - timedelta(days=1)).date().isoformat(),
+                "ladder_value": 1.0, "sma_gate_open": True}),
+        # Readable value, unusable timestamp.
+        _cycle("d3", now,
+               {"asof": "not-a-date", "ladder_value": 1.0,
+                "sma_gate_open": True}),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    ladder = _first_metric(app, "Ladder")
+    gate = _first_metric(app, "SMA(200) gate")
+    assert ladder.value == "1.00"        # the value IS readable
+    assert ladder.delta == ""            # but not "+1.00 vs prior day"
+    assert gate.value == "OPEN"
+    assert gate.delta == ""
