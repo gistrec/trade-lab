@@ -1855,3 +1855,71 @@ def test_submin_notice_does_not_claim_no_live_cron_when_live_cycles_exist(
     assert len(submin) == 1, infos
     assert "no live order cron has run yet" not in submin[0], submin[0]
     assert "cumulative skipped drift across live cycles" in submin[0]
+
+
+def test_submin_notice_counts_live_ATTEMPTS_not_placed_orders(
+    tmp_path, monkeypatch,
+):
+    """A live cycle that raised before placing writes orders_executed=None,
+    so live_cycle_count() stays 0. Telling the operator "the cron never
+    ran" is exactly wrong when their cron ran and failed."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, *, mode, outcome, executed, drift):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": outcome, "error": None,
+            "git_commit": "aaaa111", "python_version": "3.11.0",
+            "context": {"mode": mode, "exchange": "binance",
+                        "sandbox": False, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": None, "basket_close_series": None, "balance": None,
+            "equity_usd": 100.0, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": drift,
+            "orders_executed": executed, "schema_version": 2,
+        }
+
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        # LIVE attempt that raised before placing: orders_executed is None.
+        _cycle("live1", now - timedelta(hours=6), mode="live",
+               outcome="failed", executed=None, drift=0.0),
+        _cycle("plan1", now, mode="dry_run", outcome="success",
+               executed=None, drift=1.16),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    submin = [str(i.value) for i in app.info
+              if "below the exchange minimum notional" in str(i.value)]
+    assert len(submin) == 1, [str(i.value) for i in app.info]
+    assert "no live order cron has run yet" not in submin[0], submin[0]
+
+
+def test_config_hash_is_not_cached_across_a_config_change(monkeypatch):
+    """The gate must reflect the config the process currently holds. A
+    zero-argument, no-TTL cache entry could outlive a module reload and
+    keep the tile green against a config the harness would reject."""
+    import trade_lab.config as config
+    from trade_lab.monitoring.app import _cached_config_hash
+
+    before = _cached_config_hash()
+    monkeypatch.setattr(config, "production_config_hash",
+                        lambda *_a, **_k: "f" * 64)
+    assert _cached_config_hash() == "f" * 64 != before

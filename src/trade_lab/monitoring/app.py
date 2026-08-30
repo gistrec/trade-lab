@@ -440,8 +440,13 @@ def _render_status(reader: JournalReader) -> None:
             # "no live cron has run yet" is a claim about the journal, not
             # about the drift sum: live cycles that skipped nothing also
             # leave the sum at zero, and on mainnet that made the page
-            # deny its own trading. Gate the claim on the live count.
-            never_traded = reader.live_cycle_count() == 0
+            # deny its own trading.
+            #
+            # ATTEMPT-aware, not live_cycle_count(): that counts rows with
+            # placed orders, so a live cycle that raised before placing
+            # leaves it at zero — and "the cron never ran" is exactly the
+            # wrong thing to tell an operator whose cron ran and failed.
+            never_traded = reader.latest_live_cycle() is None
             tail = (
                 "no live order cron has run yet, so nothing was skipped "
                 "in execution."
@@ -1646,8 +1651,16 @@ def _dir_sig(root: Path, pattern: str = "*.txt") -> tuple:
 # input files, so cache them on a file signature: recompute only when the
 # journal / reference / vintages actually change. ``sig`` is the cache key;
 # the ``_``-prefixed path args are excluded from Streamlit's arg hashing.
-@st.cache_data(show_spinner=False)
 def _cached_config_hash() -> str:
+    """SHA256 of the running PRODUCTION_CONFIG. Deliberately UNCACHED.
+
+    It used to carry ``@st.cache_data`` alongside the genuinely expensive
+    journal/vintage readers, but this is one hash of a small dataclass —
+    the cache bought nothing and could outlive the value it described:
+    Streamlit's watcher re-imports a changed local module while a
+    zero-argument, no-TTL cache entry keeps returning the pre-edit hash,
+    leaving the gate green against a config the harness would reject.
+    """
     from trade_lab.config import PRODUCTION_CONFIG, production_config_hash
     return production_config_hash(PRODUCTION_CONFIG)
 
