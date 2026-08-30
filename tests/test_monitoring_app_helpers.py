@@ -2033,3 +2033,179 @@ def test_kpi_row_shows_dashes_rather_than_fabricating_a_flat_book(
     # unknown, not zero. Both tiles for that label must agree.
     assert [m.value for m in app.metric if m.label == "Equity (USDT)"] == \
         ["—", "—"]
+
+
+# ---------------------------------------------------------------------------
+# Codex round on the KPI row + environment copy
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_rejects_what_as_float_would_coerce_to_a_real_rung():
+    """0.00 is a real ladder rung (flat), so a corrupt field must not
+    borrow it — and float(True) == 1.0 would conjure full exposure."""
+    from trade_lab.monitoring.app import _numeric
+
+    assert _numeric(0.5) == 0.5
+    assert _numeric("0.5") == 0.5
+    assert _numeric(0) == 0.0
+    for bad in (None, True, False, "abc", {}, [], float("nan"),
+                float("inf")):
+        assert _numeric(bad) is None, bad
+
+
+def test_ladder_day_series_drops_corrupt_readings_instead_of_zeroing_them():
+    """A non-numeric ladder entering the series as 0.0 would manufacture
+    a flip in the day-over-day delta."""
+    from trade_lab.monitoring.app import _ladder_prev_day_delta
+
+    class _R:
+        def cycles(self, n=20):
+            return [
+                {"signal": {"asof": "2026-08-24T00:00:00+00:00",
+                            "ladder_value": 1.0}},
+                {"signal": {"asof": "2026-08-25T00:00:00+00:00",
+                            "ladder_value": "corrupt"}},
+            ]
+
+    # Only one usable day remains -> no delta, rather than a fake -1.00.
+    assert _ladder_prev_day_delta(_R()) is None
+
+
+def test_environment_copy_follows_the_configured_sources(monkeypatch):
+    """A testnet-only deployment must not advertise a real-money account
+    it cannot see — the #23 defect with the environments swapped."""
+    import trade_lab.monitoring.app as app
+
+    monkeypatch.setattr(app, "JOURNAL_SOURCES",
+                        {"mainnet": "m.jsonl", "testnet": "t.jsonl"})
+    caption, modal = app._environment_copy()
+    assert "mainnet (real money, capped)" in caption
+    assert "testnet paper environment" in caption
+    assert "Environment control above the tabs" in modal
+    assert "sidebar" not in modal            # there is no sidebar control
+
+    monkeypatch.setattr(app, "JOURNAL_SOURCES", {"testnet": "t.jsonl"})
+    caption, modal = app._environment_copy()
+    assert "real money" not in caption, caption
+    assert "mainnet" not in caption.lower(), caption
+    assert "testnet" in modal
+
+    monkeypatch.setattr(app, "JOURNAL_SOURCES", {"mainnet": "m.jsonl"})
+    caption, modal = app._environment_copy()
+    assert "mainnet (real money, capped)" in caption
+    assert "testnet" not in caption.lower(), caption
+
+
+def test_kpi_state_deltas_carry_no_direction_arrow(tmp_path, monkeypatch):
+    """`12d OPEN` and `SUCCESS` are categorical. delta_color='off' only
+    greys the arrow; without delta_arrow='off' Streamlit still paints an
+    upward one and state reads as a numeric improvement."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    from streamlit.proto.Metric_pb2 import Metric as _MetricProto
+
+    now = datetime.now(timezone.utc)
+    iso = now.isoformat()
+    cycle = {
+        "cycle_id": "c1", "started_at": iso, "ended_at": iso,
+        "duration_ms": 5000, "outcome": "success", "error": None,
+        "git_commit": None, "python_version": "3.11.0",
+        "context": {"mode": "live", "exchange": "binance", "sandbox": False,
+                    "quote_currency": "USDT", "basket": ["BTC"]},
+        "signal": {"asof": now.date().isoformat(), "ladder_value": 1.0,
+                   "sma_gate_open": True, "basket_close": 100.0,
+                   "sma_value": 90.0},
+        "basket_close_series": None, "balance": None, "equity_usd": 100.0,
+        "target_allocation": None, "current_holdings_quote": None,
+        "orders_planned": [], "orders_skipped": [],
+        "total_skipped_quote_drift": 0.0,
+        "orders_executed": [{"symbol": "BTC/USDT", "side": "buy",
+                             "client_order_id": "tl-2026-08-24-BTC-buy",
+                             "terminal_status": "closed",
+                             "intended_amount": 1.0, "filled_amount": 1.0,
+                             "filled_notional_quote": 13.18}],
+        "schema_version": 2,
+    }
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text(json.dumps(cycle) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    none_dir = _MetricProto.MetricDirection.NONE
+    for label in ("SMA(200) gate", "Last LIVE"):
+        tile = _first_metric(app, label)
+        assert tile.proto.direction == none_dir, (
+            label, _MetricProto.MetricDirection.Name(tile.proto.direction)
+        )
+
+
+def test_kpi_suppresses_history_deltas_when_the_latest_cycle_has_no_signal(
+    tmp_path, monkeypatch,
+):
+    """A failed newest cycle leaves the tiles at '—'. The history helpers
+    still have older signal rows, so the deltas would describe a movement
+    of a quantity the tile just said it cannot read."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, signal, outcome="success"):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": outcome, "error": None,
+            "git_commit": None, "python_version": "3.11.0",
+            "context": {"mode": "live", "exchange": "binance",
+                        "sandbox": False, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": signal, "basket_close_series": None, "balance": None,
+            "equity_usd": 100.0, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": 0.0,
+            "orders_executed": None, "schema_version": 2,
+        }
+
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        _cycle("d1", now - timedelta(days=2),
+               {"asof": (now - timedelta(days=2)).date().isoformat(),
+                "ladder_value": 0.0, "sma_gate_open": False}),
+        _cycle("d2", now - timedelta(days=1),
+               {"asof": (now - timedelta(days=1)).date().isoformat(),
+                "ladder_value": 1.0, "sma_gate_open": True}),
+        # Newest cycle failed before producing a signal.
+        _cycle("d3", now, None, outcome="failed"),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    ladder = _first_metric(app, "Ladder")
+    gate = _first_metric(app, "SMA(200) gate")
+    assert ladder.value == "—"
+    assert ladder.delta == ""            # not "+1.00 vs prior day"
+    assert gate.value == "—"
+    assert gate.delta == ""              # not "1d OPEN"

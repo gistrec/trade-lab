@@ -32,6 +32,7 @@ an option — a full page reload throws away the active tab and session state.
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -179,6 +180,59 @@ def _gate_label(gate_open) -> str:
     if gate_open is False:
         return "CLOSED"
     return "—"
+
+
+def _numeric(value) -> Optional[float]:
+    """Journal field → float, or ``None`` when it is not a number.
+
+    Deliberately NOT :func:`as_float`, whose ``0.0`` fallback is right for
+    arithmetic and wrong for display: ``0.00`` is a real ladder rung (the
+    flat state), so a corrupt field must not borrow it. Booleans are
+    rejected too — ``float(True)`` is 1.0, a full-exposure reading
+    conjured out of a schema drift.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _environment_copy() -> tuple[str, str]:
+    """``(caption, modal clause)`` describing what THIS deployment reads.
+
+    Generated from :data:`JOURNAL_SOURCES`, the same dict that builds the
+    switcher. Hard-coding "mainnet + testnet" would make a testnet-only
+    deployment — the explicitly supported single-source configuration —
+    advertise a real-money account it cannot see, which is the #23 defect
+    with the environments swapped.
+    """
+    has_main = "mainnet" in JOURNAL_SOURCES
+    has_test = "testnet" in JOURNAL_SOURCES
+    if has_main and has_test:
+        return (
+            "Read-only monitoring for a live TSMOM strategy — Binance "
+            "mainnet (real money, capped) + testnet paper environment.",
+            "has been **trading live on Binance mainnet since 2026-08-24 "
+            "with capped capital**; the testnet source remains the paper "
+            "environment. Both journals feed this dashboard — switch with "
+            "the Environment control above the tabs.",
+        )
+    if has_main:
+        return (
+            "Read-only monitoring for a live TSMOM strategy — Binance "
+            "mainnet (real money, capped).",
+            "has been **trading live on Binance mainnet since 2026-08-24 "
+            "with capped capital** — that is the journal this page reads.",
+        )
+    return (
+        "Read-only monitoring for a TSMOM strategy — Binance testnet "
+        "paper environment.",
+        "is paper-trading on the **Binance testnet** — that is the journal "
+        "this deployment is configured to read.",
+    )
 
 
 def _config_gate_state(runtime_hash: str) -> tuple[bool, str]:
@@ -977,10 +1031,13 @@ def _latest_ladder_by_day(reader: JournalReader) -> dict:
     for c in reader.cycles(n=500):
         sig = c.get("signal") or {}
         dt = parse_iso(sig.get("asof"))
-        lv = sig.get("ladder_value")
+        # _numeric, not as_float: a corrupt ladder field would otherwise
+        # enter the series as a real 0.0 rung and manufacture a flip in
+        # the day-over-day delta.
+        lv = _numeric(sig.get("ladder_value"))
         if dt is None or lv is None:
             continue
-        by_day[dt.date()] = as_float(lv)
+        by_day[dt.date()] = lv
     return by_day
 
 
@@ -1046,20 +1103,30 @@ def _render_kpi_row(reader: JournalReader) -> None:
         # make. This tile reports a level change, not a return.
         delta_color="off",
     )
-    ladder = sig.get("ladder_value")
-    ladder_delta = _ladder_prev_day_delta(reader)
+    # A delta is only shown beside a KNOWN value. Pairing "—" with a
+    # historical change (latest cycle failed, older signal rows remain)
+    # would describe a movement of a quantity the tile just admitted it
+    # cannot read.
+    ladder = _numeric(sig.get("ladder_value"))
+    ladder_delta = _ladder_prev_day_delta(reader) if ladder is not None else None
     cols[1].metric(
         "Ladder",
-        f"{as_float(ladder):.2f}" if ladder is not None else "—",
+        f"{ladder:.2f}" if ladder is not None else "—",
         delta=(f"{ladder_delta:+.2f} vs prior day"
                if ladder_delta is not None else None),
         delta_color="normal" if ladder_delta else "off",
     )
+    gate_label = _gate_label(sig.get("sma_gate_open"))
     cols[2].metric(
         "SMA(200) gate",
-        _gate_label(sig.get("sma_gate_open")),
-        delta=(None if gate_days is None else f"{gate_days}d {gate_state}"),
+        gate_label,
+        delta=(f"{gate_days}d {gate_state}"
+               if gate_days is not None and gate_label != "—" else None),
         delta_color="off",
+        # State, not magnitude: without this Streamlit paints an upward
+        # arrow beside "12d OPEN" and categorical state reads as a
+        # numeric improvement.
+        delta_arrow="off",
     )
     cols[3].metric(
         "Last LIVE",
@@ -1067,6 +1134,7 @@ def _render_kpi_row(reader: JournalReader) -> None:
         delta=(str(live.get("outcome") or "?").upper()
                if live is not None else None),
         delta_color="off",
+        delta_arrow="off",
     )
 
 
@@ -2046,10 +2114,7 @@ def _about_dialog() -> None:
         "**trade-lab** backtests crypto-spot strategies with a **layered-"
         "honesty** stack — every edge is shown net-of-cost, then out-of-"
         "sample, then as a Deflated Sharpe Ratio at a fixed budget (N=500). "
-        "One strategy survived every layer and has been **trading live on "
-        "Binance mainnet since 2026-08-24 with capped capital**; the "
-        "testnet source remains the paper environment. Both journals feed "
-        "this dashboard — pick the source in the sidebar.\n\n"
+        f"One strategy survived every layer and {_environment_copy()[1]}\n\n"
         "Below is the master results index; full writeups are in the "
         "**Research** tab."
     )
@@ -2293,8 +2358,7 @@ def main() -> None:
             _about_dialog()
     # Three tight lines (trailing double-space = markdown hard break).
     st.caption(
-        "Read-only monitoring for a live TSMOM strategy — Binance mainnet "
-        "(real money, capped) + testnet paper environment.  \n"
+        f"{_environment_copy()[0]}  \n"
         "See the **Research** tab for all findings & results.  \n"
         f"Auto-refreshes every {REFRESH_SECONDS}s."
     )
