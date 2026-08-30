@@ -259,3 +259,82 @@ def test_subset_basket_with_smaller_n():
     )
     for sym in subset:
         assert alloc.target_quote_per_asset[sym] == pytest.approx(10_000.0)
+
+
+# ---------------------------------------------------------------------------
+# The relever residual at partial ladder rungs (documented in the module
+# docstring — pinned here so it stays a known quantity, not folklore)
+# ---------------------------------------------------------------------------
+
+
+def _relever_plan(signal: float, book: float, growth: float = 1.10):
+    """Buy the basket, let it move, recompute the plan.
+
+    Weights and signal are held constant across the two cycles, so every
+    order the second cycle produces comes from re-levering alone.
+    """
+    from trade_lab.execution.broker import MarketConstraints
+    from trade_lab.execution.delta import compute_delta_plan
+
+    basket = ["BTC", "ETH", "BNB", "SOL", "ADA", "XRP", "DOGE"]
+    weights = {a: 1.0 / len(basket) for a in basket}
+    p0 = {a: 100.0 for a in basket}
+    p1 = {a: 100.0 * growth for a in basket}
+    constraints = {
+        f"{a}/USDT": MarketConstraints(
+            symbol=f"{a}/USDT", min_amount=None, min_cost=5.0,
+            amount_precision=8, raw={},
+        )
+        for a in basket
+    }
+
+    first = compute_target_allocation(
+        signal, total_equity=book, prices=p0, basket=basket, weights=weights,
+    )
+    holdings = dict(first.target_qty_per_asset)
+    invested = sum(first.target_quote_per_asset.values())
+    equity_after = (book - invested) + invested * growth
+
+    second = compute_target_allocation(
+        signal, total_equity=equity_after, prices=p1,
+        basket=basket, weights=weights,
+    )
+    plan = compute_delta_plan(
+        allocation=second, current_holdings=holdings,
+        constraints=constraints, quote_currency="USDT",
+    )
+    return plan, invested * growth / equity_after
+
+
+def test_full_rung_is_quiet_between_rebalances():
+    """At s=1 the drifted-weight target tracks the drifted holdings
+    exactly — the property the module docstring claims."""
+    plan, live_share = _relever_plan(1.0, 10_000.0)
+    assert plan.orders == []
+    assert live_share == pytest.approx(1.0)
+
+
+def test_half_rung_leaves_a_relever_residual_on_a_large_book():
+    """s=0.5 does NOT go quiet: the target moves slower than the holdings
+    it is compared against, so a pure price move produces sells with no
+    change in signal or weights. Turnover the backtest never charged."""
+    plan, _ = _relever_plan(0.5, 10_000.0)
+    assert len(plan.orders) == 7
+    assert {o.side for o in plan.orders} == {"sell"}
+    turnover = sum(o.notional_quote for o in plan.orders)
+    # (1 - s)·r_b / (1 + r_b) of the held notional = 0.5 × 0.10 / 1.10
+    # of 5 500 USDT = 250.
+    assert turnover == pytest.approx(250.0)
+
+
+def test_half_rung_residual_becomes_skipped_drift_on_the_live_book():
+    """On today's ~150 USDT book every residual is sub-minimum, so it
+    accumulates as skipped drift and live exposure compounds away from
+    the rung instead of trading back to it."""
+    plan, live_share = _relever_plan(0.5, 150.0)
+    assert plan.orders == []
+    assert len(plan.skipped) == 7
+    assert sum(s.desired_notional for s in plan.skipped) == pytest.approx(3.75)
+    # Held share drifts up from the 0.50 rung rather than being restored.
+    assert live_share == pytest.approx(0.5238, abs=1e-4)
+    assert live_share > 0.5

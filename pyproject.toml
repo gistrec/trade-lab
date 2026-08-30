@@ -9,7 +9,7 @@ description = "Research framework for backtesting trading strategies."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "trade-lab" }]
+authors = [{ name = "Aleksandr Kovalko", email = "gistrec@gmail.com" }]
 dependencies = [
     "pandas>=2.0",
     "numpy>=1.24",
