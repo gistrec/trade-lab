@@ -1658,3 +1658,189 @@ def test_signal_tab_renders_chips_not_second_metric_row(tmp_path, monkeypatch):
         ":green-badge[:material/arrow_upward: +25.00% vs 30d ago]" == line
         for line in chip_lines
     ), chip_lines
+
+
+# ---------------------------------------------------------------------------
+# _config_gate_state — the dashboard must ask the question the harness asks
+# ---------------------------------------------------------------------------
+
+
+def test_config_gate_matches_when_runtime_equals_frozen_literal():
+    from trade_lab.monitoring.app import _config_gate_state
+    from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
+
+    will_run, frozen = _config_gate_state(FROZEN_CONFIG_HASH)
+    assert will_run is True
+    assert frozen == FROZEN_CONFIG_HASH
+
+
+def test_config_gate_follows_the_harness_literal_not_canonical_hash(
+    monkeypatch,
+):
+    """The discriminating test. Today CANONICAL_HASH == FROZEN_CONFIG_HASH,
+    so no fixed pair of values can tell the two references apart — only
+    moving one of them can. Repoint the harness literal: the harness
+    would now refuse to run, so the tile must go red. A gate still
+    comparing against CANONICAL_HASH (recomputed from the same config
+    object, hence equal by construction) stays green and fails here."""
+    import trade_lab.paper_trading.harness as harness
+    from trade_lab.config import CANONICAL_HASH
+    from trade_lab.monitoring.app import _config_gate_state
+
+    monkeypatch.setattr(harness, "FROZEN_CONFIG_HASH", "0" * 64)
+    will_run, frozen = _config_gate_state(CANONICAL_HASH)
+    assert will_run is False
+    assert frozen == "0" * 64
+
+
+def test_config_gate_canonical_hash_is_the_tautology_it_avoids():
+    """Documents WHY the reference had to change: CANONICAL_HASH tracks
+    PRODUCTION_CONFIG exactly, so a config edit moves both sides of the
+    old comparison together and the drift branch is unreachable."""
+    from trade_lab.config import (
+        CANONICAL_HASH, PRODUCTION_CONFIG, production_config_hash,
+    )
+
+    assert production_config_hash(PRODUCTION_CONFIG) == CANONICAL_HASH
+
+
+# ---------------------------------------------------------------------------
+# _gate_label — a missing gate reading is not a closed gate
+# ---------------------------------------------------------------------------
+
+
+def test_gate_label_three_valued():
+    from trade_lab.monitoring.app import _gate_label
+
+    assert _gate_label(True) == "OPEN"
+    assert _gate_label(False) == "CLOSED"
+    assert _gate_label(None) == "—"
+
+
+def test_recent_cycles_row_does_not_fabricate_closed_for_missing_gate():
+    """The Recent-cycles table used to render an absent sma_gate_open as
+    CLOSED — a fabricated flat-position reading for a bar whose gate was
+    never recorded."""
+    from trade_lab.monitoring.app import _gate_label
+
+    csig = {"asof": "2026-08-25", "ladder_value": 1.0}   # no sma_gate_open
+    assert _gate_label(csig.get("sma_gate_open")) == "—"
+
+
+# ---------------------------------------------------------------------------
+# _humanize_* — total over external input, and honest about the UTC label
+# ---------------------------------------------------------------------------
+
+
+def test_humanizers_degrade_on_non_string_timestamp():
+    """A schema-drifted journal field (dict, list, number) must not take
+    the tab down with AttributeError on ``.replace``."""
+    for bad in ({"ts": 1}, [1, 2], 1700000000, True):
+        assert _humanize_iso(bad) == "—"
+        assert _humanize_relative(bad, now=NOW) == "—"
+
+
+def test_humanizers_show_unparseable_strings_verbatim():
+    """A string that failed to parse is still the operator's best clue."""
+    assert _humanize_iso("not-a-timestamp") == "not-a-timestamp"
+    assert _humanize_relative("not-a-timestamp", now=NOW) == "not-a-timestamp"
+
+
+def test_humanize_iso_converts_offset_to_utc_before_labeling_it_utc():
+    """The label says UTC, so the digits must be UTC. A writer emitting a
+    non-zero offset (the cron once ran on MSK) would otherwise get its
+    local wall clock stamped 'UTC'."""
+    assert _humanize_iso("2026-08-25T15:00:00+03:00") == \
+        "2026-08-25 12:00:00 UTC"
+
+
+def test_humanize_iso_naive_timestamp_treated_as_utc():
+    assert _humanize_iso("2026-08-25T12:00:00") == "2026-08-25 12:00:00 UTC"
+
+
+# ---------------------------------------------------------------------------
+# _sma_warmup_stall — route context reads through _cycle_context
+# ---------------------------------------------------------------------------
+
+
+def test_sma_stall_survives_truthy_non_dict_context():
+    """A corrupt/schema-drifted context (a string, a list) is truthy, so
+    the direct ``.get`` raised AttributeError and killed the warm-up
+    notice this detector exists to render."""
+    from trade_lab.monitoring.app import _sma_warmup_stall
+
+    for bad_ctx in ("mainnet", ["mainnet"], 7):
+        class _R:
+            def latest_cycle(self):
+                return {
+                    "context": bad_ctx,
+                    "signal": {"sma_value": None, "sma_gate_open": False},
+                    "basket_close_series": {"values": [1.0] * 36},
+                }
+
+        assert _sma_warmup_stall(_R()) is None
+
+
+# ---------------------------------------------------------------------------
+# Runtime verify (AppTest): the sub-min notice must not deny live trading
+# ---------------------------------------------------------------------------
+
+
+def test_submin_notice_does_not_claim_no_live_cron_when_live_cycles_exist(
+    tmp_path, monkeypatch,
+):
+    """Journal with real live cycles that skipped nothing (cumulative
+    drift 0) plus a latest plan carrying sub-min drift. The notice used
+    to gate on the drift SUM, so it announced 'no live order cron has run
+    yet' on a page whose own journal shows filled orders."""
+    import json
+    import pytest as _pytest
+    from pathlib import Path
+
+    at = _pytest.importorskip("streamlit.testing.v1")
+    now = datetime.now(timezone.utc)
+
+    def _cycle(cid, ended, *, executed, drift):
+        iso = ended.isoformat()
+        return {
+            "cycle_id": cid, "started_at": iso, "ended_at": iso,
+            "duration_ms": 5000, "outcome": "success", "error": None,
+            "git_commit": "aaaa111", "python_version": "3.11.0",
+            "context": {"mode": "live", "exchange": "binance",
+                        "sandbox": False, "quote_currency": "USDT",
+                        "basket": ["BTC"]},
+            "signal": None, "basket_close_series": None, "balance": None,
+            "equity_usd": 147.0, "target_allocation": None,
+            "current_holdings_quote": None, "orders_planned": [],
+            "orders_skipped": [], "total_skipped_quote_drift": drift,
+            "orders_executed": executed, "schema_version": 2,
+        }
+
+    filled = [{"symbol": "BTC/USDT", "side": "buy",
+               "client_order_id": "tl-2026-08-24-BTC-buy",
+               "terminal_status": "closed", "intended_amount": 1.0,
+               "filled_amount": 1.0, "filled_notional_quote": 13.18}]
+    journal = tmp_path / "cycles.jsonl"
+    journal.write_text("\n".join(json.dumps(c) for c in [
+        # A live cycle that placed and filled — skipped nothing.
+        _cycle("live1", now - timedelta(hours=6), executed=filled, drift=0.0),
+        # Latest is a dry-run plan whose deltas fall below min-notional.
+        _cycle("plan1", now, executed=None, drift=1.16),
+    ]) + "\n")
+    monkeypatch.setenv("TRADE_LAB_MONITORING_JOURNAL_PATH", str(journal))
+    monkeypatch.delenv("TRADE_LAB_MONITORING_JOURNAL_PATH_MAINNET",
+                       raising=False)
+
+    repo = Path(__file__).resolve().parents[1]
+    app = at.AppTest.from_file(
+        str(repo / "src" / "trade_lab" / "monitoring" / "app.py"),
+        default_timeout=30,
+    )
+    app.run()
+    assert not app.exception, app.exception
+
+    infos = [str(i.value) for i in app.info]
+    submin = [i for i in infos if "below the exchange minimum notional" in i]
+    assert len(submin) == 1, infos
+    assert "no live order cron has run yet" not in submin[0], submin[0]
+    assert "cumulative skipped drift across live cycles" in submin[0]

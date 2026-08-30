@@ -160,6 +160,34 @@ def _cycle_context(cycle: Optional[dict]) -> dict:
     return ctx if isinstance(ctx, dict) else {}
 
 
+def _gate_label(gate_open) -> str:
+    """Three-valued SMA(200) gate label: 'OPEN' / 'CLOSED' / '—'.
+
+    A missing ``sma_gate_open`` is not a closed gate. Rendering the
+    absent field as CLOSED fabricates a reading — and CLOSED is the
+    flat-position state, so the fabrication points at "we were out of
+    the market" for a bar whose gate nobody recorded.
+    """
+    if gate_open is None:
+        return "—"
+    return "OPEN" if gate_open else "CLOSED"
+
+
+def _config_gate_state(runtime_hash: str) -> tuple[bool, str]:
+    """``(harness_will_run, frozen_hash)`` for the runtime config hash.
+
+    Compares against the harness's pinned LITERAL, never
+    ``config.CANONICAL_HASH``: that constant is recomputed from the same
+    PRODUCTION_CONFIG object at import, so a config edit moves both sides
+    of the comparison together and the drift branch can never fire — the
+    M8 tautology the harness gate itself was fixed to avoid. The
+    dashboard's claim is "the harness will run", so it must ask the
+    question the harness asks.
+    """
+    from trade_lab.paper_trading.harness import FROZEN_CONFIG_HASH
+    return runtime_hash == FROZEN_CONFIG_HASH, FROZEN_CONFIG_HASH
+
+
 def _cycle_mode(cycle: Optional[dict]) -> str:
     """'LIVE' if the cycle ran in real-order mode, else 'DRY'.
 
@@ -401,11 +429,23 @@ def _render_status(reader: JournalReader) -> None:
     if drift <= 0:
         planned_drift = reader.latest_skipped_drift()
         if planned_drift > 0:
+            # "no live cron has run yet" is a claim about the journal, not
+            # about the drift sum: live cycles that skipped nothing also
+            # leave the sum at zero, and on mainnet that made the page
+            # deny its own trading. Gate the claim on the live count.
+            never_traded = reader.live_cycle_count() == 0
+            tail = (
+                "no live order cron has run yet, so nothing was skipped "
+                "in execution."
+                if never_traded else
+                "it describes the latest cycle's plan, not the executed "
+                "orders — cumulative skipped drift across live cycles is "
+                "still $0.00."
+            )
             st.info(
                 f"Latest cycle could not place ${planned_drift:,.2f} of its "
                 f"planned allocation — below the exchange minimum notional / "
-                f"lot step. This is a plan, not a divergence: no live order "
-                f"cron has run yet, so nothing was skipped in execution."
+                f"lot step. This is a plan, not a divergence: {tail}"
             )
 
     commits = _distinct_commits(reader.cycles(n=500))
@@ -500,7 +540,7 @@ def _sma_warmup_stall(reader: JournalReader) -> Optional[dict]:
     latest = reader.latest_cycle()
     if not latest:
         return None
-    ctx = latest.get("context") or {}
+    ctx = _cycle_context(latest)
     if not ctx.get("sandbox"):
         return None
     exchange = ctx.get("exchange") or "the exchange"
@@ -766,7 +806,7 @@ def _render_signal(reader: JournalReader) -> None:
     )
     cols[1].metric(
         "SMA(200) gate",
-        "OPEN" if gate_open else ("CLOSED" if gate_open is False else "—"),
+        _gate_label(gate_open),
         # State-explicit ("12d OPEN", not "12d in this state"): the days come
         # from the journal history, the big value from the latest cycle — if
         # they ever disagree, the chip must not claim they match.
@@ -870,7 +910,7 @@ def _render_signal(reader: JournalReader) -> None:
                 "asof": _humanize_iso(csig.get("asof") or c.get("ended_at")),
                 "basket": csig.get("basket_close"),
                 "ladder": csig.get("ladder_value"),
-                "gate": "OPEN" if csig.get("sma_gate_open") else "CLOSED",
+                "gate": _gate_label(csig.get("sma_gate_open")),
                 "28d": cstates.get("28"),
                 "60d": cstates.get("60"),
             })
@@ -1653,16 +1693,22 @@ def _render_validation() -> None:
     TypeError from a schema-drifted journal row) is contained to this
     tab by ``_render_tab_safely`` in :func:`main`.
     """
-    from trade_lab.config import CANONICAL_HASH, PRODUCTION_CONFIG
+    from trade_lab.config import PRODUCTION_CONFIG
 
     st.markdown("### Frozen-config gate")
     runtime_hash = _cached_config_hash()
+    will_run, frozen_hash = _config_gate_state(runtime_hash)
     cols = st.columns(2)
-    if runtime_hash == CANONICAL_HASH:
+    if will_run:
         cols[0].success("Hash MATCH — harness will run")
     else:
         cols[0].error("Hash DRIFT — harness will refuse to run")
-    cols[1].code(f"{runtime_hash[:16]}…", language="text")
+    # Both sides shown: on drift the operator needs to see WHICH hash
+    # moved, and a single value cannot answer that.
+    cols[1].code(
+        f"runtime {runtime_hash[:16]}…\nfrozen  {frozen_hash[:16]}…",
+        language="text",
+    )
 
     st.markdown("### Validation journal")
     if not VALIDATION_LOG_PATH.exists():
@@ -1812,31 +1858,39 @@ def _render_validation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _humanize_iso(s: Optional[str]) -> str:
-    if not s:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return s
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+def _unparseable(s) -> str:
+    """Display fallback shared by both humanizers.
+
+    A string that failed to parse is shown verbatim — it is still the
+    operator's best clue about what the journal holds. Anything that is
+    not a string has no readable form, so it degrades to '—'.
+    """
+    return s if isinstance(s, str) and s else "—"
 
 
-def _humanize_relative(s: Optional[str], now: Optional[datetime] = None) -> str:
+def _humanize_iso(s) -> str:
+    # parse_iso, not a local fromisoformat: it is the data layer's total
+    # parser (isinstance-guarded), so a non-string timestamp degrades to
+    # a dash instead of taking the whole tab down with AttributeError.
+    dt = parse_iso(s)
+    if dt is None:
+        return _unparseable(s)
+    # astimezone before strftime: the label says UTC, so the value has to
+    # be UTC. A writer that ever emits a non-zero offset (the cron once
+    # ran on MSK) would otherwise get its local wall clock stamped 'UTC'.
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _humanize_relative(s, now: Optional[datetime] = None) -> str:
     """Compact relative-time string: '12s ago' / '5m ago' / '2h 30m ago' / '3d ago'.
 
     Designed for ``st.metric`` value cells, which truncate on narrow
     screens. Pair with ``_humanize_iso`` in a caption for the precise
     timestamp.
     """
-    if not s:
-        return "—"
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError:
-        return s
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    dt = parse_iso(s)
+    if dt is None:
+        return _unparseable(s)
     now = now or datetime.now(tz=timezone.utc)
     secs = int((now - dt).total_seconds())
     if secs < 0:
