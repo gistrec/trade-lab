@@ -19,6 +19,10 @@ class SMACrossStrategy(Strategy):
         self.fast_period = fast_period
         self.slow_period = slow_period
 
+    @property
+    def required_warmup(self) -> int:
+        return self.slow_period
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"]
         fast = close.rolling(self.fast_period).mean()

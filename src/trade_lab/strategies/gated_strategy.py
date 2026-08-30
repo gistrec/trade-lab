@@ -91,6 +91,12 @@ class GatedStrategy(Strategy):
         inner_name = getattr(inner, "name", inner.__class__.__name__)
         self.name = f"{gate_name}({inner_name})"
 
+    @property
+    def required_warmup(self) -> int:
+        # The gate is pre-computed, so it adds no window of its own —
+        # but the inner strategy's requirement must not be lost.
+        return self.inner.required_warmup
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         signal = self.inner.generate_signals(candles)
         signal = signal.reindex(candles.index).fillna(0.0).astype(float)

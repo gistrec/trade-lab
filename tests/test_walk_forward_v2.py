@@ -376,3 +376,154 @@ def test_per_fold_train_dsr_describes_selected_variant():
         sharpe_std_dev=float(np.std(sharpes, ddof=1)),
     )
     assert got != pytest.approx(by_sharpe)
+
+
+# ---------------------------------------------------------------------------
+# warmup_days must cover the LONGEST rolling window, not the headline one
+# ---------------------------------------------------------------------------
+
+
+def test_grid_specs_size_warmup_from_the_strategy_not_by_hand():
+    """The published grid gave a (30, 60, 90) ensemble behind SMA(200) a
+    warmup of 90. The runner doubles it (180 < 200), so SMA(200) stayed
+    NaN and the momentum gate — which reads NaN as CLOSED — held the
+    variant flat over the head of every train and test window. The
+    variant lost the grid comparison on a data artifact."""
+    from trade_lab.backtest.walk_forward_grids import (
+        build_pma_grid, build_sma_grid, build_tsmom_grid,
+    )
+
+    for spec in build_tsmom_grid() + build_pma_grid() + build_sma_grid():
+        required = spec.factory().required_warmup
+        assert spec.warmup_days >= required, (
+            f"{spec.label}: warmup {spec.warmup_days} < required {required}"
+        )
+    short = next(s for s in build_tsmom_grid()
+                 if s.label == "tsmom_short_30_60_90")
+    assert short.warmup_days == 200          # the SMA filter, not lookback 90
+
+
+def test_param_grid_spec_refuses_a_warmup_shorter_than_the_strategy_needs():
+    """Fail loud rather than quietly understate a variant."""
+    with pytest.raises(ValueError, match="shorter than the strategy"):
+        ParamGridSpec(
+            label="sma_10_200_starved",
+            factory=lambda: SMACrossStrategy(fast_period=10, slow_period=200),
+            warmup_days=90,
+        )
+
+
+def test_required_warmup_covers_the_regime_filter_and_vol_window():
+    from trade_lab.strategies.pma_ratio import PriceMaRatioStrategy
+    from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
+
+    # SMA filter (200) dominates the momentum lookbacks (30, 60, 90).
+    assert TimeSeriesMomentumStrategy(
+        lookbacks=(30, 60, 90), sma_filter_periods=(200,),
+    ).required_warmup == 200
+    # No filter: the longest lookback wins, but never below vol_lookback.
+    assert TimeSeriesMomentumStrategy(
+        lookbacks=(10, 20), sma_filter_periods=(), vol_lookback=30,
+    ).required_warmup == 30
+    assert PriceMaRatioStrategy(ma_periods=(5, 10, 20)).required_warmup == 30
+
+
+def test_required_warmup_ignores_a_vol_window_that_never_runs():
+    """With use_vol_target=False the vol window is not read by
+    generate_signals, so charging it would make the new guard reject a
+    correctly sized grid."""
+    from trade_lab.strategies.pma_ratio import PriceMaRatioStrategy
+    from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
+
+    assert PriceMaRatioStrategy(
+        ma_periods=(5, 10, 20), use_vol_target=False,
+    ).required_warmup == 20
+    assert TimeSeriesMomentumStrategy(
+        lookbacks=(30, 60, 90), sma_filter_periods=(), vol_lookback=200,
+        use_vol_target=False,
+    ).required_warmup == 90
+    # The grid variants DO use vol targeting, so their warmup is unchanged.
+    assert PriceMaRatioStrategy(ma_periods=(5, 10, 20)).required_warmup == 30
+
+
+def test_every_rolling_strategy_declares_its_warmup():
+    """A default of 0 makes the fail-loud guard useless for whichever
+    strategy nobody updated — the guard would accept warmup_days=1."""
+    import pandas as pd
+
+    from trade_lab.strategies.donchian_trend import (
+        DonchianTrendEnsembleStrategy,
+    )
+    from trade_lab.strategies.gated_strategy import GatedStrategy
+    from trade_lab.strategies.regime_only import RegimeOnlyStrategy
+    from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
+    from trade_lab.strategies.rsi import RSIMeanReversionStrategy
+    from trade_lab.strategies.vol_target_wrapper import VolatilityTargetWrapper
+
+    assert RegimeOnlyStrategy(regime_period=200).required_warmup == 200
+    assert RSIMeanReversionStrategy(period=14).required_warmup == 14
+    assert RegimeSMACrossStrategy(
+        fast_period=20, slow_period=100, regime_period=200,
+    ).required_warmup == 200
+    # The BTC gate rolls over a SEPARATE series, so no amount of extra
+    # target-asset history warms it — counting it here would only reject
+    # valid grids (and it is unused entirely when btc_candles is None).
+    assert DonchianTrendEnsembleStrategy(
+        donchian_lookbacks=(20, 50), sma_filter_periods=(100,),
+        vol_lookback=30, btc_gate_sma_period=200,
+    ).required_warmup == 100
+
+    inner = SMACrossStrategy(fast_period=10, slow_period=150)
+    # Wrappers must not drop the inner requirement on the floor.
+    assert VolatilityTargetWrapper(
+        inner, vol_lookback=30,
+    ).required_warmup == 150
+    assert VolatilityTargetWrapper(
+        inner, vol_lookback=400,
+    ).required_warmup == 400
+    gate = pd.Series(True, index=pd.date_range("2024-01-01", periods=5))
+    assert GatedStrategy(inner, gate).required_warmup == 150
+
+
+def test_starved_warmup_understates_the_fold_return():
+    """The numeric symptom, through the runner's own window evaluator.
+
+    On a monotone uptrend the variant should be long throughout. With the
+    hand-typed warmup of 90 the runner feeds 180 bars — short of SMA(200)
+    — so the filter stays NaN, the momentum gate reads NaN as CLOSED, and
+    the fold opens flat. The starved run therefore reports a strictly
+    smaller return than the correctly warmed one, on identical data.
+    """
+    import numpy as np
+
+    from trade_lab.backtest.walk_forward_v2 import _evaluate_strategy_on_window
+    from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
+
+    idx = pd.date_range("2022-01-01", periods=700, freq="D")
+    close = pd.Series(np.linspace(100.0, 400.0, 700), index=idx)
+    candles = pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close,
+         "volume": 1.0},
+        index=idx,
+    )
+
+    def _fold(warmup_days: int) -> dict:
+        return _evaluate_strategy_on_window(
+            candles=candles,
+            strategy=TimeSeriesMomentumStrategy(
+                lookbacks=(30, 60, 90), sma_filter_periods=(200,),
+                use_vol_target=False,
+            ),
+            window_start=idx[500], window_end=idx[650],
+            warmup_days=warmup_days,
+            initial_capital=10_000.0, fee_rate=0.0, slippage_rate=0.0,
+            position_size=1.0, annualization_factor=365,
+        )
+
+    starved, warmed = _fold(90), _fold(200)
+    assert starved["bars"] == warmed["bars"]          # same window, same data
+    assert starved["total_return"] < warmed["total_return"]
+    # The gate is closed for part of the head, so some in-window bars earn
+    # nothing at all — that is the understatement, not a rounding wobble.
+    assert (starved["returns"] == 0.0).sum() > 0
+    assert (warmed["returns"] == 0.0).sum() == 0

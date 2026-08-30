@@ -25,6 +25,10 @@ class RegimeOnlyStrategy(Strategy):
             raise ValueError("regime_period must be a positive integer")
         self.regime_period = regime_period
 
+    @property
+    def required_warmup(self) -> int:
+        return self.regime_period
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"]
         regime = close.rolling(self.regime_period).mean()

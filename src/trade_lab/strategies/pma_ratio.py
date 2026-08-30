@@ -75,6 +75,14 @@ class PriceMaRatioStrategy(Strategy):
         self.rebalance_threshold = float(rebalance_threshold)
         self.use_vol_target = _coerce_bool(use_vol_target, "use_vol_target")
 
+    @property
+    def required_warmup(self) -> int:
+        # vol_lookback only when the vol layer runs — see TSMOM's note.
+        windows = [*self.ma_periods, *self.sma_filter_periods]
+        if self.use_vol_target:
+            windows.append(self.vol_lookback)
+        return max(windows)
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)
 

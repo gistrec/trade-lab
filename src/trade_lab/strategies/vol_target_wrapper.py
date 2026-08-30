@@ -71,6 +71,13 @@ class VolatilityTargetWrapper(Strategy):
         inner_name = getattr(inner, "name", inner.__class__.__name__)
         self.name = f"vol{target_pct}({inner_name})"
 
+    @property
+    def required_warmup(self) -> int:
+        # A wrapper needs whatever its inner strategy needs PLUS its own
+        # vol window — reporting only its own would starve the inner
+        # indicators, which is the very bias this property guards.
+        return max(self.inner.required_warmup, self.vol_lookback)
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         inner_signal = self.inner.generate_signals(candles)
         inner_signal = inner_signal.reindex(candles.index).fillna(0.0).astype(float)

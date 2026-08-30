@@ -88,6 +88,20 @@ class TimeSeriesMomentumStrategy(Strategy):
         self.rebalance_threshold = float(rebalance_threshold)
         self.use_vol_target = _coerce_bool(use_vol_target, "use_vol_target")
 
+    @property
+    def required_warmup(self) -> int:
+        # The SMA regime filter is usually the LONGEST window here, not the
+        # momentum lookbacks: a (30, 60, 90) ensemble behind SMA(200) needs
+        # 200 bars. Sizing warmup on the lookbacks alone leaves the filter
+        # NaN over the head of every window, and _sma_filter reads NaN as
+        # 'gate closed' — the variant sits flat and loses the comparison.
+        # The vol window counts only when generate_signals actually reads
+        # it: charging an unused default would reject correctly sized grids.
+        windows = [*self.lookbacks, *self.sma_filter_periods]
+        if self.use_vol_target:
+            windows.append(self.vol_lookback)
+        return max(windows)
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)
 

@@ -403,7 +403,8 @@ def test_buy_execution_price_includes_positive_slippage():
         candles, _SignalStrategy([0, 1, 0, 0]),
         initial_capital=10_000, fee_rate=0.0, slippage_rate=0.01,
     )
-    # close at execution bar 2 = 100; +1% slippage -> 101.
+    # Flat closes, so the bar the price is taken from does not matter
+    # here — this test pins the slippage sign only. 100 × 1.01 -> 101.
     assert result.trades[0].entry_execution_price == pytest.approx(101.0)
 
 
@@ -413,7 +414,7 @@ def test_sell_execution_price_includes_negative_slippage():
         candles, _SignalStrategy([0, 1, 0, 0]),
         initial_capital=10_000, fee_rate=0.0, slippage_rate=0.01,
     )
-    # close at execution bar 3 = 100; -1% slippage -> 99.
+    # Flat closes again: slippage sign only. 100 × 0.99 -> 99.
     assert result.trades[0].exit_execution_price == pytest.approx(99.0)
 
 
@@ -519,3 +520,95 @@ def test_empty_candles_returns_empty_result():
     result = run_backtest(empty, _SignalStrategy([]))
     assert result.equity.empty
     assert result.trades == []
+
+
+# ---------------------------------------------------------------------------
+# Reported trade prices must agree with the P&L the engine accrued
+# ---------------------------------------------------------------------------
+
+
+def test_trade_prices_reconstruct_the_gross_return():
+    """The consistency property the export was violating: at zero
+    slippage and constant full exposure, ``exit / entry`` must equal
+    ``1 + gross_return_pct``.
+
+    The engine holds ``positions = signals.shift(1)`` over close-to-close
+    returns, so the fill it implies is the close of the SIGNAL bar. Taking
+    the price at the first held bar instead put entry one bar late — on a
+    100 -> 200 jump the trade reported entry = exit = 200 alongside a
+    +100% return.
+    """
+    candles = _candles([100, 200, 200, 200])
+    result = run_backtest(
+        candles, _SignalStrategy([1, 0, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    trade = result.trades[0]
+    assert trade.entry_execution_price == pytest.approx(100.0)
+    assert trade.exit_execution_price == pytest.approx(200.0)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    assert ratio == pytest.approx(1.0 + trade.gross_return_pct)
+
+
+def test_trade_prices_reconstruct_gross_return_over_a_multi_bar_hold():
+    """Same property with the position held across several moving bars."""
+    candles = _candles([100, 110, 120, 130, 130])
+    result = run_backtest(
+        candles, _SignalStrategy([1, 1, 1, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    trade = result.trades[0]
+    assert trade.entry_execution_price == pytest.approx(100.0)
+    assert trade.exit_execution_price == pytest.approx(130.0)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    assert ratio == pytest.approx(1.0 + trade.gross_return_pct)
+
+
+def test_open_trade_is_marked_at_the_last_close_not_one_bar_earlier():
+    """A trade still open at the end has no flat bar to step back from:
+    it is held through the final bar, so its mark is that final close."""
+    candles = _candles([100, 110, 120, 130])
+    result = run_backtest(
+        candles, _SignalStrategy([1, 1, 1, 1]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    trade = result.trades[0]
+    assert trade.exit_signal_time is None      # still open
+    assert trade.entry_execution_price == pytest.approx(100.0)
+    assert trade.exit_execution_price == pytest.approx(130.0)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    assert ratio == pytest.approx(1.0 + trade.gross_return_pct)
+
+
+def test_price_ratio_is_not_the_gross_return_under_slippage():
+    """The identity is bounded, and the bound is documented rather than
+    discovered later: slippage moves both prices while gross_return_pct
+    is explicitly pre-cost, so the ratio understates it."""
+    candles = _candles([100, 130, 130, 130])
+    result = run_backtest(
+        candles, _SignalStrategy([1, 0, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0005,
+    )
+    trade = result.trades[0]
+    assert trade.gross_return_pct == pytest.approx(0.30)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    # 130 × 0.9995 / (100 × 1.0005) -> ~1.2987, i.e. ~29.87% not 30%.
+    assert ratio == pytest.approx(1.2987, abs=1e-3)
+    assert ratio < 1.0 + trade.gross_return_pct
+
+
+def test_price_ratio_is_not_the_gross_return_at_a_partial_ladder_rung():
+    """At a half rung the engine earns half the move, but the prices
+    describe the underlying at full size — so they must NOT be read as
+    the book's return."""
+    candles = _candles([100, 130, 130, 130])
+    result = run_backtest(
+        candles, _FloatSignalStrategy([0.5, 0.0, 0.0, 0.0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    trade = result.trades[0]
+    # Exposure-weighted: 0.5 × 30% move.
+    assert trade.gross_return_pct == pytest.approx(0.15)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    assert ratio == pytest.approx(1.30)          # the underlying move
+    assert ratio != pytest.approx(1.0 + trade.gross_return_pct)

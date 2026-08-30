@@ -36,6 +36,10 @@ class RegimeSMACrossStrategy(Strategy):
         self.slow_period = slow_period
         self.regime_period = regime_period
 
+    @property
+    def required_warmup(self) -> int:
+        return max(self.slow_period, self.regime_period)
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"]
         fast = close.rolling(self.fast_period).mean()
