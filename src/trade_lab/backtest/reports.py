@@ -115,8 +115,16 @@ def debug_trades_dataframe(
 
     Designed for manual look-ahead audits: every row makes the gap between
     *when the strategy decided* (``signal_time``, ``signal_close``) and
-    *when the trade actually filled* (``execution_time``,
-    ``execution_open_or_close``, ``entry_price_after_slippage``) explicit.
+    *the first bar it then held* (``execution_time``,
+    ``execution_open_or_close``) explicit.
+
+    The price columns belong to the FIRST group, not the second:
+    ``entry_price_after_slippage`` is ``signal_close`` adjusted for
+    slippage, because the engine's P&L implies a fill at the signal bar's
+    close (see :class:`~trade_lab.backtest.engine.Trade`). Reading it
+    against ``execution_open_or_close`` would pair a price with the wrong
+    bar — across a 100 -> 200 gap the row shows a 100 fill beside a 200
+    execution close, and both numbers are correct for their own column.
     The ``reason`` column dumps the strategy's relevant indicator values at
     the signal bar so you can hand-verify that the decision used only that
     bar's data.

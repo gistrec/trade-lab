@@ -103,14 +103,35 @@ preferring slower trend-following. Pattern is plausible, but it means
 > variant carries an SMA(200) regime filter. The runner doubles warmup
 > internally (180 bars), still short of 200, so the filter stayed NaN and
 > the gate — which reads NaN as closed — forced the variant flat over the
-> head of every train and test window. The bias runs **against**
-> `tsmom_short`, which nevertheless won 10 of 13 folds, so the conclusion
-> below is unaffected; the individual Sharpe and return figures are
-> understated by an unmeasured amount. The grid now sizes warmup from
-> `Strategy.required_warmup` and `ParamGridSpec` refuses an under-sized
-> value, so a re-run would produce different (higher) numbers for this
-> variant. This table is kept as the historical record of what was
-> actually run, not re-generated.
+> head of every train and test window.
+>
+> The grid now sizes warmup from `Strategy.required_warmup`. **The folds
+> were re-run to measure the effect rather than assume it** — same data
+> (`binance_BTC_USDT_1d`, 3 069 bars, 2018-01-01 → 2026-05-27), same
+> 24/6/6 windows, only `tsmom_short`'s warmup changed 90 → 200:
+>
+> | Aggregate | published (warmup 90) | corrected (warmup 200) |
+> |---|---:|---:|
+> | mean test Sharpe | +0.70 | **+0.82** |
+> | median test Sharpe | 0.00 | **+0.35** |
+> | hit-rate | 46% | **62%** |
+> | mean test return | +10.7% | **+12.4%** |
+> | folds selecting `tsmom_short` | 11 of 13 | **13 of 13** |
+>
+> Two caveats the aggregate hides, and neither was foreseeable without
+> running it:
+>
+> * **Selection changed.** Folds 6 and 10 flipped from `tsmom_medium` to
+>   `tsmom_short`, so the "Selected" column below is wrong for those two
+>   rows. The earlier claim that the selection conclusion was unaffected
+>   was unsupported.
+> * **The per-fold direction is mixed,** not a uniform understatement:
+>   test Sharpe improved in 4 folds, worsened in 4, and was unchanged in
+>   5. A forced-flat head avoids losses as well as gains; only the
+>   aggregate moved consistently upward.
+>
+> The table below is kept as the historical record of what was actually
+> run in the published pass, not regenerated.
 
 |  Fold | Selected                       | Train SR | OOS SR | OOS ret |
 |------|--------------------------------|----------|--------|---------|

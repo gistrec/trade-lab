@@ -465,11 +465,13 @@ def test_every_rolling_strategy_declares_its_warmup():
     assert RegimeSMACrossStrategy(
         fast_period=20, slow_period=100, regime_period=200,
     ).required_warmup == 200
-    # The BTC regime gate is a separate series but the same NaN head.
+    # The BTC gate rolls over a SEPARATE series, so no amount of extra
+    # target-asset history warms it — counting it here would only reject
+    # valid grids (and it is unused entirely when btc_candles is None).
     assert DonchianTrendEnsembleStrategy(
         donchian_lookbacks=(20, 50), sma_filter_periods=(100,),
         vol_lookback=30, btc_gate_sma_period=200,
-    ).required_warmup == 200
+    ).required_warmup == 100
 
     inner = SMACrossStrategy(fast_period=10, slow_period=150)
     # Wrappers must not drop the inner requirement on the floor.
