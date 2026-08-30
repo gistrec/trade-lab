@@ -352,3 +352,113 @@ def test_monitor_cli_maps_journal_corruption_to_exit_2(tmp_path, capsys):
     code = monitor_main(["--log-path", str(log), "--reference-path", str(ref)])
     assert code == 2
     assert "MONITOR ERROR" in capsys.readouterr().err
+
+
+def test_newline_terminated_corruption_is_not_a_torn_append(tmp_path):
+    """A torn append cannot have written its own terminator. Malformed
+    AND newline-terminated means the write finished and the bytes rotted
+    afterwards — corruption, not a crash."""
+    from trade_lab.paper_trading.journal import (
+        JournalCorruptionError, read_log,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02", "conf\n')       # rotted, terminated
+
+    with pytest.raises(JournalCorruptionError):
+        read_log(log)
+
+    # The same bytes WITHOUT the terminator are the tolerated torn tail.
+    log2 = tmp_path / "journal2.jsonl"
+    append_row(_row("2026-06-01"), log2)
+    with open(log2, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02", "conf')
+    assert [r.date for r in read_log(log2)] == ["2026-06-01"]
+
+
+def test_schema_invalid_row_raises_declared_corruption(tmp_path):
+    """Valid JSON, wrong shape. Left as TypeError it escapes both CLIs'
+    declared-corruption handling and exits 1."""
+    from trade_lab.paper_trading.journal import (
+        JournalCorruptionError, read_log,
+    )
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02"}\n')             # missing every field
+
+    with pytest.raises(JournalCorruptionError, match="HarnessLogRow"):
+        read_log(log)
+
+
+def test_concurrent_appends_do_not_delete_each_others_rows(tmp_path):
+    """The repair is destructive, so it must not race the append. Two
+    processes observing the same torn tail would otherwise both compute
+    the same cut, and the second truncate would delete the row the first
+    had already written."""
+    import subprocess
+    import sys
+    import textwrap
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-06-01"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-06-02", "conf')         # torn tail
+
+    repo = Path(__file__).resolve().parents[1]
+    prog = textwrap.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(repo / "src")!r})
+        sys.path.insert(0, {str(repo / "tests")!r})
+        from test_paper_trading_validation_integrity import _row
+        from trade_lab.paper_trading.journal import append_row
+        append_row(_row(sys.argv[1]), {str(log)!r})
+    """)
+    procs = [subprocess.Popen([sys.executable, "-c", prog, d])
+             for d in ("2026-06-03", "2026-06-04")]
+    for pr in procs:
+        assert pr.wait(timeout=60) == 0
+
+    from trade_lab.paper_trading.journal import read_log
+    dates = sorted(r.date for r in read_log(log))
+    # 06-02 was torn and is legitimately gone; both new rows survive.
+    assert dates == ["2026-06-01", "2026-06-03", "2026-06-04"], dates
+
+
+def test_store_vintage_syncs_every_newly_created_ancestor(tmp_path):
+    """When vintage_root itself does not exist, mkdir creates it AND the
+    shard; syncing only those two leaves the root's own entry in its
+    parent unsynced, which loses everything below it."""
+    import os
+
+    import pandas as pd
+
+    from trade_lab.paper_trading import vintage_store
+
+    synced: list[str] = []
+    real_fsync = os.fsync
+    orig_fsync_dir = vintage_store._fsync_dir
+
+    def _tracking(path):
+        synced.append(str(path))
+        return orig_fsync_dir(path)
+
+    vintage_store._fsync_dir = _tracking
+    try:
+        idx = pd.date_range("2026-06-01", periods=2, freq="D", tz="UTC")
+        candles = {"BTC": pd.DataFrame(
+            {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+             "volume": 1.0}, index=idx)}
+        root = tmp_path / "does" / "not" / "exist"     # nothing exists yet
+        vintage_store.store_vintage(candles, root)
+    finally:
+        vintage_store._fsync_dir = orig_fsync_dir
+        del real_fsync
+
+    # The shard, plus the parent of every directory mkdir had to create.
+    assert str(root) in synced, synced
+    assert str(tmp_path / "does" / "not") in synced, synced
+    assert str(tmp_path / "does") in synced, synced

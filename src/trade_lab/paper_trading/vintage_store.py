@@ -125,7 +125,11 @@ def store_vintage(
     p = vintage_path(vintage_root, h)
     if p.exists():
         return h
-    shard_existed = p.parent.exists()
+    # Every ancestor mkdir may create is a directory ENTRY that has to be
+    # made durable in ITS parent. Stopping at the shard (or at
+    # vintage_root) leaves the file durable inside a directory whose own
+    # entry never landed, which loses the vintage just as completely.
+    created = [d for d in (p.parent, *p.parent.parents) if not d.exists()]
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
     # fsync the file AND its directory before/after the rename. rename() is
@@ -146,8 +150,8 @@ def store_vintage(
     # under vintage_root). Syncing only the shard would leave the file
     # durable inside a directory whose own entry never landed.
     _fsync_dir(p.parent)
-    if not shard_existed:
-        _fsync_dir(p.parent.parent)
+    for d in created:
+        _fsync_dir(d.parent)
     return h
 
 

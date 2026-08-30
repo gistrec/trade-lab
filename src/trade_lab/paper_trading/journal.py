@@ -44,8 +44,10 @@ Row schema (v1)
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -132,23 +134,47 @@ def _repair_unterminated_tail(log_path: Path) -> None:
         os.fsync(f.fileno())
 
 
+@contextmanager
+def _journal_lock(log_path: Path):
+    """Serialize repair+append across processes.
+
+    The repair is DESTRUCTIVE (it can truncate a torn tail), so it must
+    not race the append. Without the lock, a cron run and a manual
+    ``--asof`` backfill that both observe the same torn tail compute the
+    same cut: one truncates and appends its row, the other then executes
+    its stale truncate and deletes that row before writing its own.
+    Advisory ``flock`` on a sidecar file — a lock on the journal itself
+    would have to be taken before deciding whether to open it ``r+b``.
+    """
+    lock_path = log_path.with_suffix(log_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def append_row(row: HarnessLogRow, log_path: Path) -> None:
     """Atomic append-only JSONL write.
 
     On POSIX, opening with ``"a"`` + writing a single ``write`` call
     and ``fsync`` is sufficient for crash-safe append-only behaviour.
     An unterminated previous write is repaired first (see
-    :func:`_repair_unterminated_tail`), so power loss costs at most the
-    one row that was mid-flight — never the rows written after it.
+    :func:`_repair_unterminated_tail`); repair and append run under one
+    lock, so power loss costs at most the row that was mid-flight and a
+    concurrent run cannot delete a row the other just wrote.
     """
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    _repair_unterminated_tail(log_path)
     line = json.dumps(asdict(row), separators=(",", ":")) + "\n"
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
-        os.fsync(f.fileno())
+    with _journal_lock(log_path):
+        _repair_unterminated_tail(log_path)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def read_log(log_path: Path) -> list[HarnessLogRow]:
@@ -165,10 +191,16 @@ def read_log(log_path: Path) -> list[HarnessLogRow]:
     log_path = Path(log_path)
     if not log_path.exists():
         return []
+    text = log_path.read_text(encoding="utf-8")
+    # A torn append cannot have written its own terminator, so a malformed
+    # last line is only forgivable when the file does NOT end on a line
+    # boundary. Malformed AND newline-terminated means the write finished
+    # and the bytes rotted afterwards — that is corruption, not a crash.
+    unterminated_tail = bool(text) and not text.endswith("\n")
     raw = [
         (n, s) for n, s in
         ((n, line.strip()) for n, line in enumerate(
-            log_path.read_text(encoding="utf-8").splitlines(), start=1))
+            text.splitlines(), start=1))
         if s
     ]
     rows: list[HarnessLogRow] = []
@@ -176,7 +208,7 @@ def read_log(log_path: Path) -> list[HarnessLogRow]:
         try:
             data = json.loads(line)
         except json.JSONDecodeError as exc:
-            if idx == len(raw) - 1:
+            if idx == len(raw) - 1 and unterminated_tail:
                 continue          # truncated final append; never completed
             raise JournalCorruptionError(
                 f"{log_path}: line {lineno} of {len(raw)} is not valid JSON "
@@ -184,7 +216,17 @@ def read_log(log_path: Path) -> list[HarnessLogRow]:
                 f"line in the middle means history was lost. Repair the "
                 f"journal; the monitors must not run on a holed series."
             ) from exc
-        rows.append(HarnessLogRow(**data))
+        try:
+            rows.append(HarnessLogRow(**data))
+        except TypeError as exc:
+            # Valid JSON, wrong shape: a missing field, an extra one, or a
+            # non-object top level. Left as TypeError it escapes both CLIs'
+            # declared-corruption handling and exits 1 — which the monitor
+            # also uses for --fail-on-breach.
+            raise JournalCorruptionError(
+                f"{log_path}: line {lineno} does not match HarnessLogRow "
+                f"({exc}). Repair the journal."
+            ) from exc
     return rows
 
 
