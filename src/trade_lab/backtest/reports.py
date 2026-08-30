@@ -50,8 +50,10 @@ def trades_to_dataframe(
     ``entry_signal_time`` / ``exit_signal_time`` are the bars where the
     decision was made (one bar earlier). ``entry_execution_price`` and
     ``exit_execution_price`` are slippage-adjusted (``close * (1 ± rate)``)
-    closes of those SIGNAL bars — the fill the engine's P&L implies, so
-    ``exit / entry`` reconstructs the trade's gross return.
+    closes of those SIGNAL bars — the fill the engine's P&L implies. They
+    reconstruct ``gross_return_pct`` only at zero slippage and constant
+    full exposure; see :class:`~trade_lab.backtest.engine.Trade` for why
+    slippage and partial ladder rungs break the identity.
 
     The ``candles`` parameter is kept for API compatibility but no longer
     needed — all the data comes from ``result.trades``.

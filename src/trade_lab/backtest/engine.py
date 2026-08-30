@@ -17,10 +17,25 @@ class Trade:
     decided) and the *execution* candle (the next bar, the first the engine
     holds the position through). The prices belong to the SIGNAL bar: the
     engine's math (``positions = signals.shift(1)`` over close-to-close
-    returns) implies a fill at the close that produced the signal, so a
-    trade's ``exit / entry`` ratio reconstructs its gross return. Prices
-    are slippage-adjusted to reflect what the strategy effectively paid /
+    returns) implies a fill at the close that produced the signal, then
+    slippage-adjusted to reflect what the strategy effectively paid /
     received.
+
+    ``exit_execution_price / entry_execution_price`` equals
+    ``1 + gross_return_pct`` **only** at zero slippage and constant full
+    exposure. Two things break the identity, both by design:
+
+    * slippage — the prices carry both adjustments while
+      ``gross_return_pct`` is explicitly pre-cost;
+    * partial or varying exposure — a ladder rung of 0.5, a vol-target
+      weight or ``position_size < 1`` makes ``gross_return_pct`` an
+      exposure-weighted product, while the prices describe the underlying
+      move at full size.
+
+    So the prices answer "at what level did this trade open and close",
+    not "what did the book earn"; ``pnl`` / ``net_return_pct`` answer the
+    latter. What they must never do again is contradict each other by a
+    whole bar.
     """
 
     # Execution timing (when the position was actually held).

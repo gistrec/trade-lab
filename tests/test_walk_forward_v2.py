@@ -428,6 +428,61 @@ def test_required_warmup_covers_the_regime_filter_and_vol_window():
     assert PriceMaRatioStrategy(ma_periods=(5, 10, 20)).required_warmup == 30
 
 
+def test_required_warmup_ignores_a_vol_window_that_never_runs():
+    """With use_vol_target=False the vol window is not read by
+    generate_signals, so charging it would make the new guard reject a
+    correctly sized grid."""
+    from trade_lab.strategies.pma_ratio import PriceMaRatioStrategy
+    from trade_lab.strategies.tsmom import TimeSeriesMomentumStrategy
+
+    assert PriceMaRatioStrategy(
+        ma_periods=(5, 10, 20), use_vol_target=False,
+    ).required_warmup == 20
+    assert TimeSeriesMomentumStrategy(
+        lookbacks=(30, 60, 90), sma_filter_periods=(), vol_lookback=200,
+        use_vol_target=False,
+    ).required_warmup == 90
+    # The grid variants DO use vol targeting, so their warmup is unchanged.
+    assert PriceMaRatioStrategy(ma_periods=(5, 10, 20)).required_warmup == 30
+
+
+def test_every_rolling_strategy_declares_its_warmup():
+    """A default of 0 makes the fail-loud guard useless for whichever
+    strategy nobody updated — the guard would accept warmup_days=1."""
+    import pandas as pd
+
+    from trade_lab.strategies.donchian_trend import (
+        DonchianTrendEnsembleStrategy,
+    )
+    from trade_lab.strategies.gated_strategy import GatedStrategy
+    from trade_lab.strategies.regime_only import RegimeOnlyStrategy
+    from trade_lab.strategies.regime_sma_cross import RegimeSMACrossStrategy
+    from trade_lab.strategies.rsi import RSIMeanReversionStrategy
+    from trade_lab.strategies.vol_target_wrapper import VolatilityTargetWrapper
+
+    assert RegimeOnlyStrategy(regime_period=200).required_warmup == 200
+    assert RSIMeanReversionStrategy(period=14).required_warmup == 14
+    assert RegimeSMACrossStrategy(
+        fast_period=20, slow_period=100, regime_period=200,
+    ).required_warmup == 200
+    # The BTC regime gate is a separate series but the same NaN head.
+    assert DonchianTrendEnsembleStrategy(
+        donchian_lookbacks=(20, 50), sma_filter_periods=(100,),
+        vol_lookback=30, btc_gate_sma_period=200,
+    ).required_warmup == 200
+
+    inner = SMACrossStrategy(fast_period=10, slow_period=150)
+    # Wrappers must not drop the inner requirement on the floor.
+    assert VolatilityTargetWrapper(
+        inner, vol_lookback=30,
+    ).required_warmup == 150
+    assert VolatilityTargetWrapper(
+        inner, vol_lookback=400,
+    ).required_warmup == 400
+    gate = pd.Series(True, index=pd.date_range("2024-01-01", periods=5))
+    assert GatedStrategy(inner, gate).required_warmup == 150
+
+
 def test_starved_warmup_understates_the_fold_return():
     """The numeric symptom, through the runner's own window evaluator.
 

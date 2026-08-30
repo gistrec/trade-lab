@@ -133,6 +133,13 @@ class DonchianTrendEnsembleStrategy(Strategy):
         self.btc_candles = btc_candles
         self.btc_gate_sma_period = int(btc_gate_sma_period)
 
+    @property
+    def required_warmup(self) -> int:
+        # The BTC regime gate is a separate series but the same warmup
+        # question: its SMA is NaN for the first btc_gate_sma_period bars.
+        return max([*self.donchian_lookbacks, *self.sma_filter_periods,
+                    self.vol_lookback, self.btc_gate_sma_period])
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)
 

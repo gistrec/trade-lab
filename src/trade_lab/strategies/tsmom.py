@@ -95,8 +95,12 @@ class TimeSeriesMomentumStrategy(Strategy):
         # 200 bars. Sizing warmup on the lookbacks alone leaves the filter
         # NaN over the head of every window, and _sma_filter reads NaN as
         # 'gate closed' — the variant sits flat and loses the comparison.
-        return max([*self.lookbacks, *self.sma_filter_periods,
-                    self.vol_lookback])
+        # The vol window counts only when generate_signals actually reads
+        # it: charging an unused default would reject correctly sized grids.
+        windows = [*self.lookbacks, *self.sma_filter_periods]
+        if self.use_vol_target:
+            windows.append(self.vol_lookback)
+        return max(windows)
 
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         close = candles["close"].astype(float)

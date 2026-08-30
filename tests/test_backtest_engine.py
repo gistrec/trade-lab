@@ -528,8 +528,9 @@ def test_empty_candles_returns_empty_result():
 
 
 def test_trade_prices_reconstruct_the_gross_return():
-    """The consistency property the export was violating: with zero
-    slippage, ``exit / entry`` must equal ``1 + gross_return_pct``.
+    """The consistency property the export was violating: at zero
+    slippage and constant full exposure, ``exit / entry`` must equal
+    ``1 + gross_return_pct``.
 
     The engine holds ``positions = signals.shift(1)`` over close-to-close
     returns, so the fill it implies is the close of the SIGNAL bar. Taking
@@ -577,3 +578,37 @@ def test_open_trade_is_marked_at_the_last_close_not_one_bar_earlier():
     assert trade.exit_execution_price == pytest.approx(130.0)
     ratio = trade.exit_execution_price / trade.entry_execution_price
     assert ratio == pytest.approx(1.0 + trade.gross_return_pct)
+
+
+def test_price_ratio_is_not_the_gross_return_under_slippage():
+    """The identity is bounded, and the bound is documented rather than
+    discovered later: slippage moves both prices while gross_return_pct
+    is explicitly pre-cost, so the ratio understates it."""
+    candles = _candles([100, 130, 130, 130])
+    result = run_backtest(
+        candles, _SignalStrategy([1, 0, 0, 0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0005,
+    )
+    trade = result.trades[0]
+    assert trade.gross_return_pct == pytest.approx(0.30)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    # 130 × 0.9995 / (100 × 1.0005) -> ~1.2987, i.e. ~29.87% not 30%.
+    assert ratio == pytest.approx(1.2987, abs=1e-3)
+    assert ratio < 1.0 + trade.gross_return_pct
+
+
+def test_price_ratio_is_not_the_gross_return_at_a_partial_ladder_rung():
+    """At a half rung the engine earns half the move, but the prices
+    describe the underlying at full size — so they must NOT be read as
+    the book's return."""
+    candles = _candles([100, 130, 130, 130])
+    result = run_backtest(
+        candles, _FloatSignalStrategy([0.5, 0.0, 0.0, 0.0]),
+        initial_capital=10_000, fee_rate=0.0, slippage_rate=0.0,
+    )
+    trade = result.trades[0]
+    # Exposure-weighted: 0.5 × 30% move.
+    assert trade.gross_return_pct == pytest.approx(0.15)
+    ratio = trade.exit_execution_price / trade.entry_execution_price
+    assert ratio == pytest.approx(1.30)          # the underlying move
+    assert ratio != pytest.approx(1.0 + trade.gross_return_pct)

@@ -37,6 +37,10 @@ class RSIMeanReversionStrategy(Strategy):
         self.lower = lower
         self.upper = upper
 
+    @property
+    def required_warmup(self) -> int:
+        return self.period
+
     def generate_signals(self, candles: pd.DataFrame) -> pd.Series:
         rsi = compute_rsi(candles["close"], self.period)
         # Mark explicit entries / exits, then forward-fill in between.
