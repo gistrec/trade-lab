@@ -139,7 +139,7 @@ Status legend:
 **Current state and what comes next.**
 * Now: **live on Binance mainnet with real money since 2026-08-24**, ~148 USDT, placed daily by the `paper-place-orders` cron. The first live cycle filled 7 of 7 basket legs. See `src/trade_lab/execution/README.md` for the pipeline and the rollout ladder that was walked (testnet pipeline validation → mainnet read-only observation → capped smoke test → daily live cron).
 * An earlier revision of this file promised a "code-path migration to Kraken" and cited a CLAUDE.md rule "Live orders only on testnet". Both are obsolete: the Kraken plan was cancelled on 2026-07-09 (the premise that Binance is geo-blocked for the owner was simply wrong), and that hard rule no longer exists. What replaced it is the three-flag mainnet gate plus the rollout ladder — mainnet is still not a flag-flip.
-* Next: accumulate forward-test evidence at this size. The live sample is weeks old and proves the *pipeline*, not the *edge* — at this horizon it cannot distinguish a working strategy from a lucky one, and it is not expected to.
+* Next: accumulate forward-test evidence at this size. As of 2026-08-30 the live sample is **six days** long and proves the *pipeline*, not the *edge* — at this horizon it cannot distinguish a working strategy from a lucky one, and it is not expected to.
 * Testnet remains configured as a second, parallel paper environment, with its own journal and state. Note it cannot validate the signal path at all: the testnet wipes candle history roughly monthly, so SMA(200) never warms there.
 
 * Finding: `findings/han_28d_tsmom.md`.
