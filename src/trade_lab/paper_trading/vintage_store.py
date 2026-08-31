@@ -18,9 +18,12 @@ revisions:
 * Loading by hash verifies the file contents still hash to the same
   value — a bit-flip on disk or an editor accidentally rewriting the
   file is loud at read time.
-* Writes are atomic (tmpfile + rename), so a crash mid-write cannot
-  produce a partially-written snapshot whose hash mismatches its
-  filename.
+* Writes are atomic AND durable (tmpfile + fsync + rename + directory
+  fsync), so neither a crash mid-write nor a power loss just after it
+  can produce a partially-written snapshot whose hash mismatches its
+  filename. Durability matters more here than for most caches: a
+  vintage is the evidence of what the exchange returned that day, and
+  the look-ahead detector cannot re-derive it.
 
 Serialization is canonical text (not parquet) for two reasons:
 parquet's byte representation is not stable across pyarrow versions
@@ -30,6 +33,7 @@ needs to be able to read it.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -85,6 +89,18 @@ def content_hash(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory entry; a no-op where the platform forbids it."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:                      # e.g. Windows
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def vintage_path(vintage_root: Path, h: str) -> Path:
     """Two-level dir layout (h[:2]/h.txt) — keeps any single dir at
     most a few hundred files even after years of daily cycles.
@@ -108,11 +124,41 @@ def store_vintage(
     h = content_hash(payload)
     p = vintage_path(vintage_root, h)
     if p.exists():
+        # Do NOT assume a visible path is a durable one. A process killed
+        # between rename() and the directory syncs below leaves exactly
+        # this state: the entry is readable, and a power loss can still
+        # take it. The retry is the only chance to finish the job, so it
+        # completes the syncs instead of returning early.
+        _fsync_dir(p.parent)
+        _fsync_dir(p.parent.parent)
         return h
+    # Every ancestor mkdir may create is a directory ENTRY that has to be
+    # made durable in ITS parent. Stopping at the shard (or at
+    # vintage_root) leaves the file durable inside a directory whose own
+    # entry never landed, which loses the vintage just as completely.
+    created = [d for d in (p.parent, *p.parent.parents) if not d.exists()]
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_bytes(payload)
+    # fsync the file AND its directory before/after the rename. rename() is
+    # atomic with respect to other readers, but on its own it is not durable:
+    # after a power loss the entry can land pointing at a file whose bytes
+    # never reached the platter, leaving an empty snapshot under a hash-named
+    # path. load_vintage would catch that loudly — but the evidence of what
+    # the exchange actually returned that day is gone for good, and unlike
+    # the journal (which IS fsynced) it cannot be re-derived.
+    with open(tmp, "wb") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.rename(p)
+    # Sync the shard directory so the rename itself is durable — and its
+    # parent too when the shard is brand new (vintage_path shards on
+    # h[:2], so the first vintage of a prefix creates a directory entry
+    # under vintage_root). Syncing only the shard would leave the file
+    # durable inside a directory whose own entry never landed.
+    _fsync_dir(p.parent)
+    for d in created:
+        _fsync_dir(d.parent)
     return h
 
 

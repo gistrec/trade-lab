@@ -94,3 +94,47 @@ def test_missing_log_returns_empty(tmp_path):
     assert read_log(log) == []
     assert not is_already_logged("2026-05-29", log)
     assert get_row_for_date("2026-05-29", log) is None
+
+
+# ---------------------------------------------------------------------------
+# A corrupt line mid-file is lost history, not a crash-mid-write
+# ---------------------------------------------------------------------------
+
+
+def test_read_log_still_tolerates_a_truncated_final_line(tmp_path):
+    """The documented crash-safety case: the last append never completed,
+    so that row simply does not exist yet."""
+
+    log = tmp_path / "journal.jsonl"
+    append_row(_row("2026-05-29"), log)
+    append_row(_row("2026-05-30"), log)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write('{"date": "2026-05-31", "ladder_st')   # torn write
+
+    rows = read_log(log)
+    assert [r.date for r in rows] == ["2026-05-29", "2026-05-30"]
+
+
+def test_read_log_refuses_a_corrupt_line_in_the_middle(tmp_path):
+    """Bytes lost from history. Dropping them silently would have the
+    fingerprint monitor compute streaks over an invisible hole and the
+    look-ahead detector never replay the missing days."""
+    import pytest
+
+    log = tmp_path / "journal.jsonl"
+    for d in ("2026-05-29", "2026-05-30", "2026-05-31"):
+        append_row(_row(d), log)
+    lines = log.read_text().splitlines()
+    lines[1] = '{"date": "2026-05-30", "ladd'          # corrupted in place
+    log.write_text("\n".join(lines) + "\n")
+
+    from trade_lab.paper_trading.journal import JournalCorruptionError
+
+    with pytest.raises(JournalCorruptionError, match="line 2 of 3"):
+        read_log(log)
+
+
+def test_read_log_missing_file_is_still_empty(tmp_path):
+    """Absent file keeps returning [] — callers that must distinguish it
+    from an empty journal check existence themselves."""
+    assert read_log(tmp_path / "nope.jsonl") == []

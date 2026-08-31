@@ -49,6 +49,7 @@ from .fingerprint import (
     MetricBand,
     load_reference,
 )
+from .harness import FROZEN_CONFIG_HASH
 from .journal import HarnessLogRow, read_log
 
 
@@ -179,6 +180,15 @@ def compute_live_metrics_from_journal(
             "roll_flip": pd.Series(dtype=float),
             "roll_gate": pd.Series(dtype=float),
         }
+    # Sort by DATE, not by position in the file. diff(), cummax() and
+    # rolling() below are all positional, and the harness deliberately
+    # supports backfilling a missed day (`--asof`), which appends an
+    # EARLIER date after later ones. Left in file order, one backfill
+    # permanently corrupts the flip and drawdown series: cummax() sees a
+    # later equity before an earlier one, so the running peak is wrong
+    # from that point on, and diff() reports two phantom flips where the
+    # ladder never moved.
+    rows = sorted(rows, key=lambda r: r.date)
     idx = pd.DatetimeIndex(
         [pd.Timestamp(r.date, tz="UTC") for r in rows], name="date",
     )
@@ -222,12 +232,45 @@ def check_journal_against_reference(
     """Read the live journal, load the frozen reference, return a
     structured breach report. Side-effect-free."""
 
+    log_path = Path(log_path)
+    # A missing file must not read as "no live data yet". read_log returns
+    # [] for a path that does not exist, so a typo in --log-path or a cron
+    # started in the wrong cwd (both CLI defaults are RELATIVE) leaves the
+    # monitor printing 'journal empty, bootstrapping' and exiting 0
+    # forever — the shape of a healthy system with no monitoring at all.
+    if not log_path.exists():
+        raise FileNotFoundError(
+            f"Journal not found at {log_path.resolve()}. An absent file is "
+            f"not an empty one: refusing to report 'no live data yet' for "
+            f"what may be a wrong path or working directory."
+        )
+
     reference = load_reference(reference_path)
+
+    # The reference carries the config hash it was built for. Nothing
+    # checked it, so a fingerprint generated for a DIFFERENT strategy
+    # config would silently supply the bands every live cycle is judged
+    # against. load_reference only verifies the file's own integrity.
+    if reference.frozen_config_hash != FROZEN_CONFIG_HASH:
+        raise ValueError(
+            f"Reference fingerprint was built for config "
+            f"{reference.frozen_config_hash}, but the pinned production "
+            f"config is {FROZEN_CONFIG_HASH}. Its bands describe a "
+            f"different strategy — rebuild the reference "
+            f"(scripts/build_reference_fingerprint.py) rather than "
+            f"judging live behaviour against them."
+        )
+
     rows = read_log(log_path)
 
     journal_window: Optional[tuple] = None
     if rows:
-        journal_window = (rows[0].date, rows[-1].date)
+        # By DATE, not by append order — the metrics below are computed on
+        # the chronologically sorted rows, so a backfilled day would
+        # otherwise have the report claim a window ending before the data
+        # the latest status actually describes.
+        dates = sorted(r.date for r in rows)
+        journal_window = (dates[0], dates[-1])
 
     live = compute_live_metrics_from_journal(
         rows,

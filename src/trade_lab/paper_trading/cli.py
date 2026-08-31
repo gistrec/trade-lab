@@ -13,7 +13,9 @@ recorded row without writing a duplicate.
 Exit codes:
 * 0 — cycle written (or no-op idempotent return).
 * 2 — ``HarnessError`` (config hash drift, fetch failure, empty
-  basket, etc.). Cron should surface this to the operator.
+  basket, etc.) or ``JournalCorruptionError`` (a broken line in the
+  middle of the journal). Both are DECLARED failures the operator must
+  act on; cron should surface either to a human.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from datetime import date as _date
 from pathlib import Path
 
 from .harness import HarnessError, run_paper_trading_cycle
+from .journal import JournalCorruptionError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except HarnessError as exc:
         print(f"HARNESS ERROR: {exc}", file=sys.stderr)
+        return 2
+    except JournalCorruptionError as exc:
+        # Same exit code as HarnessError: both are DECLARED failures the
+        # operator must act on. An uncaught traceback would exit 1, which
+        # cron integrations read as a different class of problem.
+        print(f"JOURNAL ERROR: {exc}", file=sys.stderr)
         return 2
 
     gate = "OPEN" if row.sma_gate_open else "CLOSED"
