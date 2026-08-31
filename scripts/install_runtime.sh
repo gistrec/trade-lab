@@ -45,6 +45,21 @@ TARGET="."
 echo "[install] $VENV <- $TARGET  (constrained)"
 "$VENV/bin/pip" install -e "$TARGET" -c constraints.txt -q
 
+# Verify the venv is internally consistent BEFORE reporting success. A
+# constrained install of the runtime alone will happily upgrade a shared
+# dependency underneath a package that came from an extra: on 2026-08-31
+# this box ended up with pyarrow 25.0.1 under streamlit 1.61.1, which
+# declares pyarrow<25. It rendered anyway, so nothing failed — the
+# mismatch was found by hand afterwards. That is the failure mode this
+# pin exists to remove, so the installer has to say it out loud.
+if ! "$VENV/bin/pip" check; then
+    echo "[install] FATAL: the venv has unsatisfied requirements (above)." >&2
+    echo "[install] Most likely an extra is installed but was not passed to" >&2
+    echo "[install] this script — e.g. a host running the dashboard needs" >&2
+    echo "[install] 'monitoring'. Re-run with the right extras." >&2
+    exit 3
+fi
+
 # Echo what actually landed. The point of the pin is that this line matches
 # what CI tested; printing it makes a mismatch visible in the deploy log
 # instead of only in an incident.
