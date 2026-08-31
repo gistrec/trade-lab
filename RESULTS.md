@@ -53,23 +53,38 @@ sourced Bybit prices give the same answer
 that number tests; it is not a second, independent out-of-sample
 result.
 
-## What "PAPER" status actually means
+## What "LIVE" status actually means (and what it does not)
 
-A strategy that reaches PAPER status has cleared **one** gate, not all of them. Specifically:
+> Renamed 2026-08-30. This section was called **"What PAPER status
+> actually means"** while strategy #1 was on testnet; `findings/` entries
+> written before that date still point at the old title and are left
+> untouched as immutable history.
+
+A strategy that reaches LIVE status has cleared the backtest-side gates and the rollout ladder. It has **not** cleared the forward test — that one is running. Specifically:
 
 * **The deploy gate is "DSR > 0.5 at N=500, cluster-stable" evaluated UNDER THE MINIMAL 1/sqrt(T) DEFLATOR CONVENTION.** That is the convention every gate decision in this repo was made under, and it is still the gate. Read literally, passing it means: after correcting for the project's effective multiple-testing budget (500 trials) with a trial dispersion set to the sampling noise of one Sharpe estimate, the strategy's Sharpe is unlikely to be pure selection noise. **It does NOT mean the strategy is profitable going forward, only that the historical edge is unlikely to be a statistical artifact under that convention.**
 * **The gate convention and the reporting convention are deliberately different — this is not an oversight, and there is no claim here that both were passed.** The 2026-08-25 owner decision (see "DSR reporting convention" at the bottom of this file and `findings/dsr_convention_2026_08.md`) made the *conservative* deflator the primary **reported** figure. Under it the deployed config scores DSR 0.037 ≈ 0, and so do all **six** of its cluster neighbours (seven cluster members in total, the deployed config included — see the counting note in section #2 below). That decision changed **reporting only**: no gate was re-run, no threshold was re-set, and a 0.5 bar was never restated for the conservative deflator. So the honest statement is: **strategy #1 passed the gate as the gate is defined (minimal convention), and would NOT pass a gate restated on the conservative convention — under which no config in this project would pass, which is why the bar was not restated.** The deploy case therefore does not rest on the DSR headline at all; it rests on parameter stability (a convention-free raw-Sharpe plateau) plus the forward test.
 * Consequence for reading this file: wherever **"DSR > 0.5"** appears as a *status* or a *threshold*, it means the minimal-convention gate. Wherever a DSR is quoted as the **headline for the deployed config**, it is the conservative figure. The two never mean the same number.
-* The **next honest gate is paper trading itself** — ≥ 4–8 clean weeks on the target venue with the actual order-placement pipeline. Sources of failure that DSR cannot rule out and that only paper trading can catch: signal stability under live data feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw.
-* Real-money deployment requires the paper-trading gate to be passed first, AND (per CLAUDE.md hard rule "Live orders only on testnet") a manual mainnet-migration code-path change. Neither has happened.
+* The **remaining honest gate is the forward test itself** — live behaviour against the actual order-placement pipeline. Sources of failure that DSR cannot rule out: signal stability under live data-feed jitter, slippage divergence from the modelled rate, partial fills, exchange-side rejections, network reliability, regime shifts the historical sample never saw. This gate is **open, not passed**: it is being walked now, with capped capital.
 
-PAPER (testnet) status in the table below = "passed the **minimal-convention** DSR gate defined above, currently running through `paper-place-orders` on Binance testnet as a deliberate validation step before any real money." It is **not** a claim that the config clears DSR > 0.5 under the primary conservative convention — it does not (0.037).
+**Status of strategy #1 as of 2026-08-30: LIVE on Binance mainnet with real money (~148 USDT), since 2026-08-24.**
+
+That is a deliberately small allocation, and the ladder that got there was walked step by step rather than flag-flipped:
+
+1. **Testnet paper trading** — validated the order pipeline (idempotent `clientOrderId`, reconstruction, wait-for-ack, journal schema). Note that testnet **cannot** validate the signal path: Binance testnet wipes its candle history roughly monthly, so SMA(200) never warms and no buy order is ever placed there.
+2. **Mainnet read-only observation** — 6-hourly dry-run cron against a key with no trading permission. Mainnet has full kline history, so this is where the SMA(200) / ladder signal path was actually exercised.
+3. **Capped smoke test** (≤ 25 USDT) — one real order end to end.
+4. **Daily live cron** — since 2026-08-24; the first cycle filled 7 of 7 basket legs.
+
+Real-money placement is gated by three separate environment flags (`SANDBOX=false` + `ALLOW_MAINNET=true` unlock read paths; `MAINNET_LIVE_ORDERS=true` is additionally required to place). See `src/trade_lab/execution/README.md` for the full ladder and the environment-isolation guards.
+
+**LIVE status is not a profit claim.** It means the config passed the minimal-convention DSR gate, cleared the rollout ladder, and is now being observed with an amount the owner is willing to lose. Under the primary conservative convention this same config scores DSR 0.037 ≈ 0 — the deploy case rests on the parameter plateau plus this forward test, not on the DSR headline.
 
 ## All strategies at a glance
 
 | # | Strategy / variant | Class | Status | Key metric ¹ | Finding |
 |---|---|---|---|---|---|
-| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **PAPER (Binance testnet)** | Concat-OOS Sharpe +1.48 (venue-verified *replay* window 0.72 — fixed-config historical replay, not selection-OOS); conservative-deflator DSR 0.037 ≈ 0 — deploy case = parameter plateau (deployed config + **6** neighbors, raw Sharpe +1.37…+1.49, one shared return stream) + forward test; DSR 0.770 / cluster median 0.736 over all 7 members, **6/6 neighbors** > 0.5, under 1/sqrt(T) (secondary, = the gate convention) | `findings/han_28d_tsmom.md` |
+| 1 | **TSMOM (28, 60) + SMA(200) gate on market-basket** | Single-signal trend, 7-asset basket | **LIVE (Binance mainnet, capped)** | Concat-OOS Sharpe +1.48 (venue-verified *replay* window 0.72 — fixed-config historical replay, not selection-OOS); conservative-deflator DSR 0.037 ≈ 0 — deploy case = parameter plateau (deployed config + **6** neighbors, raw Sharpe +1.37…+1.49, one shared return stream) + forward test; DSR 0.770 / cluster median 0.736 over all 7 members, **6/6 neighbors** > 0.5, under 1/sqrt(T) (secondary, = the gate convention) | `findings/han_28d_tsmom.md` |
 | 2 | TSMOM short-ensemble (lookbacks 28/60/120, etc) | Strategy family | Cluster-stable | DSR median 0.736 over 7 cluster members = deployed (28, 60) + 6 neighbors (6/6 neighbors pass) | `findings/cluster_stability.md` |
 | 3 | TSMOM Han single lookbacks | Strategy family | Cluster-stable | DSR median 0.702 (6/6 pass) | `findings/cluster_stability.md` |
 | 4 | PMA ratio ladder | Strategy family | Cluster-stable | DSR median 0.716 (6/6 pass) | `findings/cluster_stability.md` |
@@ -100,7 +115,7 @@ Full statement of the policy and its scope: "DSR reporting convention" at the
 bottom of this file.
 
 Status legend:
-* **PAPER (Binance testnet)** — passes DSR > 0.5 at N=500 **under the minimal 1/sqrt(T) deflator (the gate convention — NOT the primary reporting convention, under which this same config scores 0.037 ≈ 0)**, cluster-stable, currently being validated through `paper-place-orders` on Binance testnet. NOT cleared for real money. See "What PAPER status actually means" above.
+* **LIVE (Binance mainnet, capped)** — passes DSR > 0.5 at N=500 **under the minimal 1/sqrt(T) deflator (the gate convention — NOT the primary reporting convention, under which this same config scores 0.037 ≈ 0)**, cluster-stable, walked the full rollout ladder, and placing real orders daily with capped capital since 2026-08-24. This is the forward test running, **not** a verdict that it passed. See "What LIVE status actually means" above.
 * Cluster-stable / Cluster-FAILS — see `findings/cluster_stability.md` for the rule.
 * Available / benchmark — implemented in code; not a standalone deploy candidate, used to verify other tests.
 * REJECT — net of cost and OOS, does not beat the relevant in-stack benchmark.
@@ -108,7 +123,7 @@ Status legend:
 
 ---
 
-## Currently paper-trading (Binance testnet)
+## Currently trading live (Binance mainnet, real money, capped)
 
 ### 1. TSMOM (28, 60) on market-basket index with SMA(200) gate
 * **Universe:** equal-weight market-basket of 7 majors (BTC, ETH, BNB, SOL, ADA, XRP, DOGE). Monthly rebalance + on-`N_active`-change rebalance.
@@ -122,10 +137,10 @@ Status legend:
 **What DSR under either convention actually says.** Both figures correct for the 500-trial selection budget with the same extreme-value machinery; they differ only in how dispersed the trial pool is assumed to be. The minimal-deflator figure (0.770) says the historical Sharpe clears the expected-max bar of 500 trials whose spread is nothing but the sampling noise of one Sharpe estimate. The conservative-deflator figure (0.037) says it does **not** clear the bar once the pool is assumed as dispersed as the project's pinned `sd ≈ 0.7`. Neither says the strategy will be profitable going forward. Backtest survival is the *previous* gate, not the *final* one.
 
 **Current state and what comes next.**
-* Now: running through `paper-place-orders` daily on Binance testnet (see `src/trade_lab/execution/README.md`).
-* Next gate: at least 4–8 clean weeks of testnet paper trading, during which signal stability, slippage divergence, partial-fill behaviour, and network-failure handling are observed against the actual order pipeline.
-* If testnet validation passes: a deliberate code-path migration to Kraken (CLAUDE.md hard rule "Live orders only on testnet" — mainnet is NOT a flag-flip, it's a manual engineering decision plus KYC plus exchange-specific market-constraint validation).
-* Until paper trading is done: this strategy is **not cleared for real money**, even though it has cleared every backtest-side gate.
+* Now: **live on Binance mainnet with real money since 2026-08-24**, ~148 USDT, placed daily by the `paper-place-orders` cron. The first live cycle filled 7 of 7 basket legs. See `src/trade_lab/execution/README.md` for the pipeline and the rollout ladder that was walked (testnet pipeline validation → mainnet read-only observation → capped smoke test → daily live cron).
+* An earlier revision of this file promised a "code-path migration to Kraken" and cited a CLAUDE.md rule "Live orders only on testnet". Both are obsolete: the Kraken plan was cancelled on 2026-07-09 (the premise that Binance is geo-blocked for the owner was simply wrong), and that hard rule no longer exists. What replaced it is the three-flag mainnet gate plus the rollout ladder — mainnet is still not a flag-flip.
+* Next: accumulate forward-test evidence at this size. As of 2026-08-30 the live sample is **six days** long and proves the *pipeline*, not the *edge* — at this horizon it cannot distinguish a working strategy from a lucky one, and it is not expected to.
+* Testnet remains configured as a second, parallel paper environment, with its own journal and state. Note it cannot validate the signal path at all: the testnet wipes candle history roughly monthly, so SMA(200) never warms there.
 
 * Finding: `findings/han_28d_tsmom.md`.
 
@@ -234,7 +249,7 @@ Implemented in `backtest/cross_sectional.py` (`run_cross_sectional_momentum`). U
   every config in this project, the deployed one included, sits at
   DSR ≈ 0, so a 0.5 bar would be vacuous rather than strict. The
   threshold and the primary reported DSR figure are therefore quoted
-  on different conventions on purpose — see "What PAPER status
+  on different conventions on purpose — see "What LIVE status
   actually means" above and the section below.
 
 ## DSR reporting convention (owner decision 2026-08-25)
@@ -300,11 +315,14 @@ carries a `#` provenance header naming the frozen-config hash, the data
 vintage, and the commit). Full rationale:
 `findings/dsr_convention_2026_08.md`.
 
-Last updated: 2026-08-30 (the file-wide "everything is minimal
-1/sqrt(T)" DSR label replaced with an enumerated per-row split —
-rows #12–#14 are conservative pooled-0.7 figures, row #10 is
-unlabelled). Previously 2026-08-26 (DSR two-layer convention +
+Last updated: 2026-08-30 (strategy #1 status corrected from "PAPER
+(Binance testnet)" to LIVE on Binance mainnet with capped real money
+since 2026-08-24; the obsolete Kraken-migration plan and the retired
+CLAUDE.md rule "Live orders only on testnet" removed; the rollout
+ladder actually walked is now described. Earlier the same day: the
+file-wide "everything is minimal 1/sqrt(T)" claim replaced by a
+per-row enumeration. Previously 2026-08-26: DSR two-layer convention +
 survivorship caveat + gate/reporting-convention split, replay-vs-OOS
 labeling, committed return-series artifacts, and cluster counting
-restated as deployed + 6 neighbours; strategy table content otherwise
-as of 2026-05-29).
+restated as deployed + 6 neighbours. Strategy table content otherwise
+as of 2026-05-29; the REJECT verdicts are unchanged.)

@@ -2,10 +2,45 @@
 
 [![CI](https://github.com/gistrec/trade-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/gistrec/trade-lab/actions/workflows/ci.yml)
 
-A research framework for fetching crypto OHLCV data, defining trading
-strategies, and backtesting them with realistic fees and slippage — built
-around a **layered honesty** validation stack so the final number you ship
-to paper trading isn't a polished in-sample mirage.
+A crypto research framework **and the live trading system that came out
+of it**. One strategy survived the validation stack and has been placing
+real orders on Binance mainnet since **2026-08-24**, with capped capital,
+under a daily cron — with a public read-only dashboard showing every
+cycle it runs: **[trade-lab.gistrec.cloud](https://trade-lab.gistrec.cloud/)**.
+
+The stack is built around **layered honesty**: IS Sharpe → OOS Sharpe →
+Deflated Sharpe at a pinned trial budget, each shown separately and never
+collapsed into a headline. The deployed config's honest DSR under the
+project's own conservative deflator is **0.037 ≈ 0** — the deploy case
+rests on a parameter plateau plus the forward test now running, not on a
+flattering number. See [RESULTS.md](RESULTS.md).
+
+![trade-lab monitoring dashboard](ops/static/og-image.png)
+
+**Four layers, each with its own README:**
+
+| Layer | What it does | Where |
+|---|---|---|
+| Research | fetch → strategies → backtest → walk-forward → DSR → ensemble | this README |
+| Forward harness | daily paper clock, frozen-config gate, vintage store, look-ahead detector, behavioural fingerprint monitor | [`paper_trading/README.md`](paper_trading/README.md) |
+| Execution | live order placement on Binance: signal → allocator → delta plan → idempotent orders → journal | [`src/trade_lab/execution/README.md`](src/trade_lab/execution/README.md) |
+| Monitoring | read-only Streamlit dashboard + health endpoints + alerting | [`src/trade_lab/monitoring/README.md`](src/trade_lab/monitoring/README.md) |
+
+```
+data (ccxt / Coin Metrics)
+   └─> basket index ──> signal (TSMOM ladder + SMA200 gate)
+                            └─> allocator (drifted weights × equity)
+                                   └─> delta plan (min-notional, reserve cap)
+                                          └─> orders (deterministic clientOrderId)
+                                                 └─> journal (JSONL, fsynced)
+                                                        ├─> dashboard + /healthz
+                                                        └─> execution-vs-sim tracking
+```
+
+Real-money placement is gated by **three** separate environment flags and a
+rollout ladder that was walked step by step (testnet pipeline validation →
+mainnet read-only observation → capped smoke test → daily live cron). It is
+not a flag-flip.
 
 What lives in this repo today:
 
@@ -24,18 +59,31 @@ What lives in this repo today:
 - **Walk-forward** runner with warmup-feed, optional purge gap, and
   per-fold + concatenated-OOS Deflated Sharpe Ratio (Bailey & López de
   Prado 2014). `PROJECT_NUM_TRIALS = 500` is pinned in code with a census
-  comment — it does not move retroactively. Every DSR in this README is
-  the **minimal 1/sqrt(T)** convention — read "DSR convention" below
-  before comparing any of these numbers with the deployed config's
-  reported figure.
+  comment — it does not move retroactively. **Convention:** every DSR in
+  this README is the **minimal 1/sqrt(T)** one, with a single stated
+  exception — the deployed config's headline **0.037** at the top of this
+  file is the *conservative* deflator. The two are never the same number;
+  read "DSR convention" below before comparing any of them.
 - A **21-sleeve equal-weight portfolio runner** (3 strategies × 7 assets,
   per-asset vol-target picks, dynamic 1/N_active with rebalance-on-
   universe-change costing) that aggregates everything above into a single
   deployable artifact.
 
-Paper / live execution is intentionally out of scope; the strategy, engine,
-and ensemble interfaces are designed so an execution layer can be wired in
-without touching strategy code.
+- A **live execution layer** (`src/trade_lab/execution/`) that turns the
+  signal into real orders: drifted-weight allocator, min-notional delta
+  planner, deterministic `clientOrderId` idempotency, order-state
+  reconstruction, wait-for-ack, and an fsynced JSONL journal. Built on
+  ccxt, but deliberately **Binance-only at runtime**: `VERIFIED_EXCHANGES`
+  gates `Broker.connect`, because the idempotency parameters are
+  venue-specific and an unverified venue must not be reached by accident.
+  The exchange is the single source of truth — balances are never cached
+  across cycles.
+- A **read-only monitoring dashboard** (`src/trade_lab/monitoring/`) plus
+  health endpoints and Prometheus metrics for alerting. It never writes,
+  never touches the exchange, and holds no credentials.
+
+An earlier revision of this README said "paper / live execution is
+intentionally out of scope". That stopped being true on 2026-08-24.
 
 ## Install
 
@@ -464,7 +512,8 @@ extraction — your strategy only needs to express the target position.
 
 ```
 src/trade_lab/
-  config.py             Environment-driven configuration
+  config.py             Environment-driven configuration + the pinned
+                        PRODUCTION_CONFIG and its canonical hash.
   data/                 ccxt fetcher, parquet storage, Coin Metrics
                         community client, curated coin registry, PIT
                         universe builder.
@@ -474,9 +523,25 @@ src/trade_lab/
                         sweep, compare, multi_asset, yearly,
                         cross_sectional (XSMOM), dsr (Deflated
                         Sharpe), walk_forward + walk_forward_v2
-                        (generic), ensemble (portfolio runner).
+                        (generic), ensemble (portfolio runner),
+                        market_index (the deployed basket).
+  paper_trading/        Forward harness: daily paper clock with a
+                        frozen-config gate, hash-addressed vintage
+                        store, look-ahead detector, behavioural
+                        fingerprint + its live monitor, and the
+                        execution-vs-simulation tracking layer.
+  execution/            LIVE order path: config (three-flag mainnet
+                        gate), broker (ccxt), signal, allocator,
+                        delta, orders (deterministic clientOrderId),
+                        order_state, journal, live_cycle, dry_run,
+                        db_mirror.
+  monitoring/           Read-only Streamlit dashboard + data_source.
+                        No writes, no exchange, no credentials.
+  dashboard/            Local backtest inspector (research tool).
   risk/                 Position sizing helpers.
   cli.py                argparse entry point.
+ops/                    pm2 ecosystems, health apps, netdata alarm
+                        definitions, static assets.
 ```
 
 ## Tests
@@ -485,10 +550,15 @@ src/trade_lab/
 pytest
 ```
 
-Covers SMA signal generation, the backtest engine (look-ahead prevention,
-fee/slippage handling, trade extraction, position sizing, total-fee
-calculation, buy & hold), and metrics (returns, max drawdown across multiple
-peaks).
+~1400 tests across the backtest engine, strategies, walk-forward, DSR,
+the execution path (mocked exchange — never the live API), the forward
+harness, and the monitoring layer. CI runs the suite on a **Python
+3.11 / 3.12 / 3.13 matrix** with `--cov-fail-under=70`, plus a `ruff`
+lint job.
+
+Execution tests include deliberately defensive stubs — fakes that omit
+dangerous methods so an accidental live call raises immediately rather
+than reaching an exchange.
 
 ## Strategies
 
@@ -596,11 +666,18 @@ Completed in earlier rounds (see `docs/results/` and `findings/`):
 - Survivorship-free cross-sectional universe — `data/universe.py` with
   Coin Metrics community fetcher and curated delisting registry.
 - Symmetric cost model for benchmarks — `engine.buy_and_hold_with_costs`.
+- Paper trading via a `Broker` interface — `execution/broker.py`, ccxt-backed,
+  validated on Binance testnet.
+- Forward harness with a frozen-config gate, vintage store and look-ahead
+  detector — `paper_trading/`.
+- **Live execution** — `execution/live_cycle.py`, placing real orders on
+  Binance mainnet daily since 2026-08-24 behind a three-flag gate.
+- Monitoring, health endpoints and alerting — `monitoring/`, `ops/`.
 
 Open:
 
-- Paper trading via a `Broker` interface (Binance testnet first).
-- Live execution (gated on >=4-8 weeks of clean paper-trading results).
+- Basket composition is an **ex-post choice**: the survivorship /
+  composition axis is still untested (`findings/validation_universe_bias.md`).
 - Inverse-vol and risk-parity allocators as alternatives to equal-weight.
 - Higher-frequency timeframes (4h, 1h) to widen the OOS sample. Tests
   with 1d data sit at "marginal" DSR for the best single sleeve only;

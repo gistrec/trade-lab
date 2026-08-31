@@ -101,12 +101,24 @@ def _require_env(name: str) -> str:
 
 def _parse_basket(value: str | None) -> Tuple[str, ...]:
     """Comma-separated symbol list. Default is the 7-asset basket
-    matching `data/binance_*_USDT_1d.parquet`."""
-    if not value:
+    matching `data/binance_*_USDT_1d.parquet`.
+
+    Unset means "use the default". SET but parsing to nothing (``","``,
+    whitespace) means the operator tried to say something and it did not
+    survive — substituting the default there silently trades a basket
+    nobody asked for. The composition is a pinned parameter; picking one
+    on the operator's behalf is the same class of harm as shrinking it.
+    """
+    if value is None:
         return _DEFAULT_BASKET
     parts = [p.strip().upper() for p in value.split(",") if p.strip()]
     if not parts:
-        return _DEFAULT_BASKET
+        raise PaperConfigError(
+            f"TRADE_LAB_PAPER_BASKET is set to {value!r} but parses to zero "
+            f"symbols. Comment the line out (or remove it) to use the "
+            f"default basket ({', '.join(_DEFAULT_BASKET)}) — the executor "
+            f"will not pick a composition on your behalf."
+        )
     return tuple(parts)
 
 

@@ -351,3 +351,33 @@ def test_non_positive_recv_window_raises(monkeypatch):
     _apply_env(monkeypatch, env)
     with pytest.raises(PaperConfigError, match="RECV_WINDOW_MS"):
         load_paper_config()
+
+
+# ---------------------------------------------------------------------------
+# A basket that parses to nothing must not be replaced by the default
+# ---------------------------------------------------------------------------
+
+
+def test_unset_basket_uses_the_default():
+    from trade_lab.execution.config import _DEFAULT_BASKET, _parse_basket
+
+    assert _parse_basket(None) == _DEFAULT_BASKET
+
+
+def test_basket_set_but_parsing_to_nothing_raises():
+    """The operator tried to say something and it did not survive.
+    Substituting the default there silently trades a composition nobody
+    asked for — the same class of harm as shrinking the basket."""
+    import pytest
+
+    from trade_lab.execution.config import PaperConfigError, _parse_basket
+
+    for junk in (",", ",,", "   ", " , , ", ""):
+        with pytest.raises(PaperConfigError, match="parses to zero symbols"):
+            _parse_basket(junk)
+
+
+def test_basket_parses_symbols_and_normalises_case():
+    from trade_lab.execution.config import _parse_basket
+
+    assert _parse_basket("btc, eth ,DOGE") == ("BTC", "ETH", "DOGE")
