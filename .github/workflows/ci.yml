@@ -39,15 +39,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: pyproject.toml
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
 
       - name: Install package + all extras
         # research/monitoring/dashboard extras are needed so every module
         # imports (hmmlearn, scikit-learn, streamlit, plotly); otherwise
         # collection of the monitoring/backtest tests would error.
+        #
+        # -c constraints.txt: CI must test the SAME versions the server
+        # installs. Without it CI resolved at run time and the server
+        # resolved at rebuild time, so the tested ccxt and the trading
+        # ccxt were different builds — measured 2026-08-30, three
+        # versions in play at once.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,research,monitoring,dashboard]"
+          pip install -e ".[dev,research,monitoring,dashboard]" -c constraints.txt
 
       - name: Run tests with coverage
         # Floor sits just under the current 73% so a small regression is

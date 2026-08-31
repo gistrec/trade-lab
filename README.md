@@ -88,10 +88,23 @@ intentionally out of scope". That stopped being true on 2026-08-24.
 ## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+python3 -m venv .venv
+source .venv/bin/activate                       # the commands below assume this
+scripts/install_runtime.sh .venv dev            # constrained install
 ```
+
+`scripts/install_runtime.sh` is the single tracked install procedure: it
+applies `constraints.txt`, so the versions you develop against are the
+versions CI tests and the server trades on. Every deployment path — the
+SSH helper, an ansible role, a hand-rebuilt box — goes through it.
+
+Dependencies are declared with lower bounds only, so an unconstrained
+`pip install -e .` resolves whatever shipped that day. On 2026-08-30
+that had produced **three** simultaneous ccxt versions: one in the dev
+venv where tests ran, another on the box placing real orders, a third
+from a fresh resolve. Updating the pins is a deliberate commit that CI
+runs the suite against before any deploy — see the header of
+`constraints.txt` for the regeneration command.
 
 Copy `.env.example` to `.env` and tweak defaults if desired.
 

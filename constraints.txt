@@ -1,0 +1,280 @@
+# Pinned transitive dependency set. Applied with `-c` by BOTH CI
+# (.github/workflows/ci.yml) and deploy.sh, so the versions the test suite
+# runs against are the versions the real-money order path imports.
+#
+# Why this file exists: dependencies are declared with lower bounds only
+# (ccxt>=4.0), so every unconstrained install resolved to whatever was
+# current that day. On 2026-08-30 three ccxt versions were in play at
+# once — 4.5.56 in the dev venv where tests ran, 4.5.74 on the box placing
+# real orders, 4.5.76 from a fresh resolve. ccxt releases almost daily and
+# changes order params, sandbox URLs and error handling; "execution must
+# replicate the backtest" cannot hold on an environment nobody pinned.
+#
+# Regenerate deliberately, in its own commit, and let CI run the suite
+# against the new set BEFORE deploying:
+#
+#   uv pip compile pyproject.toml --all-extras --universal \
+#       --python-version 3.11 --no-header --output-file constraints.txt
+#
+# --universal keeps one file valid for macOS dev and Linux server; the
+# 3.11 floor matches requires-python, and markers cover the 3.11-3.13 CI
+# matrix (see the numpy split below).
+
+aiohappyeyeballs==2.7.1
+    # via
+    #   aiohttp
+    #   ccxt
+aiohttp==3.14.3
+    # via
+    #   aiohttp-fast-zlib
+    #   ccxt
+aiohttp-fast-zlib==0.3.0
+    # via ccxt
+aiosignal==1.4.0
+    # via
+    #   aiohttp
+    #   ccxt
+altair==6.2.2
+    # via streamlit
+anyio==4.14.2
+    # via
+    #   starlette
+    #   streamlit
+attrs==26.1.0
+    # via
+    #   aiohttp
+    #   ccxt
+    #   jsonschema
+    #   referencing
+blinker==1.9.0
+    # via streamlit
+ccxt==4.5.76
+    # via trade-lab (pyproject.toml)
+certifi==2026.6.17
+    # via
+    #   ccxt
+    #   requests
+cffi==2.0.0
+    # via
+    #   ccxt
+    #   cryptography
+charset-normalizer==3.4.7
+    # via
+    #   ccxt
+    #   requests
+click==8.5.0
+    # via
+    #   streamlit
+    #   uvicorn
+coincurve==21.0.0 ; python_full_version < '3.14' and implementation_name == 'cpython' and platform_machine != 'x86' and platform_machine in 'x86_64 AMD64 aarch64 arm64 ARM64 i686'
+    # via ccxt
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via pytest
+contourpy==1.3.3
+    # via matplotlib
+coverage==7.16.0
+    # via pytest-cov
+cryptography==50.0.1
+    # via ccxt
+cycler==0.12.1
+    # via matplotlib
+fonttools==4.63.0
+    # via matplotlib
+frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
+    #   ccxt
+h11==0.16.0
+    # via uvicorn
+hmmlearn==0.3.3
+    # via trade-lab (pyproject.toml)
+httptools==0.8.0
+    # via streamlit
+idna==3.18
+    # via
+    #   anyio
+    #   ccxt
+    #   requests
+    #   yarl
+iniconfig==2.3.0
+    # via pytest
+itsdangerous==2.2.0
+    # via streamlit
+jinja2==3.1.6
+    # via
+    #   altair
+    #   pydeck
+joblib==1.5.3
+    # via scikit-learn
+jsonschema==4.26.0
+    # via altair
+jsonschema-specifications==2025.9.1
+    # via jsonschema
+kiwisolver==1.5.1
+    # via matplotlib
+markupsafe==3.0.3
+    # via jinja2
+matplotlib==3.11.1
+    # via trade-lab (pyproject.toml)
+multidict==6.7.1
+    # via
+    #   aiohttp
+    #   ccxt
+    #   yarl
+narwhals==2.25.0
+    # via
+    #   altair
+    #   plotly
+numpy==2.4.6 ; python_full_version < '3.12'
+    # via
+    #   trade-lab (pyproject.toml)
+    #   contourpy
+    #   hmmlearn
+    #   matplotlib
+    #   pandas
+    #   pydeck
+    #   scikit-learn
+    #   scipy
+    #   streamlit
+numpy==2.5.2 ; python_full_version >= '3.12'
+    # via
+    #   trade-lab (pyproject.toml)
+    #   contourpy
+    #   hmmlearn
+    #   matplotlib
+    #   pandas
+    #   pydeck
+    #   scikit-learn
+    #   scipy
+    #   streamlit
+orjson==3.11.9 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x'
+    # via ccxt
+packaging==26.3
+    # via
+    #   altair
+    #   matplotlib
+    #   plotly
+    #   pytest
+    #   streamlit
+pandas==3.0.5
+    # via
+    #   trade-lab (pyproject.toml)
+    #   streamlit
+pillow==12.3.0
+    # via
+    #   matplotlib
+    #   streamlit
+plotly==7.0.0
+    # via trade-lab (pyproject.toml)
+pluggy==1.6.0
+    # via
+    #   pytest
+    #   pytest-cov
+propcache==0.5.2
+    # via
+    #   aiohttp
+    #   ccxt
+    #   yarl
+protobuf==7.36.0
+    # via streamlit
+pyarrow==25.0.1
+    # via
+    #   trade-lab (pyproject.toml)
+    #   streamlit
+pycparser==3.0
+    # via
+    #   ccxt
+    #   cffi
+pydeck==0.9.3
+    # via streamlit
+pygments==2.21.0
+    # via pytest
+pymysql==1.2.0
+    # via trade-lab (pyproject.toml)
+pyparsing==3.3.2
+    # via matplotlib
+pytest==9.1.1
+    # via
+    #   trade-lab (pyproject.toml)
+    #   pytest-cov
+pytest-cov==7.1.0
+    # via trade-lab (pyproject.toml)
+python-dateutil==2.9.0.post0
+    # via
+    #   matplotlib
+    #   pandas
+python-dotenv==1.2.3
+    # via trade-lab (pyproject.toml)
+python-multipart==0.0.32
+    # via streamlit
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
+requests==2.34.2
+    # via
+    #   ccxt
+    #   streamlit
+rpds-py==2026.6.3
+    # via
+    #   jsonschema
+    #   referencing
+ruff==0.15.22
+    # via trade-lab (pyproject.toml)
+scikit-learn==1.5.2
+    # via
+    #   trade-lab (pyproject.toml)
+    #   hmmlearn
+scipy==1.17.1 ; python_full_version < '3.12'
+    # via
+    #   hmmlearn
+    #   scikit-learn
+scipy==1.18.1 ; python_full_version >= '3.12'
+    # via
+    #   hmmlearn
+    #   scikit-learn
+six==1.17.0
+    # via python-dateutil
+starlette==1.6.0
+    # via streamlit
+streamlit==1.62.0
+    # via trade-lab (pyproject.toml)
+threadpoolctl==3.6.0
+    # via scikit-learn
+toml==0.10.2
+    # via streamlit
+tomli==2.4.1 ; python_full_version <= '3.11'
+    # via coverage
+typing-extensions==4.16.0
+    # via
+    #   aiohttp
+    #   aiosignal
+    #   altair
+    #   anyio
+    #   ccxt
+    #   referencing
+    #   starlette
+    #   streamlit
+tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
+    # via pandas
+urllib3==2.7.0
+    # via
+    #   ccxt
+    #   requests
+uvicorn==0.52.4
+    # via streamlit
+uvloop==0.22.1 ; implementation_name == 'cpython' and sys_platform != 'win32'
+    # via ccxt
+watchdog==6.0.0 ; sys_platform != 'darwin'
+    # via streamlit
+websockets==16.1.1
+    # via streamlit
+winloop==0.6.3 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'AMD64 ARM64' and sys_platform == 'win32'
+    # via ccxt
+yarl==1.24.5
+    # via
+    #   aiohttp
+    #   ccxt
+zlib-ng==1.0.0
+    # via ccxt
