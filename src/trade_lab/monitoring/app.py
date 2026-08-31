@@ -372,14 +372,18 @@ def _health_verdict(reader: JournalReader) -> tuple[str, str]:
 def _render_health_line(reader: JournalReader) -> None:
     level, why = _health_verdict(reader)
     color = {"HEALTHY": "#1b5e20", "DEGRADED": "#bf360c", "DOWN": "#b71c1c"}[level]
-    # A clear margin-top gap separates this from the sandbox/mainnet banner
-    # above — without it two same-green plaques (TESTNET + HEALTHY are both
+    # margin-top separates this from the sandbox/mainnet banner above —
+    # without it two same-green plaques (TESTNET + HEALTHY are both
     # #1b5e20) read as one merged block. Neither is sticky: a sticky banner
     # with a non-sticky sibling makes the sibling slide UNDER it on scroll.
+    #
+    # margin-bottom is not symmetry: the KPI row that follows is bare
+    # st.metric with no background, so at zero gap its first label sits ON
+    # the plaque's bottom edge and reads as a line spilling out of it.
     st.markdown(
         f"<div style='background:{color};color:white;padding:0.5rem;"
-        f"margin-top:0.5rem;border-radius:0.4rem;text-align:center;"
-        f"font-size:1.05rem;'>"
+        f"margin-top:0.5rem;margin-bottom:1.1rem;border-radius:0.4rem;"
+        f"text-align:center;font-size:1.05rem;'>"
         f"BOT {level} — {why}</div>",
         unsafe_allow_html=True,
     )
@@ -1071,149 +1075,6 @@ def _ladder_prev_day_delta(
         return None, None
     days = sorted(by_day)
     return by_day[days[-1]] - by_day[days[-2]], (days[-1] - days[-2]).days
-
-
-def _equity_prev_day_delta(
-    reader: JournalReader,
-) -> tuple[Optional[float], Optional[str], Optional[float], Optional[int]]:
-    """``(latest equity, its quote, change vs the previous reading, gap)``.
-
-    The quote travels WITH the reading. The newest cycle may have failed
-    before reading a balance, so the displayed equity can come from an
-    older cycle — labelling it with the newest cycle's currency would
-    stamp a USDT balance as USDC.
-
-    Last-of-day like :func:`_ladder_prev_day_delta`: ~24 dry-run cycles a
-    day would otherwise make an intraday repeat read as a change. Keyed on
-    ``ended_at``, since ``equity_usd`` is stamped when the cycle read the
-    exchange, not on the signal bar it acts upon.
-
-    Three things are refused rather than compared:
-
-    * non-finite readings — a journalled ``NaN`` / ``inf`` would render as
-      ``nan`` and poison the delta (``equity_series`` passes them through);
-    * a currency switch — subtracting a USDC balance from an earlier USDT
-      one produces a number with no meaning, and the environment guard
-      only validates exchange and sandbox, not the quote;
-    * the gap is returned, not assumed — after missed cycles the two most
-      recent dates can be ten days apart, and the caller must not label
-      that "vs prior day".
-    """
-    by_day: dict = {}
-    for c in reader.cycles(n=500):
-        if c.get("outcome") != "success":
-            continue
-        dt = parse_iso(c.get("ended_at"))
-        eq = _numeric(c.get("equity_usd"))
-        if dt is None or eq is None:
-            continue
-        # astimezone before .date(): parse_iso preserves the written
-        # offset, so a non-UTC timestamp (the cron once ran on MSK) would
-        # bucket by its LOCAL calendar day. Around midnight that either
-        # splits one UTC day in two or merges two into one, and the gap
-        # label built from these keys would be wrong either way.
-        by_day[dt.astimezone(timezone.utc).date()] = (
-            eq, _cycle_context(c).get("quote_currency"))
-    if not by_day:
-        return None, None, None, None
-    days = sorted(by_day)
-    latest, latest_quote = by_day[days[-1]]
-    if len(days) < 2:
-        return latest, latest_quote, None, None
-    prev, prev_quote = by_day[days[-2]]
-    # Both sides must be KNOWN and equal. `None == None` would call two
-    # undenominated readings comparable, which is the cross-currency
-    # subtraction this guard exists to refuse — just undetected.
-    if not latest_quote or not prev_quote or prev_quote != latest_quote:
-        return latest, latest_quote, None, None
-    return latest, latest_quote, latest - prev, (days[-1] - days[-2]).days
-
-
-def _render_kpi_row(reader: JournalReader) -> None:
-    """The four numbers worth a phone glance, above the tabs.
-
-    Everything above this row is environment chrome — which source, is the
-    bot alive — and the money lived two taps away in Portfolio / Signal.
-    Pure journal display: no computation the tabs do not already do.
-    """
-    latest = reader.latest_cycle()
-    sig = (latest or {}).get("signal") or {}
-    equity, eq_quote, eq_delta, eq_gap = _equity_prev_day_delta(reader)
-    # The reading's own currency. The latest cycle is consulted only when
-    # there is NO reading to label — a reading whose own quote is missing
-    # is undenominated, and borrowing the newest cycle's currency would
-    # stamp a denomination onto a number that has none.
-    if equity is None:
-        quote = _cycle_context(latest).get("quote_currency") or "USD"
-    else:
-        quote = eq_quote or "?"
-    gate_state, gate_days = _gate_state_duration_days(reader)
-    live = reader.latest_live_cycle()
-    # Both signal deltas come from the DATED day series, which drops any
-    # cycle whose `asof` is missing or unparseable. The value can be
-    # perfectly readable while its timestamp is not — and then the tile
-    # would show today's reading beside a change computed entirely from
-    # older rows. Require the current signal to be the newest dated point.
-    sig_dt = parse_iso(sig.get("asof"))
-    sig_day = sig_dt.astimezone(timezone.utc).date() if sig_dt else None
-    ladder_days = _latest_ladder_by_day(reader)
-    signal_is_dated = (
-        sig_day is not None and bool(ladder_days)
-        and max(ladder_days) == sig_day
-    )
-
-    cols = st.columns(4)
-    # Name the actual interval. The previous reading is only yesterday's
-    # when the cron did not miss a day; after a gap this tile would
-    # otherwise present a ten-day move as an overnight one.
-    cols[0].metric(
-        f"Equity ({quote})",
-        f"{equity:,.2f}" if equity is not None else "—",
-        delta=(f"{eq_delta:+,.2f} {_interval_label(eq_gap)}"
-               if eq_delta is not None else None),
-        # 'off', never 'normal': equity moves on deposits and withdrawals
-        # too, so a green delta would sell a capital top-up as profit —
-        # the exact conflation the execution-tracking layer refuses to
-        # make. This tile reports a level change, not a return.
-        delta_color="off",
-    )
-    # A delta is only shown beside a KNOWN value. Pairing "—" with a
-    # historical change (latest cycle failed, older signal rows remain)
-    # would describe a movement of a quantity the tile just admitted it
-    # cannot read.
-    ladder = _numeric(sig.get("ladder_value"))
-    ladder_delta, ladder_gap = (
-        _ladder_prev_day_delta(reader)
-        if ladder is not None and signal_is_dated else (None, None)
-    )
-    cols[1].metric(
-        "Ladder",
-        f"{ladder:.2f}" if ladder is not None else "—",
-        delta=(f"{ladder_delta:+.2f} {_interval_label(ladder_gap)}"
-               if ladder_delta is not None else None),
-        delta_color="normal" if ladder_delta else "off",
-    )
-    gate_label = _gate_label(sig.get("sma_gate_open"))
-    cols[2].metric(
-        "SMA(200) gate",
-        gate_label,
-        delta=(f"{gate_days}d {gate_state}"
-               if gate_days is not None and gate_label != "—"
-               and signal_is_dated else None),
-        delta_color="off",
-        # State, not magnitude: without this Streamlit paints an upward
-        # arrow beside "12d OPEN" and categorical state reads as a
-        # numeric improvement.
-        delta_arrow="off",
-    )
-    cols[3].metric(
-        "Last LIVE",
-        _humanize_relative((live or {}).get("ended_at")),
-        delta=(str(live.get("outcome") or "?").upper()
-               if live is not None else None),
-        delta_color="off",
-        delta_arrow="off",
-    )
 
 
 def _distinct_commits(cycles: list) -> list:
@@ -2372,7 +2233,15 @@ def _render_dashboard() -> None:
                 f"TRADE_LAB_MONITORING_JOURNAL_PATH*."
             )
     _render_tab_safely("Health", lambda: _render_health_line(reader))
-    _render_tab_safely("KPI row", lambda: _render_kpi_row(reader))
+    # A rule between the KPI row and the tab strip. The Status tab opens
+    # with its own four st.metric tiles, so without a boundary the two
+    # rows stack into one eight-tile block split only by the thin tab
+    # labels, and neither row reads as belonging anywhere.
+    st.markdown(
+        "<hr style='margin:1.1rem 0 0.2rem 0;border:none;"
+        "border-top:1px solid rgba(128,128,128,0.35);'>",
+        unsafe_allow_html=True,
+    )
 
     (tab_status, tab_signal, tab_portfolio, tab_cycles,
      tab_validation, tab_research) = st.tabs(
