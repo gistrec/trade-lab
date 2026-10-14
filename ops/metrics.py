@@ -170,10 +170,13 @@ def render_metrics(
         "client_order_id (recent window)",
         [(None, len(unresolved_order_incidents(reader.cycles(_RECENT))))])
     # A point reading, not a sum: each cycle re-measures the whole residual.
-    drift_pct = skipped_drift_pct(reader.latest_placed_live_cycle())
-    fam("tradelab_skipped_drift_pct", "gauge",
-        "sub-min notional the latest live cycle could not place, % of equity",
-        [(None, drift_pct if drift_pct is not None else 0.0)])
+    # Omitted, not 0, without a reading: 0 would clear the alarm.
+    drift_pct = skipped_drift_pct(reader.latest_live_measurement())
+    if drift_pct is not None:
+        fam("tradelab_skipped_drift_pct", "gauge",
+            "sub-min notional the latest live cycle could not place, "
+            "% of equity",
+            [(None, drift_pct)])
 
     # --- db-mirror durability (per-environment mirror_status*.json) ------
     if isinstance(mirror_status, dict):

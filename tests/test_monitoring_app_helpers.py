@@ -1064,7 +1064,7 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
         def latest_cycle(self):
             return cycle
 
-        def latest_placed_live_cycle(self):
+        def latest_live_measurement(self):
             return cycle
 
         def live_skipped_drift(self):
@@ -1929,8 +1929,8 @@ def test_submin_notice_counts_live_ATTEMPTS_not_placed_orders(
     tmp_path, monkeypatch,
 ):
     """A live cycle that raised before placing writes orders_executed=None,
-    so latest_placed_live_cycle() stays None. Telling the operator "the cron never
-    ran" is exactly wrong when their cron ran and failed."""
+    so latest_live_measurement() stays None. Telling the operator "the cron
+    never ran" is exactly wrong when their cron ran and failed."""
     import json
     import pytest as _pytest
     from pathlib import Path

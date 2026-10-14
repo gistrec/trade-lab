@@ -610,16 +610,17 @@ class JournalReader:
             return Staleness.STALE
         return Staleness.DOWN
 
-    def latest_placed_live_cycle(self) -> Optional[dict]:
-        """Most recent cycle that ran the placement path, or None.
+    def latest_live_measurement(self) -> Optional[dict]:
+        """Most recent successful live cycle carrying a drift reading.
 
-        Placed-orders semantics (:func:`is_live_cycle`), unlike
-        :meth:`latest_live_cycle`: an attempt that raised before planning
-        carries no skipped-delta reading.
+        Reconstruction, failed-with-partial-orders and skipped_warmup rows
+        are live by :func:`is_live_cycle` but write drift/equity as None;
+        reading one as 0 would clear the drift alarm on a still-open gap.
         """
         self._refresh_if_changed()
         for c in reversed(self._cache):
-            if is_live_cycle(c):
+            if (is_live_cycle(c) and c.get("outcome") == "success"
+                    and c.get("total_skipped_quote_drift") is not None):
                 return c
         return None
 
@@ -632,7 +633,7 @@ class JournalReader:
         cycles × ~8 USDT read 370 USDT on a 155 USDT book). Dry-runs are
         excluded — they plan, they refuse nothing.
         """
-        c = self.latest_placed_live_cycle()
+        c = self.latest_live_measurement()
         return float(c.get("total_skipped_quote_drift") or 0.0) if c else 0.0
 
     def latest_skipped_drift(self) -> float:

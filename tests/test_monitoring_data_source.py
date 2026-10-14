@@ -353,7 +353,24 @@ def test_live_skipped_drift_is_the_latest_live_reading_not_a_sum(tmp_path):
     ])
     reader = JournalReader(journal)
     assert reader.live_skipped_drift() == 7.5
-    assert reader.latest_placed_live_cycle()["cycle_id"] == "live2"
+    assert reader.latest_live_measurement()["cycle_id"] == "live2"
+
+
+def test_live_skipped_drift_skips_rows_without_a_measurement(tmp_path):
+    """Reconstruction / failed-with-partials / skipped_warmup rows are live
+    but write drift=None; reading them as 0 cleared the alarm on an open gap."""
+    journal = tmp_path / "j.jsonl"
+    measured = _live_entry("live1", skipped_drift=8.0)
+    recon = _live_entry("recon", skipped_drift=0.0)
+    recon["outcome"] = "reconstructed"
+    recon["total_skipped_quote_drift"] = None
+    failed = _live_entry("failed", skipped_drift=0.0)
+    failed["outcome"] = "failed"
+    failed["total_skipped_quote_drift"] = None
+    _write_journal(journal, [measured, recon, failed])
+    reader = JournalReader(journal)
+    assert reader.live_skipped_drift() == 8.0
+    assert reader.latest_live_measurement()["cycle_id"] == "live1"
 
 
 def test_live_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
@@ -365,7 +382,7 @@ def test_live_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
     ])
     reader = JournalReader(journal)
     assert reader.live_skipped_drift() == 0.0
-    assert reader.latest_placed_live_cycle() is None
+    assert reader.latest_live_measurement() is None
 
 
 def test_latest_skipped_drift_is_a_point_reading(tmp_path):
@@ -384,7 +401,7 @@ def test_latest_skipped_drift_empty_journal(tmp_path):
     reader = JournalReader(tmp_path / "missing.jsonl")
     assert reader.latest_skipped_drift() == 0.0
     assert reader.live_skipped_drift() == 0.0
-    assert reader.latest_placed_live_cycle() is None
+    assert reader.latest_live_measurement() is None
 
 
 def test_skipped_drift_pct():

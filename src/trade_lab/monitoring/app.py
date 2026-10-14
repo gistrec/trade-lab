@@ -491,7 +491,7 @@ def _render_status(reader: JournalReader) -> None:
     # Point reading of the latest live cycle: a dry-run skips nothing it
     # meant to send, and summing live cycles re-counts one unchanged gap
     # every day.
-    live_cycle = reader.latest_placed_live_cycle()
+    live_cycle = reader.latest_live_measurement()
     drift = reader.live_skipped_drift()
     if drift <= 0:
         planned_drift = reader.latest_skipped_drift()
@@ -501,7 +501,7 @@ def _render_status(reader: JournalReader) -> None:
             # leave the sum at zero, and on mainnet that made the page
             # deny its own trading.
             #
-            # ATTEMPT-aware, not latest_placed_live_cycle(): a live cycle
+            # ATTEMPT-aware, not latest_live_measurement(): a live cycle
             # that raised before placing is invisible to it — and "the
             # cron never ran" is exactly the wrong thing to tell an
             # operator whose cron ran and failed.
@@ -1476,7 +1476,7 @@ def _render_portfolio(reader: JournalReader) -> None:
             f"per-order status."
         )
 
-    live_cycle = reader.latest_placed_live_cycle()
+    live_cycle = reader.latest_live_measurement()
     if live_cycle is not None:
         pct = skipped_drift_pct(live_cycle)
         share = f" ({pct:.1f}% of equity)" if pct is not None else ""
@@ -1486,8 +1486,8 @@ def _render_portfolio(reader: JournalReader) -> None:
         )
     else:
         st.caption(
-            f"No live cycles yet — execution drift is 0.00 "
-            f"{quote}. Latest planning cycle left "
+            f"No successful live cycle yet — no execution drift "
+            f"reading. Latest planning cycle left "
             f"{reader.latest_skipped_drift():,.2f} {quote} unplaceable "
             f"(below exchange minima)."
         )

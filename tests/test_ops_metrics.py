@@ -356,7 +356,19 @@ def test_skipped_drift_gauge_is_the_latest_live_point_reading(tmp_path):
     assert "tradelab_cumulative_skipped_drift_usd" not in m
 
 
-def test_skipped_drift_gauge_without_live_cycles_is_zero(tmp_path):
+def test_skipped_drift_gauge_is_omitted_without_a_reading(tmp_path):
+    """0 would clear the alarm; a newest live row with drift=None (here a
+    reconstruction) must fall through to the last real measurement."""
     reader = _journal(tmp_path, [_entry(ended_at=NOW, live=False)])
-    assert _parse(metrics.render_metrics(reader, NOW))[
-        "tradelab_skipped_drift_pct"] == 0.0
+    assert "tradelab_skipped_drift_pct" not in _parse(
+        metrics.render_metrics(reader, NOW))
+
+    measured = _entry(ended_at=NOW - timedelta(days=1), live=True,
+                      cycle_id="m", equity=100.0)
+    measured["total_skipped_quote_drift"] = 12.0
+    recon = _entry(ended_at=NOW, live=True, cycle_id="r",
+                   outcome="reconstructed")
+    recon["total_skipped_quote_drift"] = None
+    m = _parse(metrics.render_metrics(_journal(tmp_path, [measured, recon]),
+                                      NOW))
+    assert m["tradelab_skipped_drift_pct"] == 12.0
