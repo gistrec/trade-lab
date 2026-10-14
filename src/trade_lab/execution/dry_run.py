@@ -67,7 +67,7 @@ class DryRunResult:
     current_holdings_quote: dict[str, float]  # asset -> current quote
     orders_planned: list[dict]            # serialized OrderIntent
     orders_skipped: list[dict]            # serialized SkippedDelta
-    total_skipped_quote_drift: float      # cumulative sub-min divergence
+    total_skipped_quote_drift: float      # this cycle's sub-min divergence
     total_funding_cap_quote: float
     # Quote the RESERVE_BPS cap held back, metered apart from the sub-min
     # drift (deliberate reserve vs work the exchange refuses). Capped
@@ -309,7 +309,7 @@ def print_dry_run(result: DryRunResult, *, quote: str) -> None:
     ]
     if submin:
         print(f"Sub-min divergence ({len(submin)}, "
-              f"cumulative {result.total_skipped_quote_drift:.2f} {quote}):")
+              f"total {result.total_skipped_quote_drift:.2f} {quote}):")
         for s in submin:
             print(f"  SKIP {s['desired_side'].upper():4s} {s['symbol']:12s} "
                   f"{s['desired_amount']:.8f}  ({s['desired_notional']:.2f} "

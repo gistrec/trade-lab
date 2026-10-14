@@ -497,7 +497,7 @@ def test_print_dry_run_meters_reserve_cap_apart_from_submin(capsys):
         quote="USDT",
     )
     out = capsys.readouterr().out
-    assert "Sub-min divergence (1, cumulative 4.00 USDT)" in out
+    assert "Sub-min divergence (1, total 4.00 USDT)" in out
     assert "Reserve cap (10 bp) (1, held back 5.00 USDT)" in out
     assert "CAP  BUY  ETH/USDT" in out
     # The cap entry must not be counted or listed as sub-min drift.
