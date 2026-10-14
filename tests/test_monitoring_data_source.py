@@ -340,24 +340,23 @@ def _live_entry(cycle_id: str, skipped_drift: float) -> dict:
     return entry
 
 
-def test_cumulative_skipped_drift_counts_live_cycles_only(tmp_path):
-    """Dry-run skips are a plan, not divergence — they must not accumulate.
-
-    The 6-hourly heartbeat re-observes one unchanged portfolio, so summing
-    dry-runs grows the counter with observation time rather than trading.
-    """
+def test_live_skipped_drift_is_the_latest_live_reading_not_a_sum(tmp_path):
+    """Each cycle re-measures the whole residual, so summing live cycles
+    re-counts one unchanged gap daily (52 × ~8 USDT read 370 on a 155 USDT
+    book). Dry-runs plan, they refuse nothing — excluded too."""
     journal = tmp_path / "j.jsonl"
     _write_journal(journal, [
+        _live_entry("live1", skipped_drift=8.0),
+        _live_entry("live2", skipped_drift=7.5),
         _cycle_entry("dry1", skipped_drift=5.0),
-        _cycle_entry("dry2", skipped_drift=2.5),
-        _live_entry("live1", skipped_drift=1.25),
         _cycle_entry("failed", outcome="failed"),
     ])
     reader = JournalReader(journal)
-    assert reader.cumulative_skipped_drift() == 1.25
+    assert reader.live_skipped_drift() == 7.5
+    assert reader.latest_placed_live_cycle()["cycle_id"] == "live2"
 
 
-def test_cumulative_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
+def test_live_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
     """The mainnet observation journal shape: no live cron has run yet."""
     journal = tmp_path / "j.jsonl"
     _write_journal(journal, [
@@ -365,19 +364,8 @@ def test_cumulative_skipped_drift_dry_run_only_journal_is_zero(tmp_path):
         _cycle_entry("dry2", skipped_drift=0.05),
     ])
     reader = JournalReader(journal)
-    assert reader.cumulative_skipped_drift() == 0.0
-    assert reader.live_cycle_count() == 0
-
-
-def test_cumulative_skipped_drift_raw_sum_available(tmp_path):
-    """``live_only=False`` keeps the old all-cycle total for diagnostics."""
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [
-        _cycle_entry("dry1", skipped_drift=5.0),
-        _live_entry("live1", skipped_drift=2.5),
-    ])
-    reader = JournalReader(journal)
-    assert reader.cumulative_skipped_drift(live_only=False) == 7.5
+    assert reader.live_skipped_drift() == 0.0
+    assert reader.latest_placed_live_cycle() is None
 
 
 def test_latest_skipped_drift_is_a_point_reading(tmp_path):
@@ -395,18 +383,22 @@ def test_latest_skipped_drift_is_a_point_reading(tmp_path):
 def test_latest_skipped_drift_empty_journal(tmp_path):
     reader = JournalReader(tmp_path / "missing.jsonl")
     assert reader.latest_skipped_drift() == 0.0
-    assert reader.live_cycle_count() == 0
+    assert reader.live_skipped_drift() == 0.0
+    assert reader.latest_placed_live_cycle() is None
 
 
-def test_live_cycle_count_counts_only_live(tmp_path):
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [
-        _cycle_entry("dry1"),
-        _live_entry("live1", skipped_drift=0.0),
-        _live_entry("live2", skipped_drift=0.0),
-    ])
-    reader = JournalReader(journal)
-    assert reader.live_cycle_count() == 2
+def test_skipped_drift_pct():
+    from trade_lab.monitoring.data_source import skipped_drift_pct
+
+    assert skipped_drift_pct(
+        {"equity_usd": 155.0, "total_skipped_quote_drift": 7.75}) == 5.0
+    assert skipped_drift_pct(
+        {"equity_usd": 155.0, "total_skipped_quote_drift": None}) == 0.0
+    # Unknown equity must not read as "no drift".
+    for equity in (None, 0.0, -1.0, "abc", float("nan")):
+        assert skipped_drift_pct(
+            {"equity_usd": equity, "total_skipped_quote_drift": 1.0}) is None
+    assert skipped_drift_pct(None) is None
 
 
 # ---------------------------------------------------------------------------

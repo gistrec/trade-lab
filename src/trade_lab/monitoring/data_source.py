@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -39,6 +40,9 @@ KNOWN_SCHEMA_VERSIONS = frozenset({1, 2})
 # equals the number decided on.
 STALE_MULTIPLIER = 1.5
 DOWN_MULTIPLIER = 10.0
+# Warn bar for the latest live cycle's sub-min residual; the netdata
+# trade_lab_mainnet_skipped_drift alarm uses the same number.
+SKIPPED_DRIFT_WARN_PCT = 10.0
 
 
 class Staleness(str, Enum):
@@ -338,8 +342,7 @@ def unfillable_drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
     sent. Zero on a healthy cycle; non-zero means the live portfolio just
     diverged from the backtest by that much.
 
-    Live-only for the same reason the cumulative counter is: a dry-run
-    refuses nothing, it merely plans.
+    Live-only: a dry-run refuses nothing, it merely plans.
     """
     out: list[tuple[datetime, float]] = []
     for c in cycles:
@@ -350,6 +353,20 @@ def unfillable_drift_series(cycles: list[dict]) -> list[tuple[datetime, float]]:
             continue
         out.append((dt, float(c.get("total_skipped_quote_drift") or 0.0)))
     return out
+
+
+def skipped_drift_pct(cycle: Optional[dict]) -> Optional[float]:
+    """The cycle's skipped notional as % of its equity; None if unknown."""
+    if not cycle:
+        return None
+    try:
+        equity = float(cycle.get("equity_usd"))
+        drift = float(cycle.get("total_skipped_quote_drift") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(equity) or equity <= 0 or not math.isfinite(drift):
+        return None
+    return 100.0 * drift / equity
 
 
 @dataclass
@@ -593,49 +610,36 @@ class JournalReader:
             return Staleness.STALE
         return Staleness.DOWN
 
-    def cumulative_skipped_drift(self, live_only: bool = True) -> float:
-        """Sum of ``total_skipped_quote_drift`` across cycles.
+    def latest_placed_live_cycle(self) -> Optional[dict]:
+        """Most recent cycle that ran the placement path, or None.
 
-        **Live cycles only by default.** Drift is the notional we *failed to
-        send* — it measures how far the live portfolio has wandered from the
-        backtest because sub-minimum rebalances were absorbed. A dry-run
-        sends nothing by construction, so its skipped deltas are not
-        divergence: they are a plan that was never meant to execute.
-
-        Summing dry-runs double-counts badly. The 6-hourly heartbeat re-reads
-        the same unchanged portfolio four times a day and re-records the same
-        skips, so the total grows linearly with *observation time* rather
-        than with trading activity. On the mainnet observation journal this
-        produced a "drift" of 8.98 USDT against a 0.06 USDT portfolio — 150×
-        the entire position — which is not a quantity in dollars at all.
-
-        Pass ``live_only=False`` for the raw all-cycle sum (diagnostics).
+        Placed-orders semantics (:func:`is_live_cycle`), unlike
+        :meth:`latest_live_cycle`: an attempt that raised before planning
+        carries no skipped-delta reading.
         """
         self._refresh_if_changed()
-        return sum(
-            float(c.get("total_skipped_quote_drift") or 0.0)
-            for c in self._cache
-            if not live_only or is_live_cycle(c)
-        )
+        for c in reversed(self._cache):
+            if is_live_cycle(c):
+                return c
+        return None
 
-    def live_cycle_count(self) -> int:
-        """How many cycles in the journal placed real orders.
+    def live_skipped_drift(self) -> float:
+        """``total_skipped_quote_drift`` of the latest live cycle, or 0.0.
 
-        Denominator for :meth:`cumulative_skipped_drift` — quoting the
-        all-cycle count next to a live-only sum would misstate the base
-        (a dry-run-dominated journal has many cycles and few live ones).
+        A point reading, never a sum: every cycle re-measures the whole
+        sub-min residual against target, so one unchanged gap is re-recorded
+        daily and a sum grows with the calendar, not with trading (52 live
+        cycles × ~8 USDT read 370 USDT on a 155 USDT book). Dry-runs are
+        excluded — they plan, they refuse nothing.
         """
-        self._refresh_if_changed()
-        return sum(1 for c in self._cache if is_live_cycle(c))
+        c = self.latest_placed_live_cycle()
+        return float(c.get("total_skipped_quote_drift") or 0.0) if c else 0.0
 
     def latest_skipped_drift(self) -> float:
         """``total_skipped_quote_drift`` of the most recent cycle, or 0.0.
 
-        The current-state counterpart to :meth:`cumulative_skipped_drift`:
-        on a dry-run-only journal the cumulative (live) figure is 0 by
-        definition, but the latest cycle's skips still say something useful
-        — namely that the *plan* cannot clear the exchange minima right now.
-        A point reading, so re-observing it does not inflate it.
+        Any cycle type: on a dry-run-only journal it still says the *plan*
+        cannot clear the exchange minima right now.
         """
         self._refresh_if_changed()
         if not self._cache:

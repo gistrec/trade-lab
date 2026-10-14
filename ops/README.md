@@ -135,7 +135,7 @@ scraper turns every series into a time-series chart:
 | `tradelab_cycle_duration_ms{quantile="0.5"\|"0.95"}` / `_max` | gauge | recent cycle duration (last 200) |
 | `tradelab_last_cycle_duration_ms` | gauge | duration of the newest cycle only (latency alarm input) |
 | `tradelab_open_order_incidents` | gauge | unresolved executed orders after cross-cycle resolution by `client_order_id` |
-| `tradelab_cumulative_skipped_drift_usd` | gauge | cumulative quote drift skipped |
+| `tradelab_skipped_drift_pct` | gauge | sub-min notional the latest live cycle could not place, % of equity |
 | `tradelab_equity_usd` | gauge | latest paper equity from a successful cycle |
 | `tradelab_last_signal_ladder_value` / `tradelab_sma_gate_open` | gauge | latest signal state |
 
@@ -160,10 +160,10 @@ cycle), and `*_journal_read_error` (journal unreadable)
 exist for both jobs (`trade_lab_*` on `prometheus.trade_lab.<metric>`
 contexts, `trade_lab_mainnet_*` on `prometheus.trade_lab_mainnet.<metric>`).
 Mainnet additionally gets three warn alarms on the real-money book:
-`trade_lab_mainnet_skipped_drift` (cumulative skipped quote drift > 5 USDT,
-~5% of the live book), `trade_lab_mainnet_equity_drop` (equity down >10%
-from its 2-day max — `tradelab_equity_usd` only updates on successful daily
-cycles, hence the wide baseline window), and `trade_lab_mainnet_equity_floor`
+`trade_lab_mainnet_skipped_drift` (latest live cycle left > 10% of equity
+unplaceable below exchange minimums), `trade_lab_mainnet_equity_drop`
+(equity down >10% from its 2-day max — `tradelab_equity_usd` only updates
+on successful daily cycles, hence the wide baseline window), and `trade_lab_mainnet_equity_floor`
 (equity < 80 USDT absolute — approaching the ~70 USDT capital floor where the
 ladder half-step breaks min-notional; see execution README § Capital floor).
 

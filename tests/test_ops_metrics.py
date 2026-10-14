@@ -337,3 +337,26 @@ def test_metrics_endpoint_end_to_end(tmp_path):
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_skipped_drift_gauge_is_the_latest_live_point_reading(tmp_path):
+    """Summing per-cycle residuals re-counts one unchanged gap every day —
+    the alarm then fires forever on calendar time, not on the book."""
+    entries = []
+    for i, drift in enumerate((8.0, 8.0, 8.0, 7.75)):
+        e = _entry(ended_at=NOW - timedelta(days=4 - i), live=True,
+                   cycle_id=f"live{i}", equity=155.0)
+        e["total_skipped_quote_drift"] = drift
+        entries.append(e)
+    dry = _entry(ended_at=NOW, live=False, cycle_id="dry", equity=155.0)
+    dry["total_skipped_quote_drift"] = 50.0     # a plan, not a refusal
+    entries.append(dry)
+    m = _parse(metrics.render_metrics(_journal(tmp_path, entries), NOW))
+    assert m["tradelab_skipped_drift_pct"] == 5.0
+    assert "tradelab_cumulative_skipped_drift_usd" not in m
+
+
+def test_skipped_drift_gauge_without_live_cycles_is_zero(tmp_path):
+    reader = _journal(tmp_path, [_entry(ended_at=NOW, live=False)])
+    assert _parse(metrics.render_metrics(reader, NOW))[
+        "tradelab_skipped_drift_pct"] == 0.0

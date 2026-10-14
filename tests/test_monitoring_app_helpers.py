@@ -1064,11 +1064,11 @@ def test_render_portfolio_survives_non_dict_context(monkeypatch):
         def latest_cycle(self):
             return cycle
 
-        def cumulative_skipped_drift(self, live_only=True):
-            return 0.0
+        def latest_placed_live_cycle(self):
+            return cycle
 
-        def live_cycle_count(self):
-            return 0
+        def live_skipped_drift(self):
+            return 0.0
 
         def latest_skipped_drift(self):
             return 0.0
@@ -1801,8 +1801,8 @@ def test_sma_stall_survives_truthy_non_dict_context():
 def test_submin_notice_does_not_claim_no_live_cron_when_live_cycles_exist(
     tmp_path, monkeypatch,
 ):
-    """Journal with real live cycles that skipped nothing (cumulative
-    drift 0) plus a latest plan carrying sub-min drift. The notice used
+    """Journal with real live cycles that skipped nothing (live drift 0)
+    plus a latest plan carrying sub-min drift. The notice used
     to gate on the drift SUM, so it announced 'no live order cron has run
     yet' on a page whose own journal shows filled orders."""
     import json
@@ -1855,7 +1855,7 @@ def test_submin_notice_does_not_claim_no_live_cron_when_live_cycles_exist(
     submin = [i for i in infos if "below the exchange minimum notional" in i]
     assert len(submin) == 1, infos
     assert "no live order cron has run yet" not in submin[0], submin[0]
-    assert "cumulative skipped drift across live cycles" in submin[0]
+    assert "the latest live cycle skipped $0.00" in submin[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1929,7 +1929,7 @@ def test_submin_notice_counts_live_ATTEMPTS_not_placed_orders(
     tmp_path, monkeypatch,
 ):
     """A live cycle that raised before placing writes orders_executed=None,
-    so live_cycle_count() stays 0. Telling the operator "the cron never
+    so latest_placed_live_cycle() stays None. Telling the operator "the cron never
     ran" is exactly wrong when their cron ran and failed."""
     import json
     import pytest as _pytest
