@@ -48,7 +48,9 @@ from trade_lab.monitoring.data_source import (
     as_float, cycle_orders_executed, duration_series,
     duration_stats, equity_series, first_live_cycle_time, is_live_attempt,
     largest_inter_cycle_gap, open_order_incidents, parse_iso,
-    recent_incidents, TradeEvent, trade_events, unfillable_drift_series,
+    recent_incidents, SKIPPED_DRIFT_WARN_PCT, skipped_drift_pct, TradeEvent,
+    trade_events,
+    unfillable_drift_series,
     unresolved_order_incidents,
 )
 from trade_lab.uikit import render_tab_safely
@@ -486,10 +488,11 @@ def _render_status(reader: JournalReader) -> None:
 
     # Below the incident blocks the section reads in ascending severity:
     # blue context notes before yellow warnings.
-    # Live-only: a dry-run skips nothing it meant to send, so counting its
-    # sub-min deltas would grow this number with observation time rather
-    # than with trading. The dry-run case gets a point reading instead.
-    drift = reader.cumulative_skipped_drift()
+    # Point reading of the latest live cycle: a dry-run skips nothing it
+    # meant to send, and summing live cycles re-counts one unchanged gap
+    # every day.
+    live_cycle = reader.latest_live_measurement()
+    drift = reader.live_skipped_drift()
     if drift <= 0:
         planned_drift = reader.latest_skipped_drift()
         if planned_drift > 0:
@@ -498,18 +501,17 @@ def _render_status(reader: JournalReader) -> None:
             # leave the sum at zero, and on mainnet that made the page
             # deny its own trading.
             #
-            # ATTEMPT-aware, not live_cycle_count(): that counts rows with
-            # placed orders, so a live cycle that raised before placing
-            # leaves it at zero — and "the cron never ran" is exactly the
-            # wrong thing to tell an operator whose cron ran and failed.
+            # ATTEMPT-aware, not latest_live_measurement(): a live cycle
+            # that raised before placing is invisible to it — and "the
+            # cron never ran" is exactly the wrong thing to tell an
+            # operator whose cron ran and failed.
             never_traded = reader.latest_live_cycle() is None
             tail = (
                 "no live order cron has run yet, so nothing was skipped "
                 "in execution."
                 if never_traded else
                 "it describes the latest cycle's plan, not the executed "
-                "orders — cumulative skipped drift across live cycles is "
-                "still $0.00."
+                "orders — the latest live cycle skipped $0.00."
             )
             st.info(
                 f"Latest cycle could not place ${planned_drift:,.2f} of its "
@@ -528,11 +530,18 @@ def _render_status(reader: JournalReader) -> None:
         )
 
     if drift > 0:
-        st.warning(
-            f"Cumulative skipped-order drift: ${drift:,.2f} across "
-            f"{reader.live_cycle_count()} live cycles. Sub-min divergence is "
-            f"normal on tiny balances; investigate if it grows steadily."
+        pct = skipped_drift_pct(live_cycle)
+        share = f" ({pct:.1f}% of equity)" if pct is not None else ""
+        text = (
+            f"Latest live cycle could not place ${drift:,.2f}{share} — "
+            f"deltas below the exchange minimum notional, the part of the "
+            f"backtest allocation this book cannot follow."
         )
+        # Same bar as the netdata trade_lab_mainnet_skipped_drift alarm.
+        if pct is None or pct > SKIPPED_DRIFT_WARN_PCT:
+            st.warning(text)
+        else:
+            st.info(text)
 
     _render_read_stats(stats, reader.path)
 
@@ -1467,17 +1476,18 @@ def _render_portfolio(reader: JournalReader) -> None:
             f"per-order status."
         )
 
-    cumulative = reader.cumulative_skipped_drift()
-    live_n = reader.live_cycle_count()
-    if live_n:
+    live_cycle = reader.latest_live_measurement()
+    if live_cycle is not None:
+        pct = skipped_drift_pct(live_cycle)
+        share = f" ({pct:.1f}% of equity)" if pct is not None else ""
         st.caption(
-            f"Cumulative skipped-order drift across {live_n} live cycles: "
-            f"{cumulative:,.2f} {quote}."
+            f"Skipped-order drift on the latest live cycle: "
+            f"{reader.live_skipped_drift():,.2f} {quote}{share}."
         )
     else:
         st.caption(
-            f"No live cycles yet — cumulative execution drift is 0.00 "
-            f"{quote}. Latest planning cycle left "
+            f"No successful live cycle yet — no execution drift "
+            f"reading. Latest planning cycle left "
             f"{reader.latest_skipped_drift():,.2f} {quote} unplaceable "
             f"(below exchange minima)."
         )

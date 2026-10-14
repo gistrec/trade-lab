@@ -21,6 +21,7 @@ from trade_lab.monitoring.data_source import (
     duration_stats,
     equity_series,
     parse_iso,
+    skipped_drift_pct,
     unresolved_order_incidents,
 )
 
@@ -168,9 +169,14 @@ def render_metrics(
         "unresolved executed orders after cross-cycle resolution by "
         "client_order_id (recent window)",
         [(None, len(unresolved_order_incidents(reader.cycles(_RECENT))))])
-    fam("tradelab_cumulative_skipped_drift_usd", "gauge",
-        "cumulative quote drift skipped across all cycles",
-        [(None, reader.cumulative_skipped_drift())])
+    # A point reading, not a sum: each cycle re-measures the whole residual.
+    # Omitted, not 0, without a reading: 0 would clear the alarm.
+    drift_pct = skipped_drift_pct(reader.latest_live_measurement())
+    if drift_pct is not None:
+        fam("tradelab_skipped_drift_pct", "gauge",
+            "sub-min notional the latest live cycle could not place, "
+            "% of equity",
+            [(None, drift_pct)])
 
     # --- db-mirror durability (per-environment mirror_status*.json) ------
     if isinstance(mirror_status, dict):
