@@ -11,7 +11,7 @@ ops/
   ecosystem.health.config.js    # pm2 entry for the health server
   netdata/
     go.d/httpcheck.conf.example # httpcheck jobs that probe the endpoints
-    health.d/trade_lab.conf     # alarm templates → botcrit (Telegram)
+    health.d/trade_lab_*.conf   # alarms on /metrics + host clock → botcrit
 ```
 
 ## Why a health server (and not just an exit code)
@@ -99,24 +99,12 @@ pm2 startOrReload ops/ecosystem.health.config.js
 
 ## Wire Netdata
 
-```bash
-sudo cp ops/netdata/go.d/httpcheck.conf.example /etc/netdata/go.d/httpcheck.conf   # merge if it exists
-sudo cp ops/netdata/health.d/trade_lab.conf     /etc/netdata/health.d/trade_lab.conf
-sudo netdatacli reload-health
-```
-
-**Prerequisite — re-scope the existing ClearTranscriptBot alarm first.**
-Its `cleartranscript_healthcheck` is a `template: on: httpcheck.status` with
-no chart-labels line, so it matches *every* httpcheck job; the moment the
-trade-lab jobs appear it also fires on them. Add one line to it:
-
-```
-chart labels: _collect_job=cleartranscript
-```
-
-The trade-lab alarms scope by `_collect_job` (verified present on this box's
-go.d httpcheck charts), so each attaches to exactly its own job. Then
-`sudo netdatacli reload-health`.
+The httpcheck jobs and their alarms (heartbeat, daily, dashboard → `botcrit`)
+live in the infra repo (`host_vars/russia-03.yml`,
+`files/netdata/health.d/trade-lab.conf`) with the fleet's other `/health`
+probes. This repo keeps only the alarms tied to code — `/metrics` series and
+the host clock below; infra copies them from the deployed checkout, so after a
+deploy that changes them re-run the infra netdata play.
 
 ## Metrics (Prometheus → Netdata)
 
