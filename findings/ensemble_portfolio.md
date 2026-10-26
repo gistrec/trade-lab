@@ -85,7 +85,7 @@ Sharpe +0.90). `tsmom_medium` is second (positive on 7/7, average
 * **Mean pairwise corr = +0.46.** Diversification "works" in the
   sense that this is below the 0.6 threshold the user asked us to
   check. But it's not low enough to be a "free lunch" — the
-  effective number of independent bets is closer to ~4-5 than 21.
+  effective number of independent bets is closer to ~2 than 21.
 * **Median pairwise corr = +0.44**, very close to the mean — the
   distribution is symmetric, not driven by a few outliers.
 * **26 of 210 pairs have corr > 0.6.** Most of those are
@@ -109,8 +109,8 @@ independent units — not 21. The portfolio Sharpe gain from N=2
 units of correlated noise is much smaller than the gain from N=21
 units of independent noise.
 
-Our result is consistent: portfolio Sharpe (+1.13) is below the
-weighted average of single-sleeve Sharpes (+0.76) only because the
+Our result is consistent: portfolio Sharpe (+1.13) is above the
+weighted average of single-sleeve Sharpes (+0.76), but the
 correlations dampen the diversification benefit. We see SOME
 benefit (1.13 > 0.76 unweighted average), just not enough to
 overcome the dilution of the best sleeve.
