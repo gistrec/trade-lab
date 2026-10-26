@@ -6,7 +6,7 @@ won't be biased the same way.
 
 ## Finding
 
-Four code paths in this repo (`engine.run_backtest`,
+Five code paths in this repo (`engine.run_backtest`,
 `compare._buy_and_hold_metrics`, `yearly._yearly_rows_for_buy_and_hold`,
 `yearly._yearly_row_for_strategy`, `walk_forward_v2._buy_and_hold_on_window`)
 computed buy-and-hold equity as
@@ -42,7 +42,7 @@ def buy_and_hold_with_costs(close, initial_capital, fee_rate, slippage_rate):
     return equity, total_return
 ```
 
-Applied uniformly in all four paths. The convention:
+Applied uniformly in all five paths. The convention:
 
 * B&H pays the same `fee + slippage` on bar 1 as a strategy entering an
   equal-sized long.
@@ -161,7 +161,7 @@ equity, total_return = buy_and_hold_with_costs(
     fee_rate=0.001, slippage_rate=0.0005,
 )
 
-# Expected: pay 1.5% × 0.0015 = 0.15% on $10k → start with $9985.
+# Expected: pay 0.10% fee + 0.05% slippage = 0.15% on $10k → start with $9985.
 assert np.isclose(equity.iloc[0], 9985.0)
 # End at close[-1] / close[0] × $9985 = 1.0 × $9985 = $9985.
 assert np.isclose(equity.iloc[-1], 9985.0)
