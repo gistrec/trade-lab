@@ -5,7 +5,7 @@
 A crypto research framework **and the live trading system that came out
 of it**. One strategy survived the validation stack and has been placing
 real orders on Binance mainnet since **2026-08-24**, with capped capital,
-under a daily cron — with a public read-only dashboard showing every
+under a daily cron, with a public read-only dashboard showing every
 cycle it runs: **[trade-lab.gistrec.cloud](https://trade-lab.gistrec.cloud/)**.
 
 The stack is built around **layered honesty**: IS Sharpe → OOS Sharpe →
@@ -48,15 +48,15 @@ What lives in this repo today:
   exchange, plus Coin Metrics community fetcher for historical market-cap
   and survivability data.
 - Long-only, vectorized backtests with **symmetric** fee + slippage costs
-  (B&H benchmark gets billed the same entry round as strategies — see
+  (B&H benchmark gets billed the same entry round as strategies; see
   `findings/buy_and_hold_cost_symmetry.md`).
 - Eight bundled long-only strategies including TSMOM, P/MA ratio ensemble,
-  Donchian trend, and SMA crossover — plus a `VolatilityTargetWrapper`
+  Donchian trend, and SMA crossover, plus a `VolatilityTargetWrapper`
   decorator that bolts vol-targeting onto any of them.
 - Cross-sectional momentum (`xsmom`) with a curated **point-in-time
   universe** that explicitly includes LUNA / FTT / UST / etc. so
   survivorship bias can't quietly inflate results.
-- **Walk-forward** runner with warmup-feed, optional purge gap, and
+- Walk-forward runner with warmup-feed, optional purge gap, and
   per-fold + concatenated-OOS Deflated Sharpe Ratio (Bailey & López de
   Prado 2014). `PROJECT_NUM_TRIALS = 500` is pinned in code with a census
   comment — it does not move retroactively. **Convention:** every DSR in
@@ -76,7 +76,7 @@ What lives in this repo today:
   ccxt, but deliberately **Binance-only at runtime**: `VERIFIED_EXCHANGES`
   gates `Broker.connect`, because the idempotency parameters are
   venue-specific and an unverified venue must not be reached by accident.
-  The exchange is the single source of truth — balances are never cached
+  The exchange is the single source of truth: balances are never cached
   across cycles.
 - A **read-only monitoring dashboard** (`src/trade_lab/monitoring/`) plus
   health endpoints and Prometheus metrics for alerting. It never writes,
@@ -95,15 +95,15 @@ scripts/install_runtime.sh .venv dev            # constrained install
 
 `scripts/install_runtime.sh` is the single tracked install procedure: it
 applies `constraints.txt`, so the versions you develop against are the
-versions CI tests and the server trades on. Every deployment path — the
-SSH helper, an ansible role, a hand-rebuilt box — goes through it.
+versions CI tests and the server trades on. Every deployment path (the
+SSH helper, an ansible role, a hand-rebuilt box) goes through it.
 
 Dependencies are declared with lower bounds only, so an unconstrained
 `pip install -e .` resolves whatever shipped that day. On 2026-08-30
 that had produced **three** simultaneous ccxt versions: one in the dev
 venv where tests ran, another on the box placing real orders, a third
 from a fresh resolve. Updating the pins is a deliberate commit that CI
-runs the suite against before any deploy — see the header of
+runs the suite against before any deploy; see the header of
 `constraints.txt` for the regeneration command.
 
 Copy `.env.example` to `.env` and tweak defaults if desired.
@@ -167,7 +167,7 @@ trade-lab backtest --strategy sma_cross --input data/binance_BTC_USDT_1h.parquet
 ```
 
 Restrict the backtest to a sub-window with `--start-date` and `--end-date`
-(both inclusive at the day level — `--end-date 2024-06-30` keeps every bar
+(both inclusive at the day level: `--end-date 2024-06-30` keeps every bar
 through `2024-06-30 23:59`). This is how you carve train vs test splits
 without refetching:
 
@@ -198,14 +198,14 @@ parameter sweep, no tuning per year. Bundled strategies:
 trade-lab yearly --symbol BTC/USDT --timeframe 1d --output-csv outputs/yearly.csv
 ```
 
-Real 9-year aggregate on BTC/USDT 1d — full table and commentary in
+Real 9-year aggregate on BTC/USDT 1d; full table and commentary in
 [docs/results/yearly_btc.md](docs/results/yearly_btc.md).
 
 ### Multi-asset validation
 
 `trade-lab multi-asset` runs the same fixed-parameter yearly validation
 across several symbols. The point is to test whether behaviour you saw
-on BTC generalizes — or whether you got lucky on one ticker.
+on BTC generalizes or whether you got lucky on one ticker.
 
 ```bash
 trade-lab multi-asset --symbols BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT \
@@ -261,7 +261,7 @@ trade-lab sweep \
 
 The console prints a sorted table (highest total return on top) and saves
 the full result with raw numeric values to the CSV. This is **research
-only** — picking "the best" parameters from a sweep is a notorious way to
+only**: picking "the best" parameters from a sweep is a notorious way to
 overfit. Use it to compare neighborhoods and to look for stable regions,
 not to choose live settings.
 
@@ -302,15 +302,15 @@ total return), context-aware warnings when the strategy underperforms
 buy & hold, has a worse drawdown than buy & hold, or trades too often,
 followed by five tabs:
 
-1. **Overview** — run summary + metrics CSV download.
-2. **Price & Trades** — Plotly price chart with buy / sell markers on
+1. Overview: run summary + metrics CSV download.
+2. Price & Trades: Plotly price chart with buy / sell markers on
    execution candles.
-3. **Equity** — strategy equity vs buy-and-hold + equity CSV download.
-4. **Drawdown** — underwater chart.
-5. **Trades** — trade list with a CSV download.
+3. Equity: strategy equity vs buy-and-hold + equity CSV download.
+4. Drawdown: underwater chart.
+5. Trades: trade list with a CSV download.
 
-The dashboard reuses the regular backtest engine, strategies, and metrics
-— there is no duplicate logic. Candles are cached by file path; the
+The dashboard reuses the regular backtest engine, strategies, and metrics;
+there is no duplicate logic. Candles are cached by file path; the
 backtest itself runs fresh on every interaction since parameters change
 too often to memoize safely. The dashboard is local-only by design: no
 auth, no execution, no live trading.
@@ -365,13 +365,13 @@ trade-lab backtest --strategy sma_cross --show-trades
 Markers are placed on the **execution candle** (the bar where the engine
 actually holds the position), not the signal candle. This matters for
 look-ahead checks: signal at bar `N` is shifted into a position at bar `N+1`,
-so the green ▲ should sit on the bar after the cross — never on the bar that
+so the green ▲ should sit on the bar after the cross, never on the bar that
 produced the cross itself. If you ever see a marker on a candle whose close
 *caused* the signal, that's the smell of look-ahead bias.
 
 Note: `Trade.entry_time` in the engine's result records the signal bar (the
 close where the decision was made); the marker derived from
-`execution_bars(positions)` records the bar after — they're intentionally
+`execution_bars(positions)` records the bar after. They're intentionally
 one bar apart.
 
 ### Exporting trades to CSV
@@ -405,8 +405,8 @@ entry_time,entry_price,exit_time,exit_price,gross_return_pct,net_return_pct,fees
 
 Open positions at the end of the window are **excluded** from the CSV (the
 CLI prints "excluded N open position(s)" so you know). For programmatic use
-that needs them, call `trades_to_dataframe(result, candles, include_open=True)`
-— that adds an `is_open` column.
+that needs them, call `trades_to_dataframe(result, candles, include_open=True)`,
+which adds an `is_open` column.
 
 ## Reading the output metrics
 
@@ -422,20 +422,20 @@ that needs them, call `trades_to_dataframe(result, candles, include_open=True)`
 | **Fees paid**         | Cumulative dollar fees paid across all rebalances. Slippage is *not* included here.                 |
 
 The **Buy & hold** block reports the same starting cash parked in the asset at
-the first bar and held to the last bar (no fees). It produces three figures —
-*final equity*, *total return*, and *max drawdown* — so you can see whether
+the first bar and held to the last bar (no fees). It produces three figures
+(*final equity*, *total return*, and *max drawdown*), so you can see whether
 the strategy actually beat just holding the asset, and how much of the peak
 equity it gave back relative to a passive position.
 
 The CLI also saves an equity curve plot under `outputs/` showing strategy and
 buy-and-hold equity on the same axes, with a strategy-only underwater panel
-underneath — useful for eyeballing whether outperformance is real or whether
+underneath, useful for eyeballing whether outperformance is real or whether
 the strategy is just along for the ride.
 
 ## Backtest assumptions
 
 - Long-only, single asset, no leverage.
-- Signals generated on bar `N` execute against bar `N+1` — signals are shifted
+- Signals generated on bar `N` execute against bar `N+1`: signals are shifted
   by one bar before computing returns, so a strategy cannot peek at the close
   it just observed.
 - Fees and slippage are charged on every change in exposure, proportional to
@@ -447,9 +447,9 @@ the strategy is just along for the ride.
 
 Every backtest carries two explicit per-side costs:
 
-- **Fee** (`--fee-rate`, default `0.001` = 0.1%) — what the exchange charges.
+- Fee (`--fee-rate`, default `0.001` = 0.1%): what the exchange charges.
   Charged on every buy and every sell.
-- **Slippage** (`--slippage`, default `0.0005` = 0.05%) — the gap between the
+- Slippage (`--slippage`, default `0.0005` = 0.05%): the gap between the
   close price and the price you actually trade at. Buys fill at
   `close * (1 + slippage_rate)` (you pay more), sells at
   `close * (1 - slippage_rate)` (you receive less).
@@ -470,23 +470,23 @@ trade is the floor for "real" profitability with the defaults.
 
 Exchanges typically charge two different fee tiers:
 
-- **Maker** fees apply when you *add* liquidity to the order book (limit
-  orders that rest before being filled). They're lower — sometimes zero or
+- Maker fees apply when you *add* liquidity to the order book (limit
+  orders that rest before being filled). They're lower, sometimes zero or
   even negative as a rebate.
-- **Taker** fees apply when you *remove* liquidity (market orders, or limit
+- Taker fees apply when you *remove* liquidity (market orders, or limit
   orders that match immediately). They're higher.
 
 trade-lab models *market* orders at the close of the execution bar (the
 simplest realistic model for a vectorized backtest). Market orders pay the
 **taker** fee, so set `--fee-rate` to the taker tier of your venue. Binance
-spot's standard taker fee is 0.10% at the time of writing — hence the default.
+spot's standard taker fee is 0.10% at the time of writing, hence the default.
 
 ### Why costs hit both entry and exit
 
 Even a single round-trip trade is two transactions. The exchange charges on
 each side; slippage hurts you on each side too. If you only charged costs on
 the entry (or only on the exit), the equity curve would look about half a
-percent more optimistic than reality per round-trip — enough to make a
+percent more optimistic than reality per round-trip, enough to make a
 marginal strategy look profitable when it isn't.
 
 ```bash
@@ -538,7 +538,7 @@ class BuyAndHold(Strategy):
 ```
 
 The engine handles look-ahead protection, fees, slippage, and trade
-extraction — your strategy only needs to express the target position.
+extraction; your strategy only needs to express the target position.
 
 ## Project layout
 
@@ -583,12 +583,12 @@ pytest
 ```
 
 ~1400 tests across the backtest engine, strategies, walk-forward, DSR,
-the execution path (mocked exchange — never the live API), the forward
+the execution path (mocked exchange, never the live API), the forward
 harness, and the monitoring layer. CI runs the suite on a **Python
 3.11 / 3.12 / 3.13 matrix** with `--cov-fail-under=70`, plus a `ruff`
 lint job.
 
-Execution tests include deliberately defensive stubs — fakes that omit
+Execution tests include deliberately defensive stubs: fakes that omit
 dangerous methods so an accidental live call raises immediately rather
 than reaching an exchange.
 
@@ -597,27 +597,27 @@ than reaching an exchange.
 Each bundled strategy has a dedicated doc with exact rules, defaults,
 example CLI invocations, and any per-strategy results worth pinning:
 
-- [`sma_cross`](docs/strategies/sma_cross.md) — simple fast-vs-slow
+- [`sma_cross`](docs/strategies/sma_cross.md): simple fast-vs-slow
   SMA crossover; the trend-following baseline.
-- [`regime_sma_cross`](docs/strategies/regime_sma_cross.md) — crossover
+- [`regime_sma_cross`](docs/strategies/regime_sma_cross.md): crossover
   gated by a long-term regime SMA.
-- [`regime_only`](docs/strategies/regime_only.md) — pure long-or-flat
+- [`regime_only`](docs/strategies/regime_only.md): pure long-or-flat
   regime filter, no crossover.
-- [`donchian_trend`](docs/strategies/donchian_trend.md) — Donchian
+- [`donchian_trend`](docs/strategies/donchian_trend.md): Donchian
   breakout ensemble + SMA filter + volatility targeting.
-- [`tsmom`](docs/strategies/tsmom.md) — multi-lookback time-series
+- [`tsmom`](docs/strategies/tsmom.md): multi-lookback time-series
   momentum (Moskowitz et al. 2012, Liu & Tsyvinski 2021).
-- [`pma_ratio`](docs/strategies/pma_ratio.md) — price-to-MA ratio
+- [`pma_ratio`](docs/strategies/pma_ratio.md): price-to-MA ratio
   ensemble (Detzel et al. 2021).
-- [`cross_sectional_momentum`](docs/strategies/cross_sectional_momentum.md)
-  — multi-asset top-N rotation (Liu, Tsyvinski, Wu 2022). Lives in
+- [`cross_sectional_momentum`](docs/strategies/cross_sectional_momentum.md):
+  multi-asset top-N rotation (Liu, Tsyvinski, Wu 2022). Lives in
   `backtest/cross_sectional.py` because it spans the panel.
-- [`rsi`](docs/strategies/rsi.md) — RSI mean reversion (contrast
+- [`rsi`](docs/strategies/rsi.md): RSI mean reversion (contrast
   baseline, not a recommendation).
 
 Plus a generic decorator:
 
-- `VolatilityTargetWrapper` — wraps any of the above with a
+- `VolatilityTargetWrapper`: wraps any of the above with a
   Moreira-Muir style `target_vol / realized_vol` position scaler.
   Use deliberately: see `findings/vol_targeting_regime_gate.md` for
   the per-asset Sharpe/Calmar tradeoffs (vol-targeting helps ETH and
@@ -628,10 +628,10 @@ For a side-by-side comparison of the trend strategies above on the
 BTC/ETH/BNB/SOL panel, see
 [Strategy comparison](docs/results/strategy_comparison.md).
 
-For the layered out-of-sample validation done after that comparison —
-PIT cross-sectional universe, walk-forward of priority-5 strategies,
+For the layered out-of-sample validation done after that comparison
+(PIT cross-sectional universe, walk-forward of priority-5 strategies,
 volatility-targeting cross-asset, Deflated Sharpe in walk-forward,
-and the buy-and-hold cost-symmetry audit — see the `docs/results/`
+and the buy-and-hold cost-symmetry audit), see the `docs/results/`
 and `findings/` directories:
 
 - [PIT XSMOM universe](docs/results/pit_universe.md) —
@@ -652,7 +652,7 @@ and `findings/` directories:
   best single sleeve (`pma_medium × BNB` at DSR 0.564). Diversification
   cuts max DD in half but does not lift statistical confidence.
 
-Adding a new strategy is a five-minute job — subclass `Strategy`,
+Adding a new strategy is a five-minute job: subclass `Strategy`,
 implement `generate_signals(candles)`, register the class in
 `STRATEGIES` in `src/trade_lab/cli.py`. See
 [Adding a new strategy](#adding-a-new-strategy) below.
@@ -691,20 +691,20 @@ two. Full statement: `RESULTS.md` and
 
 Completed in earlier rounds (see `docs/results/` and `findings/`):
 
-- Multi-asset portfolios and rebalancing — `backtest/ensemble.py` with
+- Multi-asset portfolios and rebalancing: `backtest/ensemble.py` with
   dynamic equal-weight + rebalance-on-universe-change costing.
-- Walk-forward + parameter optimization — `backtest/walk_forward_v2.py`
+- Walk-forward + parameter optimization: `backtest/walk_forward_v2.py`
   with per-fold DSR and concatenated-OOS DSR.
-- Survivorship-free cross-sectional universe — `data/universe.py` with
+- Survivorship-free cross-sectional universe: `data/universe.py` with
   Coin Metrics community fetcher and curated delisting registry.
-- Symmetric cost model for benchmarks — `engine.buy_and_hold_with_costs`.
-- Paper trading via a `Broker` interface — `execution/broker.py`, ccxt-backed,
+- Symmetric cost model for benchmarks: `engine.buy_and_hold_with_costs`.
+- Paper trading via a `Broker` interface: `execution/broker.py`, ccxt-backed,
   validated on Binance testnet.
 - Forward harness with a frozen-config gate, vintage store and look-ahead
-  detector — `paper_trading/`.
-- **Live execution** — `execution/live_cycle.py`, placing real orders on
+  detector: `paper_trading/`.
+- Live execution: `execution/live_cycle.py`, placing real orders on
   Binance mainnet daily since 2026-08-24 behind a three-flag gate.
-- Monitoring, health endpoints and alerting — `monitoring/`, `ops/`.
+- Monitoring, health endpoints and alerting: `monitoring/`, `ops/`.
 
 Open:
 
