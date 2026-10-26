@@ -193,11 +193,11 @@ near 0.42, a clear fail.
 * **Market impact at sub-$10k notional.** Per the validation plan,
   MIN_NOTIONAL / LOT_SIZE / partial fills are irrelevant at the
   project's $10k size budget and are not modeled.
-* **Full-sample Kraken Sharpe** is reported for completeness and is
-  not a go/no-go input. The verified window decides. Because the
-  Kraken tax is regime-independent (Δ −0.13 to −0.14 in every block
-  tested), the full-sample figures follow from the verified-window
-  result without re-running and were not recomputed separately.
+* **Full-sample Kraken Sharpe** comes from the same run (each
+  scenario is one full backtest, sliced into windows) and is reported
+  for completeness, not as a go/no-go input. The verified window
+  decides; the Kraken tax is regime-independent (Δ −0.13 to −0.14 in
+  every block tested), so the full sample adds nothing to the verdict.
 * **DSR.** DSR with `PROJECT_NUM_TRIALS = 500` is left to the final
   synthesis (`production_config_v1`) as a diagnostic on the
   venue-verified sample rather than the full-sample 0.770. The
