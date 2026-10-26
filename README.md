@@ -265,6 +265,24 @@ only** — picking "the best" parameters from a sweep is a notorious way to
 overfit. Use it to compare neighborhoods and to look for stable regions,
 not to choose live settings.
 
+### Other subcommands
+
+- `trade-lab compare`: subperiod comparison across strategies and assets.
+- `trade-lab xsmom`: cross-sectional momentum (top-N rotation) across an
+  asset universe.
+- `trade-lab db-mirror`: reconciles `data/journal` and `data/state` into
+  the MySQL mirror. It runs automatically after every cycle, so this is
+  the manual / recovery entry point.
+- `trade-lab db-restore`: rematerialises `data/journal` and `data/state`
+  from the MySQL mirror on a fresh host. Refuses to overwrite existing
+  files without `--force`.
+
+The `paper-*` subcommands (`paper-status`, `paper-dry-run`,
+`paper-place-test-order`, `paper-place-orders`) drive the live execution
+layer and are documented in
+[`src/trade_lab/execution/README.md`](src/trade_lab/execution/README.md).
+`trade-lab <subcommand> --help` lists the flags.
+
 ## Streamlit dashboard
 
 A local-only dashboard for poking at a single backtest visually:
@@ -275,7 +293,8 @@ streamlit run src/trade_lab/dashboard/app.py
 ```
 
 Sidebar controls: candle file path, strategy + parameters
-(`sma_cross` or `rsi`), initial cash / fee / slippage / position size,
+(`sma_cross`, `regime_sma_cross`, `regime_only`, `donchian_trend`,
+`tsmom`, `pma_ratio` or `rsi`), initial cash / fee / slippage / position size,
 and an optional date range.
 
 The main panel has metric cards at the top (with a "vs B&H" delta on
@@ -525,8 +544,9 @@ extraction — your strategy only needs to express the target position.
 
 ```
 src/trade_lab/
-  config.py             Environment-driven configuration + the pinned
-                        PRODUCTION_CONFIG and its canonical hash.
+  config/               runtime (environment-driven configuration) and
+                        production_config (the pinned PRODUCTION_CONFIG
+                        and its canonical hash).
   data/                 ccxt fetcher, parquet storage, Coin Metrics
                         community client, curated coin registry, PIT
                         universe builder.
@@ -551,7 +571,6 @@ src/trade_lab/
   monitoring/           Read-only Streamlit dashboard + data_source.
                         No writes, no exchange, no credentials.
   dashboard/            Local backtest inspector (research tool).
-  risk/                 Position sizing helpers.
   cli.py                argparse entry point.
 ops/                    pm2 ecosystems, health apps, netdata alarm
                         definitions, static assets.
